@@ -29,6 +29,7 @@
 - Health check через `session.send_ping()` на каждом сервере
 - `restart()`: stop → 1s → start; `stop()`: clean exit
 - `ref→target` маппинг: хеш-рефы (`e68`, `f5e17`) не маппятся, роль-локаторы (`textbox "Поиск"`) проходят как target
+- Circuit Breaker (`mcp_circuit`, 5 отказов/60s): при OPEN `call_tool` → `restart()` и возврат `"error: MCP circuit open"`; success/failure фиксируются по результату `session.call_tool`
 
 ### Граф знаний
 - `src/graph_engine.py` — SQLite + in-memory dicts
@@ -52,6 +53,9 @@
 - Подстановка param_slots: `_apply_approach()` заменяет `{product_name}` на spec_text
 - Семантические паттерны: intent + emoji в `format_steps()`
 - `format_steps()` показывает `url` для browser_navigate (первым приоритетом)
+- **LLM вызовы** идут через `_query_llm()` — обёртка над `llm_client.chat` с `llm_circuit` (3 отказа/30s)
+- **Pydantic-валидация**: `_result_to_schema()` валидирует финальный результат через `ExtractionResult`, наружу отдаёт `model_dump()`
+- **StuckDetector**: `record_action()` после каждого MCP-шага, при CRITICAL и `rounds_on_site > 5` — принудительный уход с сайта (BLOCKED не дублируется, обрабатывается captcha-логикой)
 
 ### Системный промпт
 - 15 правил
@@ -100,16 +104,21 @@ C:\Projects\Pricer_Vision\
 │   │   ├── feedback.py          #   Таблица pdf_corrections в pricer.db
 │   │   ├── review_dialog.py     #   QTableWidget редактирования
 │   │   └── runner.py            #   QThread оркестратор
-│   ├── agent_loop.py            # Основной цикл (3-веточный routing, format_steps, negative feedback)
+│   ├── agent_loop.py            # Основной цикл (3-веточный routing, format_steps, negative feedback, _query_llm, StuckDetector)
+│   ├── audit_logger.py          # Audit-лог JSONL (data/audit/session_*.jsonl)
 │   ├── config_loader.py         # Загрузчик config/settings.yaml
 │   ├── excel_writer.py
 │   ├── graph_engine.py          # SQLite + in-memory (inc кэш, unknown excluded)
 │   ├── _labels.py
-│   ├── llm_client.py            # HTTP клиент для LM Studio
-│   ├── mcp_agent_runner.py      # QThread обёртка
-│   ├── mcp_bridge.py            # MCP клиент (Playwright @playwright/mcp, ref→target)
+│   ├── llm_client.py            # HTTP клиент для LM Studio (+ retry с backoff из llm.retry)
+│   ├── mcp_agent_runner.py      # QThread обёртка (+ AuditLogger)
+│   ├── mcp_bridge.py            # MCP клиент (Playwright @playwright/mcp, ref→target, mcp_circuit)
 │   ├── memory_manager.py        # CRUD графа (+ intent, dedup, SOLD_AT, record_soldat filter)
+│   ├── models/                  # Pydantic-схемы (Фаза 1)
+│   │   └── schemas.py           #   ExtractionResult, AgentDecision, ExtractedPrice, ActionType
+│   ├── resilience.py            # CircuitBreaker (llm/mcp), retry_with_backoff (Фаза 1)
 │   ├── study_runner.py          # QThread обучения (50 раундов, get_hints, утверждение)
+│   ├── stuck_detector.py        # StuckDetector — зацикливание/блокировки (Фаза 1)
 │   ├── site_order_dialog.py
 │   ├── theme.py
 │   ├── toast.py
@@ -247,4 +256,22 @@ pdf_parser:
 ### Файлы
 - `src/study_runner.py` — `StudyRunner(QThread)`, 50 раундов, temperature=0.5
 - `gui/graph_assistant.py` — `StudyPage` (вкладка «Обучение»)
+
+## Стабильность ядра (Фаза 1 рефакторинга v2.0)
+
+Реализована на ветке `phase/1-core` (коммит `d9a9e7b`, тег `phase-1-done`).
+
+### Pydantic-валидация
+- `src/models/schemas.py` — `ExtractionResult` (контракт `process_row`), `AgentDecision`, `ExtractedPrice`, `ActionType`
+- `ExtractionResult` валидирует: `found=True` требует `price`, цена `> 0` и `<= 10_000_000`, `spec_text` не пустой
+- В `process_row` финальный результат проходит `_result_to_schema()` → `model_dump()` (контракт runner/ExcelWriter сохранён)
+- ⚠️ pydantic 2.13 НЕ запускает `field_validator` на значениях по умолчанию — используем `model_validator(mode="after")`
+
+### Circuit Breaker / Retry / StuckDetector / Audit
+- `src/resilience.py` — `CircuitBreaker` (синглтоны `llm_circuit` 3/30s, `mcp_circuit` 5/60s), `retry_with_backoff` (sync+async)
+- `src/stuck_detector.py` — детект зацикливания/блокировок (CRITICAL → force site switch при `rounds_on_site > 5`)
+- `src/audit_logger.py` — JSONL-лог в `data/audit/session_*.jsonl`, вызывается из `mcp_agent_runner.py`
+
+### Конфиг
+- `llm.retry` (`max_attempts`, `backoff_seconds`) в `settings.yaml` подключён к `llm_client.py`
 

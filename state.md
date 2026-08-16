@@ -796,3 +796,29 @@ C:\Projects\Pricer_Vision\
 - Изменённые: `src/agent_loop.py`, `src/mcp_bridge.py`, `src/mcp_agent_runner.py`, `src/llm_client.py`, `src/config_loader.py`, `requirements.txt`, `tests/test_agent_loop.py`.
 
 
+## 2026-08-16 — Handoff: переход к новой сессии (после Фазы 1)
+
+### Состояние проекта (актуальная точка)
+- Ветки: `main` (базовая), `refactor/v2.0` (от `main`), `phase/1-core` (**текущая**, Фаза 1 закоммичена).
+- Теги: `v1.0-pre-refactor` (базовая точка до рефакторинга), `phase-1-done` (Фаза 1 завершена), `v0.1.0` (старый).
+- Коммиты: `d9a9e7b` — Фаза 1; `a303207` — baseline; `b0151c7` — handoff baseline.
+- Рабочее дерево чистое, всё закоммичено.
+- Бэкап БД: `data/pricer_backup_20260816.db` (точка отката).
+
+### Регламент (обязательно к соблюдению в новой сессии)
+- **Коммит ТОЛЬКО после подтверждения пользователем** (прогон/тест/осмотр). По умолчанию коммиты и теги фаз не ставить без явного «да».
+- Ветки фаз: `phase/N-*` от `refactor/v2.0`. Теги: `phase-N-done`.
+- Откат: `git checkout main` / `git checkout v1.0-pre-refactor`; БД — из `data/pricer_backup_20260816.db`.
+- Ветка новой фазы создаётся от `phase/1-core` или `refactor/v2.0` (в зависимости от того, замержим ли Фазу 1 в `refactor/v2.0`).
+- **Прогоны товаров не выполняются** (решение пользователя) — критерий «25 товаров без крэша» пропущен, завершение фазы оцениваем по тестам и коду.
+
+### Фаза 1 — итог
+- 5/5 задач: Pydantic-валидация, StuckDetector, Circuit Breaker (MCP+LLM), Retry с backoff, Audit Logger.
+- **196 passed** (+55 новых тестов), 13 failed — предсуществующие (нет `pytest-asyncio` в venv, async-тесты mcp_bridge/pdf_parser). Регрессий нет.
+- Важная находка: pydantic 2.13 не запускает `field_validator` на значениях по умолчанию → `model_validator(mode="after")`.
+
+### Следующий шаг (Фаза 2)
+- **Фаза 2: Оптимизация агентного цикла под локальную LLM** (см. `chat-Pricer_Vision Project Analysis.md`, строки ~679+): минимизация запросов к LLM и объёма контекста, скорость +33%.
+- Рекомендация: сначала замержить `phase/1-core` → `refactor/v2.0` (или продолжить ветвление от неё), затем ветка `phase/2-*`.
+
+
