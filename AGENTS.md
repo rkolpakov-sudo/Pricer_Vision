@@ -32,6 +32,10 @@
   - `task_scheduler.py` — TaskScheduler: группировка товаров по сайтам, приоритизация батчей (Фаза 2).
   - `semantic_cache.py` — SemanticCache: Jaccard-кэш похожих товаров в `data/semantic_cache.json` (Фаза 2).
   - `adaptive_limits.py` — AdaptiveRoundManager: динамические лимиты раундов per-site (Фаза 2).
+  - `human_behavior.py` — HumanBehavior: человеческие клики/печать/скролл (Фаза 3).
+  - `rate_limiter.py` — DomainRateLimiter: per-domain RPM лимит перед browser_navigate (Фаза 3).
+  - `site_analyzer.py` — SiteAnalyzer: детекция SPA/SSR/антибота (Фаза 3).
+  - `captcha_detector.py` — CaptchaDetector: типы captcha + рекомендации, без авторешения (Фаза 3).
   - `mcp_bridge.py` — клиент Playwright MCP (`npx @playwright/mcp --browser chrome`), чтение пина версии из `config/settings.yaml → deps.playwright_mcp.version`, circuit breaker (`mcp_circuit`).
   - `graph_engine.py` + `memory_manager.py` — граф знаний (SQLite `data/pricer.db`, seed из `config/categories_and_sites.yaml`).
   - `llm_client.py` — HTTP-клиент к локальному LLM (LM Studio/Ollama/llama.cpp), retry с backoff из `llm.retry`, per-call `temperature`/`max_tokens`.

@@ -889,3 +889,75 @@ C:\Projects\Pricer_Vision\
 - Ветка: `phase/3-antidetect` (от `phase/2-llm` или `refactor/v2.0` после слияния).
 
 
+## 2026-08-16 — Фаза 3: Антидетект и браузерная автоматизация
+
+Реализована на ветке `phase/3-antidetect` (от `refactor/v2.0`).
+
+### 3.1 stealth.js — патчи 13–17
+- `config/stealth.js` расширен с 12 до 17 патчей (добавлены в конец, не перезаписывая):
+  - 13 — Canvas Fingerprint Randomization (шум ±3 на toDataURL/toBlob через getImageData)
+  - 14 — AudioContext (шум в getFloatFrequencyData анализатора)
+  - 15 — WebRTC Leak Prevention (фильтр srflx/host кандидатов в addIceCandidate)
+  - 16 — Font Enumeration (ограничение доступных шрифтов до 6)
+  - 17 — WebGL Vendor/Renderer Masking (0x9245/0x9246 → Intel UHD 620)
+- `node --check` проходит.
+
+### 3.2 HumanBehavior (`src/human_behavior.py` — новый)
+- `human_click` — случайная точка внутри элемента (не центр) + эмуляция mousemove через `browser_evaluate` (`browser_mouse_move` не существует в @playwright/mcp), fallback на обычный клик при ошибке bbox.
+- `human_type` — посимвольная печать с переменной скоростью + «раздумья».
+- `human_scroll` — скролл рывками (3–7 шагов) + финальная пауза.
+- `random_pause`, `get_random_viewport`.
+
+### 3.3 DomainRateLimiter (`src/rate_limiter.py` — новый)
+- Per-domain min_interval (1.5s) + RPM-лимит (20/мин), окно 60s.
+- `wait_if_needed(url)` вызывается перед `browser_navigate` в `agent_loop.py`.
+- Настройки: `config/settings.yaml → antidetect.rate_limit_min_interval/rate_limit_max_requests_per_minute`, getter `get_antidetect_config` в `config_loader.py`.
+
+### 3.4 SiteAnalyzer (`src/site_analyzer.py` — новый)
+- Определяет SPA (window.__NUXT__/__NEXT_DATA__/ng-version/data-reactroot/__vue__/root/app), антибот (cloudflare/recaptcha/hcaptcha/datadome/perimeterx/ddos-guard...), DOM-статистику.
+- ⚠️ Корректировка: глобальные индикаторы проверяются через `typeof`, а НЕ через `document.querySelector` (window.__NUXT__ — невалидный CSS-селектор).
+- Профиль кэшируется в памяти по домену (`self.profiles`), стратегия: CAUTIOUS/SPA_AWARE/STANDARD.
+
+### 3.5 CaptchaDetector (`src/captcha_detector.py` — новый)
+- Типы: NONE/RECAPTCHA_V2/V3/HCAPTCHA/CLOUDFLARE/IMAGE/UNKNOWN, рекомендации (SWITCH_SITE/WAIT_60S_AND_RETRY/ASK_USER...).
+- ⚠️ Корректировка: CSS-селекторы не встречаются дословно в HTML-тексте — детекция по характерным подстрокам (`g-recaptcha`, `cf-turnstile`, `captcha.png`...).
+- Без авторешения — только детект + рекомендация (по ТЗ v2.0).
+- Интеграция в `agent_loop.py`: captcha-ветка теперь логирует тип + рекомендацию и сообщает их LLM.
+
+### Тесты
+- Новые: `tests/test_captcha_detector.py` (12), `tests/test_rate_limiter.py` (6), `tests/test_human_behavior.py` (6), `tests/test_site_analyzer.py` (10).
+- **281 passed** (было 247, +34 новых). Регрессий нет. `node --check config/stealth.js` — OK.
+
+### Изменённые/новые файлы
+- Новые: `src/human_behavior.py`, `src/rate_limiter.py`, `src/site_analyzer.py`, `src/captcha_detector.py`.
+- Изменённые: `config/stealth.js`, `src/agent_loop.py`, `src/config_loader.py`, `config/settings.yaml`.
+
+
+## 2026-08-16 — Handoff: переход к новой сессии (после Фазы 3)
+
+### Состояние проекта (актуальная точка)
+- Ветки: `main` (базовая), `refactor/v2.0` (Фазы 1+2 слиты), `phase/1-core`, `phase/2-llm`, `phase/3-antidetect` (**текущая**, Фаза 3 закоммичена).
+- Теги: `v1.0-pre-refactor`, `phase-1-done`, `phase-2-done`, `v0.1.0` (старый). `phase-3-done` НЕ установлен (ждёт подтверждения).
+- Коммиты Фазы 3 (на `phase/3-antidetect`): от `41a45c1` (merge Фаз 1+2 в `refactor/v2.0`).
+- Рабочее дерево чистое, всё закоммичено.
+- Бэкап БД: `data/pricer_backup_20260816.db` (точка отката).
+
+### Регламент (обязательно к соблюдению в новой сессии)
+- **Коммит и тег фаз ТОЛЬКО после подтверждения пользователем.** По умолчанию коммиты и теги фаз не ставить без явного «да».
+- Ветки фаз: `phase/N-*` от `refactor/v2.0` (или от последней завершённой фазы). Теги: `phase-N-done`.
+- Откат: `git checkout main` / `git checkout v1.0-pre-refactor`; БД — из `data/pricer_backup_20260816.db`.
+- **Прогоны товаров не выполняются** — фаза считается завершённой по тестам (`python -m pytest -q`) и ревью кода.
+- Перед изменениями читать `readme.md`, `state.md`, `AGENTS.md`.
+- После действий — обновлять `state.md`.
+
+### Фаза 3 — итог
+- 5/5 задач: stealth.js 17 патчей, HumanBehavior, DomainRateLimiter, SiteAnalyzer, CaptchaDetector.
+- **281 passed** (+34 новых), 0 failed. `node --check config/stealth.js` — OK.
+- Следующий шаг: пользователь проверяет работу → подтверждение → тег `phase-3-done` → слияние в `refactor/v2.0`.
+
+### Следующий шаг (Фаза 4)
+- **Фаза 4: Эволюция графа знаний** (см. `chat-Pricer_Vision Project Analysis.md`, строки ~1560+): версионирование подходов, effectiveness scoring, TTL/депрекация знаний, пере-валидация устаревших подходов.
+- ⚠️ Из «Сверки»: таблиц `revalidation_queue` и полей `success_rate`/`status`/`total_successes` в БД НЕТ — эффективность считать на лету из `success_count/(success_count+failures_count)`; `get_effective_approaches` использовать через существующий `memory_manager.get_approaches_by_site`.
+- Ветка: `phase/4-graph` (от `phase/3-antidetect` или `refactor/v2.0` после слияния).
+
+

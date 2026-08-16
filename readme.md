@@ -122,6 +122,10 @@ C:\Projects\Pricer_Vision\
 │   ├── study_runner.py          # QThread обучения (50 раундов, get_hints, утверждение)
 │   ├── stuck_detector.py        # StuckDetector — зацикливание/блокировки (Фаза 1)
 │   ├── task_scheduler.py        # TaskScheduler — группировка товаров по сайтам (Фаза 2)
+│   ├── human_behavior.py        # HumanBehavior — человеческие клики/печать/скролл (Фаза 3)
+│   ├── rate_limiter.py          # DomainRateLimiter — per-domain RPM лимит (Фаза 3)
+│   ├── site_analyzer.py         # SiteAnalyzer — детекция SPA/SSR/антибота (Фаза 3)
+│   ├── captcha_detector.py      # CaptchaDetector — типы captcha + рекомендации (Фаза 3)
 │   ├── site_order_dialog.py
 │   ├── theme.py
 │   ├── toast.py
@@ -303,5 +307,31 @@ pdf_parser:
 ### Контекстный бюджет
 - `_estimate_tokens()` (≈len/4), `_trim_messages_for_budget()` (бюджет 8000 токенов): сохраняет system + хвост от последнего user-сообщения, усекает старые tool/assistant.
 - Вызывается в `_query_llm()` перед каждым LLM-запросом.
+
+## Антидетект и браузерная автоматизация (Фаза 3 рефакторинга v2.0)
+
+Реализована на ветке `phase/3-antidetect` (от `refactor/v2.0`).
+
+### stealth.js (17 патчей)
+- Патчи 1–12 — базовые (webdriver, plugins, languages, hardware, chrome, permissions, WebGL, screen, connection, platform, mediaDevices, battery).
+- Патчи 13–17 — добавлены в Фазе 3: Canvas шум, AudioContext, WebRTC leak prevention, Font enumeration, WebGL vendor/renderer masking.
+
+### HumanBehavior (`src/human_behavior.py`)
+- `human_click` — клик в случайную точку элемента + эмуляция mousemove (через `browser_evaluate`; `browser_mouse_move` в @playwright/mcp нет).
+- `human_type` — посимвольная печать с переменной скоростью; `human_scroll` — рывками; `random_pause`; `get_random_viewport`.
+
+### DomainRateLimiter (`src/rate_limiter.py`)
+- Per-domain: min_interval + RPM-лимит; `wait_if_needed(url)` перед `browser_navigate` в `agent_loop.py`.
+- Настройки в `config/settings.yaml → antidetect`.
+
+### SiteAnalyzer (`src/site_analyzer.py`)
+- SPA-детекция: `typeof window.__NUXT__` и т.п. (глобальные проверки НЕ через querySelector — невалидные CSS).
+- Антибот: cloudflare/recaptcha/hcaptcha/datadome/perimeterx; DOM-статистика; стратегия CAUTIOUS/SPA_AWARE/STANDARD. Профиль кэшируется в памяти по домену.
+
+### CaptchaDetector (`src/captcha_detector.py`)
+- Типы: recaptcha_v2/v3, hcaptcha, cloudflare, image, unknown. Рекомендации: SWITCH_SITE/WAIT_60S_AND_RETRY/ASK_USER.
+- Детекция по подстрокам HTML (CSS-селекторы дословно в HTML не встречаются). Без авторешения.
+- Интеграция в captcha-ветку `agent_loop.py` (тип + рекомендация логируются и сообщаются LLM).
+
 
 
