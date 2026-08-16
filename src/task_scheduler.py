@@ -2,6 +2,8 @@ import logging
 from dataclasses import dataclass, field
 from typing import List
 
+from src.approach_relevance import approach_relevant
+
 logger = logging.getLogger("pricer.scheduler")
 
 
@@ -52,14 +54,36 @@ class TaskScheduler:
             logger.warning("classify_product_type failed: %s", e)
             product_type = "unknown"
         sites = self.mm.get_sites(product_type)
-        if sites:
-            best = max(
-                sites,
-                key=lambda s: (s.get("priority", 2) * 1.0
-                               - s.get("consecutive_failures", 0) * 0.5),
-            )
-            return best.get("id", "")
-        return "yandex.ru"
+        if not sites:
+            return "yandex.ru"
+
+        def _base_score(s):
+            return s.get("priority", 2) - s.get("consecutive_failures", 0) * 0.5
+
+        def _site_has_any_approach(site_id):
+            try:
+                return bool(self.mm.get_approaches_by_site(site_id))
+            except Exception:
+                return False
+
+        def _site_has_relevant_approach(site_id):
+            try:
+                for a in self.mm.get_site_approaches(product_type, site_id):
+                    if approach_relevant(a, spec_text):
+                        return True
+            except Exception:
+                pass
+            return False
+
+        # 1) сайты с релевантными подходами — лучший приоритет
+        relevant = [s for s in sites if _site_has_relevant_approach(s.get("id", ""))]
+        if relevant:
+            return max(relevant, key=_base_score).get("id", "")
+
+        # 2) иначе — сайты БЕЗ подходов (не загрязнены чужими подходами)
+        clean = [s for s in sites if not _site_has_any_approach(s.get("id", ""))]
+        candidates = clean or sites
+        return max(candidates, key=_base_score).get("id", "")
 
     def _get_site_profile(self, site_id: str) -> dict:
         site = self.mm.get_all_sites().get(site_id, {})

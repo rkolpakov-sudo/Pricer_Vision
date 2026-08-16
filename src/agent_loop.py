@@ -21,6 +21,7 @@ from src.resilience import llm_circuit
 from src.adaptive_limits import AdaptiveRoundManager
 from src.rate_limiter import DomainRateLimiter
 from src.captcha_detector import CaptchaDetector, CaptchaType
+from src.approach_relevance import approach_relevant
 
 logger = logging.getLogger("pricer.agent")
 
@@ -732,6 +733,10 @@ def _is_standard_reference(spec: str) -> bool:
 
 
 def _build_context(spec_text, product_type, approaches, confirmed_prices, sites, hints, product_data=None, site_guides=None, concepts=None, spec_meta=None):
+    # фильтр релевантности: подходы, обученные на ДРУГИХ товарах того же типа
+    # (например регуляторы скорости для воздуховодов), не показываются
+    extra = (spec_meta or {}).get("article", "")
+    approaches = [a for a in (approaches or []) if approach_relevant(a, spec_text, extra)]
     parts = [f"ТОВАР ДЛЯ ПОИСКА: {spec_text}"]
     if spec_meta:
         parts.append("")
@@ -847,6 +852,10 @@ def _execute_graph_tool(name: str, args: dict, engine, mm, spec_text: str = "") 
                 approaches = mm.get_all_approaches(pt) if pt else mm.get_all_approaches_flat()
             if not approaches:
                 return "Нет сохранённых подходов"
+            # релевантность текущему товару: чужие подходы того же типа не показываем
+            approaches = [a for a in approaches if approach_relevant(a, spec_text)]
+            if not approaches:
+                return "Нет подходов, релевантных текущему товару"
             lines = [f"Подходов: {len(approaches)}"]
             for a in approaches[:5]:
                 # адаптируем подход к текущему товару: устаревший хардкод-текст
