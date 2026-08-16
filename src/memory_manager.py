@@ -1,5 +1,6 @@
 import json
 import logging
+from datetime import datetime, timedelta
 from urllib.parse import urlparse
 
 logger = logging.getLogger("pricer.memory")
@@ -297,3 +298,94 @@ class MemoryManager:
 
     def delete_product_site(self, product_type_id: str, site_id: str) -> bool:
         return self._engine.delete_product_site(product_type_id, site_id)
+
+
+class ApproachVersioning:
+    """Управление версиями и эффективностью подходов (Фаза 4).
+
+    Надстройка над существующими update_approach_success/update_approach_failure.
+    success_rate вычисляется на лету из success_count/(success_count+failures_count) —
+    отдельной колонки в БД нет.
+    """
+
+    def __init__(self, engine, memory_manager):
+        self._engine = engine
+        self._mm = memory_manager
+
+    def update_effectiveness(self, approach_id: int, success: bool):
+        """Обновляет эффективность подхода после использования."""
+        if success:
+            self._mm.record_success(approach_id)
+        else:
+            self._mm.record_failure(approach_id)
+
+    def get_effective_approaches(self, site_id: str, limit: int = 5) -> list[dict]:
+        """Возвращает наиболее эффективные подходы для сайта, отсортированные по score.
+
+        score = success_rate * 0.7 + freshness * 0.3 (депрекейтнутые ×0.5).
+        В каждый возвращаемый подход добавляется поле success_rate.
+        """
+        approaches = self._mm.get_approaches_by_site(site_id)
+
+        def _score(a: dict) -> float:
+            ok = a.get("success_count", 0)
+            fail = a.get("failures_count", 0)
+            base = ok / max(ok + fail, 1)
+            if a.get("is_deprecated"):
+                base *= 0.5
+            freshness = 0.5
+            if a.get("last_success_date"):
+                try:
+                    days = (datetime.now() - datetime.fromisoformat(a["last_success_date"])).days
+                    freshness = max(0.1, 1.0 - days / 30.0)
+                except (ValueError, TypeError):
+                    freshness = 0.5
+            return base * 0.7 + freshness * 0.3
+
+        active = [a for a in approaches if not a.get("is_deprecated")]
+        active.sort(key=_score, reverse=True)
+        ranked = active[:limit]
+        for a in ranked:
+            ok = a.get("success_count", 0)
+            fail = a.get("failures_count", 0)
+            a["success_rate"] = ok / max(ok + fail, 1)
+        return ranked
+
+
+class HintManager:
+    """Управление хинтами с TTL (Фаза 4).
+
+    Надстройка над существующими save_hint/get_hints. TTL хранится в колонке
+    expires_at (добавлена миграцией в graph_engine._init_db).
+    """
+
+    DEFAULT_TTL_DAYS = 90
+
+    def __init__(self, engine, ttl_days: int = DEFAULT_TTL_DAYS):
+        self._engine = engine
+        self.ttl_days = ttl_days
+
+    def create_hint(self, product_type: str, site: str | None, text: str,
+                    priority: float = 0.5, ttl_days: int | None = None) -> int:
+        """Создаёт хинт с датой истечения expires_at = now + ttl_days."""
+        ttl = ttl_days or self.ttl_days
+        expires_at = (datetime.now() + timedelta(days=ttl)).isoformat()
+        return self._engine.save_hint(product_type, site, text, priority, expires_at=expires_at)
+
+    def get_active_hints(self, product_type: str, site: str | None = None) -> list[dict]:
+        """Возвращает непросроченные хинты (опционально фильтр по site)."""
+        hints = self._engine.get_hints(product_type)
+        now = datetime.now()
+        result = []
+        for h in hints:
+            exp = h.get("expires_at")
+            if exp and datetime.fromisoformat(exp) <= now:
+                continue
+            if site is not None and h.get("site_id") not in (None, "", site):
+                continue
+            result.append(h)
+        return result
+
+    def cleanup_expired(self) -> int:
+        """Удаляет просроченные хинты, возвращает число удалённых."""
+        return self._engine.delete_expired_hints()

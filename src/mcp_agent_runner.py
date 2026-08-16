@@ -12,6 +12,7 @@ from src.agent_loop import process_row
 from src.audit_logger import AuditLogger
 from src.task_scheduler import TaskScheduler
 from src.semantic_cache import SemanticCache
+from src.learning_loop import LearningLoop
 
 logger = logging.getLogger("pricer.runner")
 
@@ -54,6 +55,7 @@ class MCPAgentRunner(QThread):
         mm = MemoryManager(engine)
         audit = AuditLogger()
         semantic_cache = SemanticCache()
+        learning_loop = LearningLoop(engine, mm)
 
         yaml_path = "config/categories_and_sites.yaml"
         from pathlib import Path
@@ -82,7 +84,7 @@ class MCPAgentRunner(QThread):
         try:
             results = []
             total = len(self.specs)
-            scheduler = TaskScheduler(mm)
+            scheduler = TaskScheduler(mm, site_profiles=learning_loop.site_profiles)
             ordered = scheduler.ordered_specs(self.specs)
             original_index = {id(spec): i for i, spec in enumerate(self.specs)}
             last_health_check = datetime.now()
@@ -152,12 +154,19 @@ class MCPAgentRunner(QThread):
                 row_idx = original_index.get(id(spec), i)
                 self.row_done_signal.emit(row_idx, result)
 
-                if self._restart_bridge.is_set():
-                    new_headless = self._restart_bridge_value
-                    self._restart_bridge.clear()
-                    self._restart_bridge_value = None
-                    logger.info("Restarting bridge with headless=%s due to toggle", new_headless)
-                    await bridge.set_headless(new_headless)
+            if self._restart_bridge.is_set():
+                new_headless = self._restart_bridge_value
+                self._restart_bridge.clear()
+                self._restart_bridge_value = None
+                logger.info("Restarting bridge with headless=%s due to toggle", new_headless)
+                await bridge.set_headless(new_headless)
+
+            # Phase 4: Learning Loop — обновляем граф по итогам прогона
+            try:
+                learning_summary = learning_loop.consolidate_after_run(results)
+                logger.info("Learning loop: %s", learning_summary)
+            except Exception as e:
+                logger.warning("Learning loop consolidation failed: %s", e)
 
             total = len(results)
             found = sum(1 for r in results if r.get("price") is not None)

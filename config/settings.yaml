@@ -46,6 +46,9 @@ ui:
 antidetect:
   rate_limit_min_interval: 1.5
   rate_limit_max_requests_per_minute: 20
+learning:
+  hint_ttl_days: 90
+  site_profiles_path: data/site_profiles.json
 vision_search:
   enabled: true
   max_vision_attempts: 2

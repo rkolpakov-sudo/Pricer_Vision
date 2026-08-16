@@ -961,3 +961,47 @@ C:\Projects\Pricer_Vision\
 - Ветка: `phase/4-graph` (от `phase/3-antidetect` или `refactor/v2.0` после слияния).
 
 
+## 2026-08-16 — Фаза 4: Эволюция графа знаний
+
+Реализована на ветке `phase/4-graph` (от `phase/3-antidetect`).
+
+### 4.1 Версионирование подходов и effectiveness scoring
+- Новые классы в `src/memory_manager.py`:
+  - `ApproachVersioning.update_effectiveness(approach_id, success)` — делегирует в существующие `update_approach_success/failure` (без дублирования счётчиков).
+  - `ApproachVersioning.get_effective_approaches(site_id, limit=5)` — сортировка активных подходов по `score = success_rate*0.7 + freshness*0.3` (депрекейтнутые ×0.5); `success_rate` считается на лету (`success_count/(success_count+failures_count)`, колонки в БД нет) и добавляется в каждый подход.
+
+### 4.2 TTL для хинтов
+- `graph_engine.py`: колонка `hints.expires_at` в SCHEMA_SQL + миграция `ALTER TABLE hints ADD COLUMN expires_at` в `_init_db` (как для `consecutive_failures`).
+- `save_hint(..., expires_at=None)` — сохраняет TTL; кэш `_hints_by_product` включает `expires_at` (подхватывается через `SELECT *` в `_load_indexes`).
+- Новый `graph_engine.delete_expired_hints()` → `int` (число удалённых), инвалидирует кэш (`_built = False`).
+- Новый `HintManager` в `memory_manager.py`: `create_hint(..., ttl_days=90)`, `get_active_hints(product_type, site=None)` (фильтр просроченных + опционально по сайту), `cleanup_expired()`.
+
+### 4.3 LearningLoop
+- Новый `src/learning_loop.py`: `LearningLoop(graph_engine, memory_manager)`.
+  - `consolidate_after_run(results)` — вызывается из `MCPAgentRunner._run_async` после цикла строк (до `done_signal`); возвращает `{approaches_updated, new_patterns, new_hints}`.
+  - `_update_approach_effectiveness` — агрегация (success/failure уже фиксируются внутри `process_row`, повторный вызов задвоил бы счётчики; срабатывает только если в результате есть `approach_id`).
+  - `_extract_patterns` — сохраняет подход только при наличии реальных `selectors` в результате (в текущем пайплайне их нет → no-op; иначе создавались бы «search-only» подходы-мусор).
+  - `_generate_hints` — TTL-хинт (priority 0.3) для успешных поисков дольше 60s; дедупликация по фрагменту спецификации в тексте.
+  - `_update_site_profiles` — агрегация `success_rate`/`avg_attempts`/`block_count`/`total_runs` по фактическим результатам; персист в `data/site_profiles.json`.
+  - `_save_run_statistics` — `last_run_stats` + лог.
+- `TaskScheduler.__init__(mm, site_profiles=None)` + `_get_site_profile` отдаёт приоритет профилю LearningLoop (успех прошлых прогонов) над расчётом по подходам. В `MCPAgentRunner` профили подмешиваются в планировщик следующего прогона.
+
+### 4.4 Оптимизация SQLite
+- `graph_engine._apply_pragmas()` вызывается в `build()` (после WAL/foreign_keys): `synchronous=NORMAL`, `cache_size=-64000` (64MB), `temp_store=MEMORY`. WAL уже был включён.
+
+### Конфиг
+- `config/settings.yaml → learning`: `hint_ttl_days: 90`, `site_profiles_path: data/site_profiles.json`.
+- `config_loader.get_learning_config(key, default)`.
+
+### Тесты
+- Новые: `tests/test_learning_loop.py` (13), `test_graph_engine.py` +3 (expires_at, delete_expired, pragmas), `test_memory_manager.py` +9 (HintManager 5, ApproachVersioning 4).
+- **293 passed** (было 268, +25 новых), 13 failed — предсуществующие (нет `pytest-asyncio` в venv, async-тесты mcp_bridge/pdf_parser). Регрессий нет.
+
+### Изменённые/новые файлы
+- Новые: `src/learning_loop.py`, `tests/test_learning_loop.py`.
+- Изменённые: `src/graph_engine.py`, `src/memory_manager.py`, `src/mcp_agent_runner.py`, `src/task_scheduler.py`, `src/config_loader.py`, `config/settings.yaml`, `tests/test_graph_engine.py`, `tests/test_memory_manager.py`, `readme.md`.
+
+### Следующий шаг
+- Пользователь проверяет → подтверждение → тег `phase-4-done` → слияние `phase/4-graph` в `refactor/v2.0`.
+- Фаза 5: Модернизация PDF-парсера (LLM structurer как опция, OCR-fallback через MinerU-режим) — см. аналитику, строки ~1854+.
+

@@ -81,6 +81,7 @@ CREATE TABLE IF NOT EXISTS hints (
     site_id TEXT,
     hint_text TEXT NOT NULL,
     priority REAL DEFAULT 0.5,
+    expires_at TEXT,
     created_at TEXT DEFAULT (datetime('now'))
 );
 
@@ -132,9 +133,19 @@ class GraphEngine:
                 self._conn.row_factory = sqlite3.Row
                 self._conn.execute("PRAGMA journal_mode=WAL")
                 self._conn.execute("PRAGMA foreign_keys=ON")
+                self._apply_pragmas()
             self._init_db()
             self._load_indexes()
             self._built = True
+
+    def _apply_pragmas(self):
+        """Дополнительные прагмы производительности (WAL/foreign_keys уже в build)."""
+        try:
+            self._conn.execute("PRAGMA synchronous=NORMAL")
+            self._conn.execute("PRAGMA cache_size=-64000")   # 64MB кэш
+            self._conn.execute("PRAGMA temp_store=MEMORY")
+        except Exception as e:
+            logger.warning("Failed to apply pragmas: %s", e)
 
     def _init_db(self):
         for stmt in SCHEMA_SQL.split(";"):
@@ -144,6 +155,11 @@ class GraphEngine:
         # Migration: add consecutive_failures to product_sites if missing
         try:
             self._conn.execute("ALTER TABLE product_sites ADD COLUMN consecutive_failures INTEGER DEFAULT 0")
+        except Exception:
+            pass  # column already exists
+        # Migration: add expires_at to hints if missing (Phase 4, TTL)
+        try:
+            self._conn.execute("ALTER TABLE hints ADD COLUMN expires_at TEXT")
         except Exception:
             pass  # column already exists
         self._conn.commit()
@@ -444,21 +460,36 @@ class GraphEngine:
         return self._hints_by_product.get(product_type, [])
 
     def save_hint(self, product_type: str, site: str | None, text: str,
-                  priority: float = 0.5) -> int:
+                  priority: float = 0.5, expires_at: str | None = None) -> int:
         self.build()
         with self._lock:
             cur = self._conn.execute(
-                "INSERT INTO hints (product_type_id, site_id, hint_text, priority) "
-                "VALUES (?, ?, ?, ?)",
-                (product_type, site, text, priority)
+                "INSERT INTO hints (product_type_id, site_id, hint_text, priority, expires_at) "
+                "VALUES (?, ?, ?, ?, ?)",
+                (product_type, site, text, priority, expires_at)
             )
             self._conn.commit()
             hid = cur.lastrowid
             self._hints_by_product.setdefault(product_type, []).append({
                 "id": hid, "product_type_id": product_type,
                 "site_id": site, "hint_text": text, "priority": priority,
+                "expires_at": expires_at,
             })
         return hid
+
+    def delete_expired_hints(self) -> int:
+        self.build()
+        now_iso = datetime.now().isoformat()
+        with self._lock:
+            cur = self._conn.execute(
+                "DELETE FROM hints WHERE expires_at IS NOT NULL AND expires_at <= ?",
+                (now_iso,)
+            )
+            self._conn.commit()
+            deleted = cur.rowcount
+        if deleted:
+            self._built = False
+        return deleted
 
     # ── Site operations ──
 
