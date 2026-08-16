@@ -69,13 +69,19 @@ class LLMClient:
 
     async def chat(self, messages: list[dict],
                    tools: list[dict] | None = None,
-                   force_json: bool = False) -> dict[str, Any]:
+                   force_json: bool = False,
+                   *,
+                   temperature: float | None = None,
+                   max_tokens: int | None = None) -> dict[str, Any]:
         if not self._client:
             return {"error": "client not initialized"}
 
+        temp = temperature if temperature is not None else self.temperature
+        tok = max_tokens if max_tokens is not None else 8192
+
         # if we already found a working URL, use it directly
         if self._active_url:
-            result = await self._try_chat(self._active_url, messages, tools, force_json)
+            result = await self._try_chat(self._active_url, messages, tools, force_json, temp, tok)
             if "error" not in result:
                 return result
             if self._is_retryable(result["error"]):
@@ -94,7 +100,7 @@ class LLMClient:
             for name, url in urls:
                 if name:
                     logger.info(f"Trying {name}...")
-                result = await self._try_chat(url, messages, tools, force_json)
+                result = await self._try_chat(url, messages, tools, force_json, temp, tok)
                 if "error" not in result:
                     self._active_url = url
                     return result
@@ -110,7 +116,9 @@ class LLMClient:
 
     async def _try_chat(self, url: str, messages: list[dict],
                         tools: list[dict] | None = None,
-                        force_json: bool = False) -> dict[str, Any]:
+                        force_json: bool = False,
+                        temperature: float | None = None,
+                        max_tokens: int | None = None) -> dict[str, Any]:
         model_name = self.model
         if not model_name and not self._detected:
             await self.detect_model()
@@ -121,8 +129,8 @@ class LLMClient:
         body = {
             "model": model_name,
             "messages": messages,
-            "max_tokens": 8192,
-            "temperature": self.temperature,
+            "max_tokens": max_tokens if max_tokens is not None else 8192,
+            "temperature": temperature if temperature is not None else self.temperature,
         }
         if tools:
             body["tools"] = tools

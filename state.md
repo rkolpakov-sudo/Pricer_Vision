@@ -822,3 +822,43 @@ C:\Projects\Pricer_Vision\
 - Рекомендация: сначала замержить `phase/1-core` → `refactor/v2.0` (или продолжить ветвление от неё), затем ветка `phase/2-*`.
 
 
+## 2026-08-16 — Фаза 2: Оптимизация агентного цикла под локальную LLM
+
+Реализована на ветке `phase/2-llm` (от `phase/1-core`).
+
+### 2.1 TaskScheduler (`src/task_scheduler.py` — новый)
+- `TaskScheduler` + `ProcessingBatch`: группировка товаров по целевым сайтам для минимизации переключений контекста браузера.
+- `_determine_target_site()`: `classify_product_type(spec_text)` → `mm.get_sites(product_type)` → сайт с лучшим `priority − consecutive_failures*0.5`; fallback `yandex.ru`.
+- `_get_site_profile()`: success_rate из approaches (`success_count`/`failures_count`), has_antibot=False, speed_score=0.5.
+- `_calculate_priority()`: success_rate*0.4 + работа*0.3 + простота*0.2 + скорость*0.1.
+- Интеграция в `mcp_agent_runner.py`: `ordered_specs()` перед циклом; исходный индекс строки сохраняется через `{id(spec): i}` → `row_done_signal.emit(original_idx, result)` (GUI не путает порядок строк).
+
+### 2.2 SemanticCache (`src/semantic_cache.py` — новый)
+- Без embedding: нормализация (убирает скобки/размеры) + Jaccard-схожесть по словам, hash-md5 ключ, JSON в `data/semantic_cache.json`.
+- Лимит 1000 записей, evict 20% старейших.
+- Интеграция в `process_row`: проверка после rule-8 (только `not fresh`, confidence > 0.8); `_store_semantic_cache()` в обеих точках возврата цены.
+- `fresh=True` кэш не читается (не переиспользуются чужие цены), но пишется.
+
+### 2.3 AdaptiveRoundManager (`src/adaptive_limits.py` — новый)
+- `calculate_limit(site_profile, product_complexity)`: BASE=10, MIN=5, MAX=30; сложность = f(success_rate, consecutive_failures, has_antibot).
+- `per_site_limits(sites)` — надстройка над существующим `site_round_limits` (failures>=3 → MIN, иначе base). `should_extend(progress)` — есть прогресс → продлить.
+- Интеграция в `process_row`: `AdaptiveRoundManager(base_rounds=MAX_ROUNDS_PER_SITE)` вместо ручного цикла.
+
+### 2.4 Температура по фазам
+- `LLMClient.chat()` расширен: необязательные `temperature`/`max_tokens` (обратно совместимо; defaults — конструктор/8192).
+- `agent_loop.py`: константы `TEMP_EXPLORATION=0.7`, `TEMP_NAVIGATION=0.3`, `TEMP_EXTRACTION=0.1`, `TEMP_RECOVERY=0.5`.
+- `_query_llm(..., temperature=...)` — применяется в 4 вызовах: первый (exploration), force-JSON (extraction), force-switch (recovery), основной цикл (navigation).
+
+### 2.5 Контекстный бюджет
+- `_estimate_tokens()` (≈len/4), `_trim_messages_for_budget()` (бюджет 8000 токенов): сохраняет system + хвост от последнего user-сообщения, усекает старые tool/assistant.
+- Вызывается в `_query_llm()` перед каждым LLM-запросом.
+
+### Тесты
+- Новые: `tests/test_task_scheduler.py` (9), `tests/test_semantic_cache.py` (12), `tests/test_adaptive_limits.py` (10); расширены `test_agent_loop.py` (+7: температуры, контекстный бюджет), `test_llm_client.py` (+2: per-call temperature/max_tokens).
+- **247 passed** (было 209, +38 новых). Регрессий нет.
+
+### Изменённые/новые файлы
+- Новые: `src/task_scheduler.py`, `src/semantic_cache.py`, `src/adaptive_limits.py`.
+- Изменённые: `src/agent_loop.py`, `src/llm_client.py`, `src/mcp_agent_runner.py`, `tests/test_agent_loop.py`, `tests/test_llm_client.py`.
+
+
