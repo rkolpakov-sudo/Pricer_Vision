@@ -29,6 +29,10 @@ def get_price_config(key: str, default):
     cfg = load_settings()
     return cfg.get("price", {}).get(key, default)
 
+def get_llm_retry_config(key: str, default):
+    cfg = load_settings()
+    return cfg.get("llm", {}).get("retry", {}).get(key, default)
+
 def save_browser_headless(headless: bool):
     cfg = load_settings()
     cfg.setdefault("browser", {})["headless"] = headless

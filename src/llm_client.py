@@ -1,7 +1,10 @@
+import asyncio
 import httpx
 import json
 import logging
 from typing import Any
+
+from src.config_loader import get_llm_retry_config
 
 logger = logging.getLogger("pricer.llm")
 
@@ -85,17 +88,24 @@ class LLMClient:
         urls.extend(self._fallback_urls)
 
         last_error = ""
-        for name, url in urls:
-            if name:
-                logger.info(f"Trying {name}...")
-            result = await self._try_chat(url, messages, tools, force_json)
-            if "error" not in result:
-                self._active_url = url
-                return result
-            last_error = result["error"]
-            if not self._is_retryable(last_error):
-                break
-            logger.warning(f"{name or 'primary'} {last_error}, trying fallback...")
+        max_attempts = get_llm_retry_config("max_attempts", 2)
+        backoff_seconds = get_llm_retry_config("backoff_seconds", 1.0)
+        for attempt in range(max_attempts):
+            for name, url in urls:
+                if name:
+                    logger.info(f"Trying {name}...")
+                result = await self._try_chat(url, messages, tools, force_json)
+                if "error" not in result:
+                    self._active_url = url
+                    return result
+                last_error = result["error"]
+                if not self._is_retryable(last_error):
+                    break
+                logger.warning(f"{name or 'primary'} {last_error}, trying fallback...")
+            if attempt < max_attempts - 1:
+                delay = backoff_seconds * (2 ** attempt)
+                logger.warning(f"LLM retry {attempt + 1}/{max_attempts} in {delay:.1f}s...")
+                await asyncio.sleep(delay)
         return {"error": f"LLM недоступен: {last_error}. Проверьте LM Studio / Ollama"}
 
     async def _try_chat(self, url: str, messages: list[dict],

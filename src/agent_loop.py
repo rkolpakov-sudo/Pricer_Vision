@@ -14,6 +14,9 @@ from src.graph_engine import GraphEngine
 from src.memory_manager import MemoryManager
 from src.validator import validate_result
 from src.config_loader import get_run_config
+from src.models.schemas import ExtractionResult
+from src.stuck_detector import StuckDetector, StuckLevel
+from src.resilience import llm_circuit
 
 logger = logging.getLogger("pricer.agent")
 
@@ -339,7 +342,7 @@ async def process_row(
                 reason="rule8_reuse",
             )
             logger.info("Row: price=%s validated=%.2f in %.1fs", result["price"], result["confidence"], elapsed)
-            return result
+            return _result_to_schema(result)
 
     sites = memory_manager.get_sites(product_type)
     # Adaptive rounds per-site: reduce for high-failure sites
@@ -398,7 +401,7 @@ async def process_row(
         {"role": "user", "content": context},
     ]
 
-    response = await llm_client.chat(messages, all_tools)
+    response = await _query_llm(llm_client, messages, all_tools)
     if "error" in response:
         return _error_result(spec_text, f"LLM: {response['error']}")
 
@@ -406,6 +409,7 @@ async def process_row(
     current_site = ""
     rounds_on_site = 0
     steps = []
+    stuck_detector = StuckDetector()
     yandex_reminded = False
     yandex_price_saved = False
 
@@ -449,13 +453,13 @@ async def process_row(
                 _save_price_and_approach(memory_manager, spec_text, product_type, result, steps, record_soldat=True)
             elapsed = (datetime.now() - start_time).total_seconds()
             logger.info("Row: price=%s conf=%.2f in %.1fs rounds=%d", result.get('price'), result.get('confidence', 0), elapsed, rounds)
-            return {"spec_text": spec_text, "product_type": product_type, **result, "elapsed": elapsed}
+            return _result_to_schema({"spec_text": spec_text, "product_type": product_type, **result, "elapsed": elapsed})
 
         if not tool_calls:
             messages.append({"role": "assistant", "content": content or "(no output)"})
             messages.append({"role": "user", "content": "Верни JSON с результатом поиска цены.\nФормат: {\"price\": число|null, \"confidence\": 0.0-1.0, \"url\": \"...\", \"site\": \"...\", \"reason\": \"...\", \"requires_review\": bool}"})
             _stop_check()
-            response = await llm_client.chat(messages, all_tools)
+            response = await _query_llm(llm_client, messages, all_tools)
             if "error" in response:
                 return _error_result(spec_text, f"LLM: {response['error']}")
             continue
@@ -507,6 +511,14 @@ async def process_row(
                 result_str = str(result)
                 if not result_str.startswith("error:"):
                     steps.append(step)
+
+            # StuckDetector: после каждого MCP-шага (не дублирует captcha-логику)
+            target = tool_args.get("target") or tool_args.get("url") or ""
+            stuck_detector.record_action(
+                action_type=tool_name,
+                target=str(target),
+                result="success" if not str(result).startswith("error:") else "no_change",
+            )
 
             tool_content = str(result)
             if tool_name in ("browser_snapshot", "snapshot"):
@@ -582,10 +594,10 @@ async def process_row(
                         logger.warning("Failed to save price/approach in save_confirmed_price: %s", e)
                     # Low confidence → save price but keep searching (rule 5)
                     if validated.get("confidence", 0) >= CONF_MIN:
-                        return {
+                        return _result_to_schema({
                             "spec_text": spec_text, "product_type": product_type,
                             **validated, "elapsed": elapsed,
-                        }
+                        })
                     logger.info("Low confidence (%.2f) — saved, continuing search", validated['confidence'])
 
         for tc_last in tool_calls:
@@ -594,6 +606,14 @@ async def process_row(
                           "get_hints", "save_discovered_site", "save_approach"):
                 rounds_on_site += 1
                 break
+
+        # StuckDetector: принудительный уход с сайта при зацикливании
+        stuck_level = stuck_detector.detect()
+        if stuck_level == StuckLevel.CRITICAL and rounds_on_site > 5:
+            logger.warning("StuckDetector CRITICAL — forcing site switch")
+            current_site = ""
+            rounds_on_site = site_round_limits.get(_extract_domain(current_site), MAX_ROUNDS_PER_SITE) + 1
+            stuck_detector.reset()
 
         current_domain = _extract_domain(current_site)
         if rounds_on_site > site_round_limits.get(current_domain, MAX_ROUNDS_PER_SITE):
@@ -614,7 +634,7 @@ async def process_row(
             rounds_on_site = 0
             current_site = ""
             _stop_check()
-            response = await llm_client.chat(messages, all_tools)
+            response = await _query_llm(llm_client, messages, all_tools)
             if "error" in response:
                 return _error_result(spec_text, f"LLM: {response['error']}")
             continue
@@ -628,7 +648,7 @@ async def process_row(
             })
 
         _stop_check()
-        response = await llm_client.chat(messages, all_tools)
+        response = await _query_llm(llm_client, messages, all_tools)
         if "error" in response:
             return _error_result(spec_text, f"LLM: {response['error']}")
 
@@ -930,3 +950,41 @@ def _error_result(spec_text: str, error: str, elapsed: float | None = None) -> d
         "reason": error, "requires_review": True, "error": error,
         "elapsed": elapsed,
     }
+
+
+def _result_to_schema(result: dict) -> dict:
+    """Переводит result-dict в ExtractionResult для строгой валидации.
+    Наружу отдаём .model_dump() чтобы не ломать MCPAgentRunner/ExcelWriter."""
+    try:
+        model = ExtractionResult(
+            spec_text=result.get("spec_text", ""),
+            product_type=result.get("product_type", "unknown"),
+            found=result.get("price") is not None,
+            price=result.get("price"),
+            confidence=result.get("confidence", 0.0),
+            url=result.get("url", ""),
+            site=result.get("site", ""),
+            reason=result.get("reason", ""),
+            requires_review=result.get("requires_review", True),
+            error=result.get("error"),
+            elapsed=result.get("elapsed"),
+        )
+        return model.model_dump()
+    except Exception as e:
+        logger.warning("Schema validation failed: %s", e)
+        return result
+
+
+async def _query_llm(llm_client, messages, tools):
+    """Обёртка над llm_client.chat с Circuit Breaker.
+    chat() возвращает {"error": ...} вместо исключения — состояние фиксируем вручную."""
+    if not llm_circuit.allow_request():
+        logger.error("LLM unavailable, pausing agent...")
+        await asyncio.sleep(30)
+        return {"error": "LLM circuit open"}
+    response = await llm_client.chat(messages, tools)
+    if "error" in response:
+        llm_circuit.record_failure()
+    else:
+        llm_circuit.record_success()
+    return response

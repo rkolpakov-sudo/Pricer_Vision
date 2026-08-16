@@ -9,6 +9,7 @@ from src.memory_manager import MemoryManager
 from src.llm_client import LLMClient
 from src.mcp_bridge import MCPBridge
 from src.agent_loop import process_row
+from src.audit_logger import AuditLogger
 
 logger = logging.getLogger("pricer.runner")
 
@@ -49,6 +50,7 @@ class MCPAgentRunner(QThread):
         engine = GraphEngine(self.db_path)
         engine.build()
         mm = MemoryManager(engine)
+        audit = AuditLogger()
 
         yaml_path = "config/categories_and_sites.yaml"
         from pathlib import Path
@@ -139,6 +141,7 @@ class MCPAgentRunner(QThread):
                 if self._stop_event.is_set():
                     break
                 results.append(result)
+                audit.log_extraction(spec_text, result.get("price") is not None, result.get("price"))
                 self.row_done_signal.emit(i, result)
 
                 if self._restart_bridge.is_set():

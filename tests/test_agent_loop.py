@@ -2,7 +2,7 @@ import pytest
 from src.agent_loop import (
     GRAPH_TOOL_NAMES, GRAPH_TOOL_DEFS, SYSTEM_PROMPT,
     _build_context, _execute_graph_tool,
-    _error_result,
+    _error_result, _result_to_schema,
 )
 
 
@@ -104,3 +104,34 @@ class TestExecuteGraphTool:
         assert "сохранён" in result.lower()
         sites = mm.get_sites("cables")
         assert any(s["id"] == "new-site.ru" for s in sites)
+
+
+class TestResultToSchema:
+    def test_success_result(self):
+        result = {
+            "spec_text": "ВВГ 3x1.5", "product_type": "cables",
+            "price": 1500.5, "confidence": 0.95, "url": "https://tinko.ru",
+            "site": "tinko.ru", "reason": "", "requires_review": False,
+            "elapsed": 12.3,
+        }
+        out = _result_to_schema(result)
+        assert out["spec_text"] == "ВВГ 3x1.5"
+        assert out["found"] is True
+        assert out["price"] == 1500.5
+        assert out["requires_review"] is False
+        assert out["product_type"] == "cables"
+
+    def test_no_price_result(self):
+        result = {
+            "spec_text": "Кабель", "price": None, "confidence": 0.0,
+            "requires_review": True, "error": "Max rounds reached", "elapsed": 30.0,
+        }
+        out = _result_to_schema(result)
+        assert out["found"] is False
+        assert out["price"] is None
+        assert out["error"] == "Max rounds reached"
+
+    def test_returns_original_on_invalid(self):
+        result = {"spec_text": "", "price": -5, "requires_review": True}
+        out = _result_to_schema(result)
+        assert out is result

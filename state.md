@@ -757,3 +757,42 @@ C:\Projects\Pricer_Vision\
 - Прогон тестов: `python -m pytest -q` (ожидаемо 13 падений async без pytest-asyncio).
 
 
+## 2026-08-16 — Фаза 1: Стабильность ядра (Pydantic, StuckDetector, Circuit Breaker, Retry, Audit)
+
+Реализована на ветке `phase/1-core` (от `refactor/v2.0`).
+
+### 1.1 Pydantic-валидация
+- Новый пакет `src/models/`:
+  - `schemas.py` — `ActionType`, `AgentDecision`, `ExtractedPrice`, `ExtractionResult` (контракт `process_row`).
+  - `ExtractionResult` использует `model_validator`: `found=True` требует `price`, цена должна быть `> 0` и `<= 10_000_000` (совпадает с `PRICE_ANOMALY_HIGH` в `validator.py`), `spec_text` не пустой.
+  - `AgentDecision.validate_target` переведён с `field_validator` на `model_validator(mode="after")` — pydantic 2.13 **не запускает field_validator на значениях по умолчанию** (важная находка), поэтому `target`-проверка для CLICK/TYPE не срабатывала.
+- `agent_loop.py`: добавлена `_result_to_schema(result) -> dict` — валидирует финальный результат через `ExtractionResult`, наружу отдаёт `model_dump()` (контракт runner/ExcelWriter сохранён). Подключена ко всем трём return-точкам результата (rule8 reuse, final_attempt, save_confirmed_price).
+- `requirements.txt`: добавлен `pydantic>=2.0.0` (в venv уже был 2.13.4).
+
+### 1.2 StuckDetector
+- Новый `src/stuck_detector.py`: `StuckDetector` + `StuckLevel` (OK/WARNING/CRITICAL/BLOCKED), `ActionRecord`, `suggest_recovery`.
+- Интеграция в `process_row`: создаётся `StuckDetector()`, после каждого MCP-шага `record_action(tool_name, target, success/no_change)`; после цикла tool_calls `detect()` — при CRITICAL и `rounds_on_site > 5` принудительный уход с сайта через существующую логику `site_round_limits`. BLOCKED не дублируется — обрабатывается существующей captcha-логикой (`CAPTCHA_KEYWORDS`).
+
+### 1.3 Circuit Breaker
+- Новый `src/resilience.py`: `CircuitBreaker`, `CircuitState` (CLOSED/OPEN/HALF_OPEN), `CircuitBreakerOpenError`, `MaxRetriesExceeded`, синглтоны `llm_circuit` (3/30s) и `mcp_circuit` (5/60s), методы `allow_request()`, `call()`, `call_async()`, `record_success/failure`, `reset()`.
+- `mcp_bridge.py`: в `call_tool` — проверка `mcp_circuit.allow_request()`, при OPEN → restart; success/failure фиксируются по результату `session.call_tool`.
+- `agent_loop.py`: добавлена `_query_llm()` — обёртка над `llm_client.chat` с `llm_circuit` (chat возвращает `{"error": ...}` вместо исключения, состояние фиксируется вручную). Все 4 вызова chat в `process_row` переведены на `_query_llm`.
+
+### 1.4 Retry с exponential backoff
+- `src/resilience.py`: `retry_with_backoff()` — работает и с sync и с async функциями (через `inspect.iscoroutinefunction`, без deprecated `asyncio.iscoroutinefunction`).
+- `llm_client.py`: подключён `llm.retry` из `settings.yaml` (`max_attempts: 2`, `backoff_seconds: 1.0`) — повторные попытки перебора URL с экспоненциальной паузой.
+- `config_loader.py`: добавлен `get_llm_retry_config()`.
+
+### 1.5 Audit Logging
+- Новый `src/audit_logger.py`: `AuditLogger` пишет JSONL в `data/audit/session_<id>.jsonl` (data/ уже в .gitignore), методы `log_llm_request`, `log_browser_action`, `log_extraction`, `get_session_summary`.
+- `mcp_agent_runner.py`: создаётся `AuditLogger()` в `_run_async`, после каждого результата строки — `audit.log_extraction()`.
+
+### Тесты
+- Новые файлы: `tests/test_schemas.py`, `tests/test_stuck_detector.py`, `tests/test_resilience.py`, `tests/test_audit_logger.py`, дополнен `tests/test_agent_loop.py` (TestResultToSchema).
+- **196 passed** (+55 новых), 13 failed — предсуществующие (нет `pytest-asyncio` в venv, async-тесты mcp_bridge/pdf_parser). Регрессий нет.
+
+### Изменённые/новые файлы
+- Новые: `src/models/__init__.py`, `src/models/schemas.py`, `src/stuck_detector.py`, `src/resilience.py`, `src/audit_logger.py`.
+- Изменённые: `src/agent_loop.py`, `src/mcp_bridge.py`, `src/mcp_agent_runner.py`, `src/llm_client.py`, `src/config_loader.py`, `requirements.txt`, `tests/test_agent_loop.py`.
+
+
