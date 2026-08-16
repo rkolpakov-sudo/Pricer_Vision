@@ -78,7 +78,8 @@
 ```
 C:\Projects\Pricer_Vision\
 ├── main.py                      # GUI
-├── SPEC_V31.md                  # Спецификация
+├── SPEC_V31.md                  # Спецификация v31.0
+├── SPEC_V32.md                  # Спецификация v2.0 (пост-рефакторинг, фазы 1–7)
 ├── readme.md                    # Правила работы
 ├── state.md                     # Лог действий
 ├── config/
@@ -138,7 +139,8 @@ C:\Projects\Pricer_Vision\
 │   ├── validator.py             # Пост-валидация
 │   └── widget_base.py
 ├── tests/
-│   └── test_*.py                # Тесты (pytest)
+│   ├── test_*.py                # Тесты (pytest)
+│   └── integration/             # Интеграционные тесты агентного цикла (test_agent_flow.py)
 ├── logs/
 │   └── runtime.log              # Последний ран
 └── venv/                        # Виртуальное окружение
@@ -391,6 +393,15 @@ pdf_parser:
 
 ### SQLite оптимизация (`src/graph_engine.py`)
 - `_apply_pragmas()` в `build()`: `synchronous=NORMAL`, `cache_size=-64000` (64MB), `temp_store=MEMORY`. WAL и foreign_keys уже были включены.
+
+## Тестирование (Фаза 7)
+
+- **434 теста**, 0 failures. Запуск: `python -m pytest -q`.
+- **Интеграционные** (`tests/integration/test_agent_flow.py`, 9 тестов): полный цикл `process_row` с моками — извлечение, tool_call цикл, reuse (rule 8), semantic cache, ошибки LLM, max rounds, captcha, stuck recovery.
+- **Критичные модули >80%**: schemas (96%), stuck_detector (100%), semantic_cache (95%), context_optimizer (100%), rate_limiter (100%), learning_loop (89%), smart_review (100%), config_loader (100%), excel_writer (97%).
+- Покрытие: `python -m coverage run --source=src -m pytest tests -q && python -m coverage report` (coverage установлен в venv).
+- `pytest-asyncio` установлен в venv — async-тесты (mcp_bridge, pdf_parser, agent_flow) проходят.
+- В ходе Фазы 7 исправлены: `SmartReview._calculate_confidence` падал на строковом `qty` (TypeError); `ExcelWriter.detect_columns` fallback добавлял `None`-заголовки в name-колонки.
 
 
 

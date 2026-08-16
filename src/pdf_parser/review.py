@@ -44,7 +44,7 @@ class SmartReview:
 
         if name:
             score += 0.4
-        if qty and qty > 0:
+        if _positive_qty(qty):
             score += 0.2
         if unit:
             score += 0.1
@@ -54,3 +54,17 @@ class SmartReview:
             score += 0.1
 
         return min(score, 1.0)
+
+
+def _positive_qty(value) -> bool:
+    """True, если количество — положительное число (число или числовая строка)."""
+    if isinstance(value, bool):
+        return False
+    if isinstance(value, (int, float)):
+        return value > 0
+    if isinstance(value, str):
+        try:
+            return float(value.strip()) > 0
+        except (TypeError, ValueError):
+            return False
+    return False

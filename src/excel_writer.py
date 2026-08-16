@@ -115,7 +115,13 @@ class ExcelWriter:
 
         if not mapping["name"]:
             reserved = {mapping["uom"], mapping["qty"]} - {None}
-            mapping["name"] = [i for i in range(len(headers)) if i not in reserved and i is not None][:3]
+            mapping["name"] = [
+                i for i in range(len(headers))
+                if i not in reserved
+                and i is not None
+                and headers[i] is not None
+                and str(headers[i]).strip() not in ("", "None")
+            ][:3]
 
         return mapping
 
