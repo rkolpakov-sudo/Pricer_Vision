@@ -137,3 +137,32 @@ class TestGraphEngine:
             "price": 500,
         })
         assert pid > 0
+
+    def test_save_hint_with_expires_at(self, graph_engine):
+        from datetime import datetime, timedelta
+        exp = (datetime.now() + timedelta(days=90)).isoformat()
+        hid = graph_engine.save_hint("cables", "tinko.ru", "TTL hint", 0.5, expires_at=exp)
+        assert hid > 0
+        hints = graph_engine.get_hints("cables")
+        assert hints[0]["expires_at"] == exp
+
+    def test_delete_expired_hints(self, graph_engine):
+        from datetime import datetime, timedelta
+        past = (datetime.now() - timedelta(days=1)).isoformat()
+        future = (datetime.now() + timedelta(days=90)).isoformat()
+        graph_engine.save_hint("cables", "tinko.ru", "expired", 0.5, expires_at=past)
+        graph_engine.save_hint("cables", "keaz.ru", "active", 0.5, expires_at=future)
+        graph_engine.save_hint("cables", "keaz.ru", "no-ttl", 0.5, expires_at=None)
+        deleted = graph_engine.delete_expired_hints()
+        assert deleted == 1
+        hints = graph_engine.get_hints("cables")
+        texts = {h["hint_text"] for h in hints}
+        assert "expired" not in texts
+        assert "active" in texts
+        assert "no-ttl" in texts
+
+    def test_apply_pragmas(self, graph_engine):
+        cache_rows = graph_engine._conn.execute("PRAGMA cache_size").fetchall()
+        assert cache_rows and int(cache_rows[0][0]) == -64000
+        sync_row = graph_engine._conn.execute("PRAGMA synchronous").fetchone()
+        assert int(sync_row[0]) == 1

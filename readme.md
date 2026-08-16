@@ -109,19 +109,24 @@ C:\Projects\Pricer_Vision\
 │   ├── audit_logger.py          # Audit-лог JSONL (data/audit/session_*.jsonl)
 │   ├── config_loader.py         # Загрузчик config/settings.yaml
 │   ├── excel_writer.py
-│   ├── graph_engine.py          # SQLite + in-memory (inc кэш, unknown excluded)
+│   ├── graph_engine.py          # SQLite + in-memory (inc кэш, unknown excluded, TTL hints, pragmas)
 │   ├── _labels.py
+│   ├── learning_loop.py         # LearningLoop — автообучение из результатов прогона (Фаза 4)
 │   ├── llm_client.py            # HTTP клиент для LM Studio (+ retry с backoff из llm.retry, per-call temperature/max_tokens)
-│   ├── mcp_agent_runner.py      # QThread обёртка (+ AuditLogger, TaskScheduler, SemanticCache)
+│   ├── mcp_agent_runner.py      # QThread обёртка (+ AuditLogger, TaskScheduler, SemanticCache, LearningLoop)
 │   ├── mcp_bridge.py            # MCP клиент (Playwright @playwright/mcp, ref→target, mcp_circuit)
-│   ├── memory_manager.py        # CRUD графа (+ intent, dedup, SOLD_AT, record_soldat filter)
+│   ├── memory_manager.py        # CRUD графа (+ intent, dedup, SOLD_AT, HintManager, ApproachVersioning)
 │   ├── models/                  # Pydantic-схемы (Фаза 1)
 │   │   └── schemas.py           #   ExtractionResult, AgentDecision, ExtractedPrice, ActionType
 │   ├── resilience.py            # CircuitBreaker (llm/mcp), retry_with_backoff (Фаза 1)
 │   ├── semantic_cache.py        # SemanticCache — Jaccard-кэш похожих товаров (data/semantic_cache.json) (Фаза 2)
 │   ├── study_runner.py          # QThread обучения (50 раундов, get_hints, утверждение)
 │   ├── stuck_detector.py        # StuckDetector — зацикливание/блокировки (Фаза 1)
-│   ├── task_scheduler.py        # TaskScheduler — группировка товаров по сайтам (Фаза 2)
+│   ├── task_scheduler.py        # TaskScheduler — группировка товаров по сайтам (+ site_profiles из LearningLoop) (Фаза 2)
+│   ├── human_behavior.py        # HumanBehavior — человеческие клики/печать/скролл (Фаза 3)
+│   ├── rate_limiter.py          # DomainRateLimiter — per-domain RPM лимит (Фаза 3)
+│   ├── site_analyzer.py         # SiteAnalyzer — детекция SPA/SSR/антибота (Фаза 3)
+│   ├── captcha_detector.py      # CaptchaDetector — типы captcha + рекомендации (Фаза 3)
 │   ├── site_order_dialog.py
 │   ├── theme.py
 │   ├── toast.py
@@ -303,5 +308,55 @@ pdf_parser:
 ### Контекстный бюджет
 - `_estimate_tokens()` (≈len/4), `_trim_messages_for_budget()` (бюджет 8000 токенов): сохраняет system + хвост от последнего user-сообщения, усекает старые tool/assistant.
 - Вызывается в `_query_llm()` перед каждым LLM-запросом.
+
+## Антидетект и браузерная автоматизация (Фаза 3 рефакторинга v2.0)
+
+Реализована на ветке `phase/3-antidetect` (от `refactor/v2.0`).
+
+### stealth.js (17 патчей)
+- Патчи 1–12 — базовые (webdriver, plugins, languages, hardware, chrome, permissions, WebGL, screen, connection, platform, mediaDevices, battery).
+- Патчи 13–17 — добавлены в Фазе 3: Canvas шум, AudioContext, WebRTC leak prevention, Font enumeration, WebGL vendor/renderer masking.
+
+### HumanBehavior (`src/human_behavior.py`)
+- `human_click` — клик в случайную точку элемента + эмуляция mousemove (через `browser_evaluate`; `browser_mouse_move` в @playwright/mcp нет).
+- `human_type` — посимвольная печать с переменной скоростью; `human_scroll` — рывками; `random_pause`; `get_random_viewport`.
+
+### DomainRateLimiter (`src/rate_limiter.py`)
+- Per-domain: min_interval + RPM-лимит; `wait_if_needed(url)` перед `browser_navigate` в `agent_loop.py`.
+- Настройки в `config/settings.yaml → antidetect`.
+
+### SiteAnalyzer (`src/site_analyzer.py`)
+- SPA-детекция: `typeof window.__NUXT__` и т.п. (глобальные проверки НЕ через querySelector — невалидные CSS).
+- Антибот: cloudflare/recaptcha/hcaptcha/datadome/perimeterx; DOM-статистика; стратегия CAUTIOUS/SPA_AWARE/STANDARD. Профиль кэшируется в памяти по домену.
+
+### CaptchaDetector (`src/captcha_detector.py`)
+- Типы: recaptcha_v2/v3, hcaptcha, cloudflare, image, unknown. Рекомендации: SWITCH_SITE/WAIT_60S_AND_RETRY/ASK_USER.
+- Детекция по подстрокам HTML (CSS-селекторы дословно в HTML не встречаются). Без авторешения.
+- Интеграция в captcha-ветку `agent_loop.py` (тип + рекомендация логируются и сообщаются LLM).
+
+## Эволюция графа знаний (Фаза 4 рефакторинга v2.0)
+
+Реализована на ветке `phase/4-graph` (от `phase/3-antidetect`).
+
+### ApproachVersioning (`src/memory_manager.py`)
+- `update_effectiveness(approach_id, success)` — делегирует в `update_approach_success/failure`.
+- `get_effective_approaches(site_id, limit=5)` — сортировка по score = `success_rate*0.7 + freshness*0.3` (депрекейтнутые ×0.5). `success_rate` вычисляется на лету из `success_count/(success_count+failures_count)` (колонки в БД нет), добавляется в каждый подход.
+
+### HintManager TTL (`src/memory_manager.py`)
+- Колонка `hints.expires_at` (в схеме + миграция ALTER TABLE в `graph_engine._init_db`).
+- `create_hint(..., ttl_days=90)` — ставит `expires_at = now + TTL`.
+- `get_active_hints(product_type, site=None)` — фильтрует просроченные, опционально по сайту.
+- `cleanup_expired()` — удаляет просроченные (`graph_engine.delete_expired_hints`).
+- TTL по умолчанию и путь профилей сайтов — в `config/settings.yaml → learning`.
+
+### LearningLoop (`src/learning_loop.py`)
+- `consolidate_after_run(results)` вызывается из `MCPAgentRunner` после прогона: агрегирует эффективность подходов, генерирует TTL-хинты для долгих успешных поисков (>60s), обновляет in-memory профили сайтов, сохраняет статистику прогона.
+- Профили сайтов (`success_rate`, `avg_attempts`, `block_count`) персистятся в `data/site_profiles.json` и на следующем прогоне подмешиваются в `TaskScheduler.site_profiles` (приоритетнее расчёта по подходам).
+- `_extract_patterns` сохраняет подход только если результат содержит реальные `selectors` (в текущем пайплайне нет — подход уже сохранён в `_save_price_and_approach`; иначе были бы «search-only» подходы-мусор).
+
+### SQLite оптимизация (`src/graph_engine.py`)
+- `_apply_pragmas()` в `build()`: `synchronous=NORMAL`, `cache_size=-64000` (64MB), `temp_store=MEMORY`. WAL и foreign_keys уже были включены.
+
+
 
 

@@ -1,11 +1,91 @@
 import pytest
+from datetime import datetime, timedelta
 from src.graph_engine import GraphEngine
-from src.memory_manager import MemoryManager
+from src.memory_manager import MemoryManager, HintManager, ApproachVersioning
 
 
 @pytest.fixture
 def mm(graph_engine):
     return MemoryManager(graph_engine)
+
+
+class TestHintManager:
+    def test_create_hint_sets_expiry(self, graph_engine):
+        hm = HintManager(graph_engine, ttl_days=90)
+        hid = hm.create_hint("cables", "tinko.ru", "Искать в каталоге")
+        assert hid > 0
+        hints = graph_engine.get_hints("cables")
+        assert hints[0]["expires_at"] is not None
+
+    def test_create_hint_custom_ttl(self, graph_engine):
+        hm = HintManager(graph_engine, ttl_days=90)
+        hm.create_hint("cables", "tinko.ru", "Короткий TTL", ttl_days=1)
+        hints = graph_engine.get_hints("cables")
+        exp = datetime.fromisoformat(hints[0]["expires_at"])
+        assert exp - datetime.now() < timedelta(days=2)
+
+    def test_get_active_hints_excludes_expired(self, graph_engine):
+        hm = HintManager(graph_engine)
+        hm.create_hint("cables", "tinko.ru", "Активный")
+        graph_engine.save_hint("cables", "tinko.ru", "Просроченный",
+                               0.5, expires_at=(datetime.now() - timedelta(days=1)).isoformat())
+        active = hm.get_active_hints("cables")
+        assert [h["hint_text"] for h in active] == ["Активный"]
+
+    def test_get_active_hints_filters_by_site(self, graph_engine):
+        hm = HintManager(graph_engine)
+        hm.create_hint("cables", "tinko.ru", "Для тинько")
+        hm.create_hint("cables", "keaz.ru", "Для кэаз")
+        tinko = hm.get_active_hints("cables", "tinko.ru")
+        assert len(tinko) == 1
+        assert tinko[0]["hint_text"] == "Для тинько"
+
+    def test_cleanup_expired(self, graph_engine):
+        hm = HintManager(graph_engine)
+        hm.create_hint("cables", "tinko.ru", "Активный")
+        graph_engine.save_hint("cables", "keaz.ru", "Старый",
+                               0.5, expires_at=(datetime.now() - timedelta(days=1)).isoformat())
+        deleted = hm.cleanup_expired()
+        assert deleted == 1
+        assert len(hm.get_active_hints("cables")) == 1
+
+
+class TestApproachVersioning:
+    def test_update_effectiveness_success(self, graph_engine, mm):
+        aid = mm.save_approach("cables", "tinko.ru", [{"action": "navigate"}])
+        av = ApproachVersioning(graph_engine, mm)
+        av.update_effectiveness(aid, success=True)
+        best = mm.get_best_approach("cables", "tinko.ru")
+        assert best["success_count"] >= 2
+
+    def test_update_effectiveness_failure(self, graph_engine, mm):
+        aid = mm.save_approach("cables", "tinko.ru", [{"action": "navigate"}])
+        av = ApproachVersioning(graph_engine, mm)
+        av.update_effectiveness(aid, success=False)
+        best = mm.get_best_approach("cables", "tinko.ru")
+        assert best["consecutive_failures"] == 1
+
+    def test_get_effective_approaches_ranks_by_success_rate(self, graph_engine, mm):
+        a1 = mm.save_approach("cables", "tinko.ru", [{"action": "navigate", "url": "a"}])
+        a2 = mm.save_approach("cables", "tinko.ru", [{"action": "click", "target": "b"}])
+        mm.record_failure(a1)
+        mm.record_failure(a1)
+        av = ApproachVersioning(graph_engine, mm)
+        ranked = av.get_effective_approaches("tinko.ru")
+        assert len(ranked) == 2
+        assert ranked[0]["id"] == a2  # success_rate=1.0 выше чем 1/3
+
+    def test_get_effective_approaches_adds_success_rate(self, graph_engine, mm):
+        mm.save_approach("cables", "tinko.ru", [{"action": "navigate"}])
+        av = ApproachVersioning(graph_engine, mm)
+        ranked = av.get_effective_approaches("tinko.ru")
+        assert ranked[0]["success_rate"] == 1.0
+
+    def test_get_effective_approaches_limit(self, graph_engine, mm):
+        for i in range(5):
+            mm.save_approach("cables", "tinko.ru", [{"action": "click", "target": f"s{i}"}])
+        av = ApproachVersioning(graph_engine, mm)
+        assert len(av.get_effective_approaches("tinko.ru", limit=3)) == 3
 
 
 class TestMemoryManager:

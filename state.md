@@ -889,3 +889,119 @@ C:\Projects\Pricer_Vision\
 - Ветка: `phase/3-antidetect` (от `phase/2-llm` или `refactor/v2.0` после слияния).
 
 
+## 2026-08-16 — Фаза 3: Антидетект и браузерная автоматизация
+
+Реализована на ветке `phase/3-antidetect` (от `refactor/v2.0`).
+
+### 3.1 stealth.js — патчи 13–17
+- `config/stealth.js` расширен с 12 до 17 патчей (добавлены в конец, не перезаписывая):
+  - 13 — Canvas Fingerprint Randomization (шум ±3 на toDataURL/toBlob через getImageData)
+  - 14 — AudioContext (шум в getFloatFrequencyData анализатора)
+  - 15 — WebRTC Leak Prevention (фильтр srflx/host кандидатов в addIceCandidate)
+  - 16 — Font Enumeration (ограничение доступных шрифтов до 6)
+  - 17 — WebGL Vendor/Renderer Masking (0x9245/0x9246 → Intel UHD 620)
+- `node --check` проходит.
+
+### 3.2 HumanBehavior (`src/human_behavior.py` — новый)
+- `human_click` — случайная точка внутри элемента (не центр) + эмуляция mousemove через `browser_evaluate` (`browser_mouse_move` не существует в @playwright/mcp), fallback на обычный клик при ошибке bbox.
+- `human_type` — посимвольная печать с переменной скоростью + «раздумья».
+- `human_scroll` — скролл рывками (3–7 шагов) + финальная пауза.
+- `random_pause`, `get_random_viewport`.
+
+### 3.3 DomainRateLimiter (`src/rate_limiter.py` — новый)
+- Per-domain min_interval (1.5s) + RPM-лимит (20/мин), окно 60s.
+- `wait_if_needed(url)` вызывается перед `browser_navigate` в `agent_loop.py`.
+- Настройки: `config/settings.yaml → antidetect.rate_limit_min_interval/rate_limit_max_requests_per_minute`, getter `get_antidetect_config` в `config_loader.py`.
+
+### 3.4 SiteAnalyzer (`src/site_analyzer.py` — новый)
+- Определяет SPA (window.__NUXT__/__NEXT_DATA__/ng-version/data-reactroot/__vue__/root/app), антибот (cloudflare/recaptcha/hcaptcha/datadome/perimeterx/ddos-guard...), DOM-статистику.
+- ⚠️ Корректировка: глобальные индикаторы проверяются через `typeof`, а НЕ через `document.querySelector` (window.__NUXT__ — невалидный CSS-селектор).
+- Профиль кэшируется в памяти по домену (`self.profiles`), стратегия: CAUTIOUS/SPA_AWARE/STANDARD.
+
+### 3.5 CaptchaDetector (`src/captcha_detector.py` — новый)
+- Типы: NONE/RECAPTCHA_V2/V3/HCAPTCHA/CLOUDFLARE/IMAGE/UNKNOWN, рекомендации (SWITCH_SITE/WAIT_60S_AND_RETRY/ASK_USER...).
+- ⚠️ Корректировка: CSS-селекторы не встречаются дословно в HTML-тексте — детекция по характерным подстрокам (`g-recaptcha`, `cf-turnstile`, `captcha.png`...).
+- Без авторешения — только детект + рекомендация (по ТЗ v2.0).
+- Интеграция в `agent_loop.py`: captcha-ветка теперь логирует тип + рекомендацию и сообщает их LLM.
+
+### Тесты
+- Новые: `tests/test_captcha_detector.py` (12), `tests/test_rate_limiter.py` (6), `tests/test_human_behavior.py` (6), `tests/test_site_analyzer.py` (10).
+- **281 passed** (было 247, +34 новых). Регрессий нет. `node --check config/stealth.js` — OK.
+
+### Изменённые/новые файлы
+- Новые: `src/human_behavior.py`, `src/rate_limiter.py`, `src/site_analyzer.py`, `src/captcha_detector.py`.
+- Изменённые: `config/stealth.js`, `src/agent_loop.py`, `src/config_loader.py`, `config/settings.yaml`.
+
+
+## 2026-08-16 — Handoff: переход к новой сессии (после Фазы 3)
+
+### Состояние проекта (актуальная точка)
+- Ветки: `main` (базовая), `refactor/v2.0` (Фазы 1+2 слиты), `phase/1-core`, `phase/2-llm`, `phase/3-antidetect` (**текущая**, Фаза 3 закоммичена).
+- Теги: `v1.0-pre-refactor`, `phase-1-done`, `phase-2-done`, `v0.1.0` (старый). `phase-3-done` НЕ установлен (ждёт подтверждения).
+- Коммиты Фазы 3 (на `phase/3-antidetect`): от `41a45c1` (merge Фаз 1+2 в `refactor/v2.0`).
+- Рабочее дерево чистое, всё закоммичено.
+- Бэкап БД: `data/pricer_backup_20260816.db` (точка отката).
+
+### Регламент (обязательно к соблюдению в новой сессии)
+- **Коммит и тег фаз ТОЛЬКО после подтверждения пользователем.** По умолчанию коммиты и теги фаз не ставить без явного «да».
+- Ветки фаз: `phase/N-*` от `refactor/v2.0` (или от последней завершённой фазы). Теги: `phase-N-done`.
+- Откат: `git checkout main` / `git checkout v1.0-pre-refactor`; БД — из `data/pricer_backup_20260816.db`.
+- **Прогоны товаров не выполняются** — фаза считается завершённой по тестам (`python -m pytest -q`) и ревью кода.
+- Перед изменениями читать `readme.md`, `state.md`, `AGENTS.md`.
+- После действий — обновлять `state.md`.
+
+### Фаза 3 — итог
+- 5/5 задач: stealth.js 17 патчей, HumanBehavior, DomainRateLimiter, SiteAnalyzer, CaptchaDetector.
+- **281 passed** (+34 новых), 0 failed. `node --check config/stealth.js` — OK.
+- Следующий шаг: пользователь проверяет работу → подтверждение → тег `phase-3-done` → слияние в `refactor/v2.0`.
+
+### Следующий шаг (Фаза 4)
+- **Фаза 4: Эволюция графа знаний** (см. `chat-Pricer_Vision Project Analysis.md`, строки ~1560+): версионирование подходов, effectiveness scoring, TTL/депрекация знаний, пере-валидация устаревших подходов.
+- ⚠️ Из «Сверки»: таблиц `revalidation_queue` и полей `success_rate`/`status`/`total_successes` в БД НЕТ — эффективность считать на лету из `success_count/(success_count+failures_count)`; `get_effective_approaches` использовать через существующий `memory_manager.get_approaches_by_site`.
+- Ветка: `phase/4-graph` (от `phase/3-antidetect` или `refactor/v2.0` после слияния).
+
+
+## 2026-08-16 — Фаза 4: Эволюция графа знаний
+
+Реализована на ветке `phase/4-graph` (от `phase/3-antidetect`).
+
+### 4.1 Версионирование подходов и effectiveness scoring
+- Новые классы в `src/memory_manager.py`:
+  - `ApproachVersioning.update_effectiveness(approach_id, success)` — делегирует в существующие `update_approach_success/failure` (без дублирования счётчиков).
+  - `ApproachVersioning.get_effective_approaches(site_id, limit=5)` — сортировка активных подходов по `score = success_rate*0.7 + freshness*0.3` (депрекейтнутые ×0.5); `success_rate` считается на лету (`success_count/(success_count+failures_count)`, колонки в БД нет) и добавляется в каждый подход.
+
+### 4.2 TTL для хинтов
+- `graph_engine.py`: колонка `hints.expires_at` в SCHEMA_SQL + миграция `ALTER TABLE hints ADD COLUMN expires_at` в `_init_db` (как для `consecutive_failures`).
+- `save_hint(..., expires_at=None)` — сохраняет TTL; кэш `_hints_by_product` включает `expires_at` (подхватывается через `SELECT *` в `_load_indexes`).
+- Новый `graph_engine.delete_expired_hints()` → `int` (число удалённых), инвалидирует кэш (`_built = False`).
+- Новый `HintManager` в `memory_manager.py`: `create_hint(..., ttl_days=90)`, `get_active_hints(product_type, site=None)` (фильтр просроченных + опционально по сайту), `cleanup_expired()`.
+
+### 4.3 LearningLoop
+- Новый `src/learning_loop.py`: `LearningLoop(graph_engine, memory_manager)`.
+  - `consolidate_after_run(results)` — вызывается из `MCPAgentRunner._run_async` после цикла строк (до `done_signal`); возвращает `{approaches_updated, new_patterns, new_hints}`.
+  - `_update_approach_effectiveness` — агрегация (success/failure уже фиксируются внутри `process_row`, повторный вызов задвоил бы счётчики; срабатывает только если в результате есть `approach_id`).
+  - `_extract_patterns` — сохраняет подход только при наличии реальных `selectors` в результате (в текущем пайплайне их нет → no-op; иначе создавались бы «search-only» подходы-мусор).
+  - `_generate_hints` — TTL-хинт (priority 0.3) для успешных поисков дольше 60s; дедупликация по фрагменту спецификации в тексте.
+  - `_update_site_profiles` — агрегация `success_rate`/`avg_attempts`/`block_count`/`total_runs` по фактическим результатам; персист в `data/site_profiles.json`.
+  - `_save_run_statistics` — `last_run_stats` + лог.
+- `TaskScheduler.__init__(mm, site_profiles=None)` + `_get_site_profile` отдаёт приоритет профилю LearningLoop (успех прошлых прогонов) над расчётом по подходам. В `MCPAgentRunner` профили подмешиваются в планировщик следующего прогона.
+
+### 4.4 Оптимизация SQLite
+- `graph_engine._apply_pragmas()` вызывается в `build()` (после WAL/foreign_keys): `synchronous=NORMAL`, `cache_size=-64000` (64MB), `temp_store=MEMORY`. WAL уже был включён.
+
+### Конфиг
+- `config/settings.yaml → learning`: `hint_ttl_days: 90`, `site_profiles_path: data/site_profiles.json`.
+- `config_loader.get_learning_config(key, default)`.
+
+### Тесты
+- Новые: `tests/test_learning_loop.py` (13), `test_graph_engine.py` +3 (expires_at, delete_expired, pragmas), `test_memory_manager.py` +9 (HintManager 5, ApproachVersioning 4).
+- **293 passed** (было 268, +25 новых), 13 failed — предсуществующие (нет `pytest-asyncio` в venv, async-тесты mcp_bridge/pdf_parser). Регрессий нет.
+
+### Изменённые/новые файлы
+- Новые: `src/learning_loop.py`, `tests/test_learning_loop.py`.
+- Изменённые: `src/graph_engine.py`, `src/memory_manager.py`, `src/mcp_agent_runner.py`, `src/task_scheduler.py`, `src/config_loader.py`, `config/settings.yaml`, `tests/test_graph_engine.py`, `tests/test_memory_manager.py`, `readme.md`.
+
+### Следующий шаг
+- Пользователь проверяет → подтверждение → тег `phase-4-done` → слияние `phase/4-graph` в `refactor/v2.0`.
+- Фаза 5: Модернизация PDF-парсера (LLM structurer как опция, OCR-fallback через MinerU-режим) — см. аналитику, строки ~1854+.
+

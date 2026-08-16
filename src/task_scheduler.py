@@ -17,8 +17,9 @@ class TaskScheduler:
     """Группирует товары по целевым сайтам, чтобы минимизировать
     переключения контекста браузера между товарами одного сайта."""
 
-    def __init__(self, memory_manager):
+    def __init__(self, memory_manager, site_profiles: dict | None = None):
         self.mm = memory_manager
+        self.site_profiles = site_profiles or {}
 
     def plan_processing_order(self, products: List) -> List[ProcessingBatch]:
         by_site = {}
@@ -70,9 +71,13 @@ class TaskScheduler:
             logger.warning("get_approaches_by_site failed for %s: %s", site_id, e)
         total_ok = sum(a.get("success_count", 0) for a in approaches)
         total_fail = sum(a.get("failures_count", 0) for a in approaches)
-        site["success_rate"] = total_ok / max(total_ok + total_fail, 1)
-        site["has_antibot"] = False
-        site["speed_score"] = 0.5
+        learned = self.site_profiles.get(site_id, {})
+        # Профиль из LearningLoop (последний прогон) приоритетнее расчёта по подходам
+        site["success_rate"] = learned.get("success_rate", total_ok / max(total_ok + total_fail, 1))
+        site["has_antibot"] = learned.get("has_antibot", False)
+        site["speed_score"] = learned.get("speed_score", 0.5)
+        site["block_count"] = learned.get("block_count", 0)
+        site["avg_attempts"] = learned.get("avg_attempts", 0)
         return site
 
     def _calculate_priority(self, site_info: dict, product_count: int) -> float:

@@ -13,11 +13,13 @@ from src.mcp_bridge import MCPBridge
 from src.graph_engine import GraphEngine
 from src.memory_manager import MemoryManager
 from src.validator import validate_result
-from src.config_loader import get_run_config
+from src.config_loader import get_run_config, get_antidetect_config
 from src.models.schemas import ExtractionResult
 from src.stuck_detector import StuckDetector, StuckLevel
 from src.resilience import llm_circuit
 from src.adaptive_limits import AdaptiveRoundManager
+from src.rate_limiter import DomainRateLimiter
+from src.captcha_detector import CaptchaDetector, CaptchaType
 
 logger = logging.getLogger("pricer.agent")
 
@@ -27,7 +29,6 @@ SUMMARIZE_MAX_CHARS = get_run_config("summarize_max_chars", 8000)
 SUMMARIZE_MAX_LINES = get_run_config("summarize_max_lines", 200)
 CAPTCHA_KEYWORDS = get_run_config("captcha_keywords", ["ddos-guard", "hcheck", "js-check"])
 SEARCH_ENGINE = get_run_config("search_engine", "Яндекс")
-
 UNKNOWN_PT = "unknown"
 CONF_TRUSTED = 0.9
 CONF_GOOD = 0.8
@@ -433,6 +434,10 @@ async def process_row(
     stuck_detector = StuckDetector()
     yandex_reminded = False
     yandex_price_saved = False
+    rate_limiter = DomainRateLimiter(
+        min_interval=get_antidetect_config("rate_limit_min_interval", 1.5),
+        max_requests_per_minute=get_antidetect_config("rate_limit_max_requests_per_minute", 20),
+    )
 
     while rounds < MAX_ROUNDS:
         rounds += 1
@@ -504,6 +509,8 @@ async def process_row(
                 if new_site and new_site != current_site:
                     current_site = new_site
                     rounds_on_site = 0
+                if rate_limiter is not None:
+                    await rate_limiter.wait_if_needed(new_site or "")
                 result = await mcp_bridge.call_tool(tool_name, tool_args)
             else:
                 result = await mcp_bridge.call_tool(tool_name, tool_args)
@@ -556,14 +563,18 @@ async def process_row(
                         break
 
             # Captcha/block detection — skip site immediately
-            if any(kw in tool_content.lower() for kw in CAPTCHA_KEYWORDS) and current_site:
-                logger.warning("🚫 Captcha detected on %s — skip site", current_site)
+            if (any(kw in tool_content.lower() for kw in CAPTCHA_KEYWORDS)
+                    or CaptchaDetector.detect(tool_content) != CaptchaType.NONE) and current_site:
+                captcha_type = CaptchaDetector.detect(tool_content)
+                recommendation = CaptchaDetector.get_recommendation(captcha_type)
+                logger.warning("🚫 Captcha (%s, %s) detected on %s — skip site",
+                               captcha_type.value, recommendation, current_site)
                 try:
                     failed_domain = _extract_domain(current_site)
                     _deprecate_site_approaches(memory_manager, product_type, failed_domain, "🚫 Captcha:")
                 except Exception as e:
                     logger.warning("Captcha deprecation failed: %s", e)
-                tool_content = "Сайт заблокирован captcha/проверкой бота. НЕ ПЫТАЙСЯ ЕГО ОБОЙТИ."
+                tool_content = f"Сайт заблокирован captcha/проверкой бота ({captcha_type.value}). Рекомендация: {recommendation}. НЕ ПЫТАЙСЯ ЕГО ОБОЙТИ."
                 messages.append({
                     "role": "tool",
                     "tool_call_id": tc.get("id", ""),
