@@ -104,21 +104,24 @@ C:\Projects\Pricer_Vision\
 │   │   ├── feedback.py          #   Таблица pdf_corrections в pricer.db
 │   │   ├── review_dialog.py     #   QTableWidget редактирования
 │   │   └── runner.py            #   QThread оркестратор
-│   ├── agent_loop.py            # Основной цикл (3-веточный routing, format_steps, negative feedback, _query_llm, StuckDetector)
+│   ├── agent_loop.py            # Основной цикл (3-веточный routing, format_steps, negative feedback, _query_llm, StuckDetector, температуры фаз, контекстный бюджет)
+│   ├── adaptive_limits.py       # AdaptiveRoundManager — динамические лимиты раундов per-site (Фаза 2)
 │   ├── audit_logger.py          # Audit-лог JSONL (data/audit/session_*.jsonl)
 │   ├── config_loader.py         # Загрузчик config/settings.yaml
 │   ├── excel_writer.py
 │   ├── graph_engine.py          # SQLite + in-memory (inc кэш, unknown excluded)
 │   ├── _labels.py
-│   ├── llm_client.py            # HTTP клиент для LM Studio (+ retry с backoff из llm.retry)
-│   ├── mcp_agent_runner.py      # QThread обёртка (+ AuditLogger)
+│   ├── llm_client.py            # HTTP клиент для LM Studio (+ retry с backoff из llm.retry, per-call temperature/max_tokens)
+│   ├── mcp_agent_runner.py      # QThread обёртка (+ AuditLogger, TaskScheduler, SemanticCache)
 │   ├── mcp_bridge.py            # MCP клиент (Playwright @playwright/mcp, ref→target, mcp_circuit)
 │   ├── memory_manager.py        # CRUD графа (+ intent, dedup, SOLD_AT, record_soldat filter)
 │   ├── models/                  # Pydantic-схемы (Фаза 1)
 │   │   └── schemas.py           #   ExtractionResult, AgentDecision, ExtractedPrice, ActionType
 │   ├── resilience.py            # CircuitBreaker (llm/mcp), retry_with_backoff (Фаза 1)
+│   ├── semantic_cache.py        # SemanticCache — Jaccard-кэш похожих товаров (data/semantic_cache.json) (Фаза 2)
 │   ├── study_runner.py          # QThread обучения (50 раундов, get_hints, утверждение)
 │   ├── stuck_detector.py        # StuckDetector — зацикливание/блокировки (Фаза 1)
+│   ├── task_scheduler.py        # TaskScheduler — группировка товаров по сайтам (Фаза 2)
 │   ├── site_order_dialog.py
 │   ├── theme.py
 │   ├── toast.py
@@ -274,4 +277,31 @@ pdf_parser:
 
 ### Конфиг
 - `llm.retry` (`max_attempts`, `backoff_seconds`) в `settings.yaml` подключён к `llm_client.py`
+
+## Оптимизация агентного цикла под локальную LLM (Фаза 2 рефакторинга v2.0)
+
+Реализована на ветке `phase/2-llm` (коммит `4287129`, от `phase/1-core`).
+
+### TaskScheduler (`src/task_scheduler.py`)
+- Группирует товары по целевым сайтам (`ProcessingBatch`), сортирует батчи по приоритету (`success_rate*0.4 + работа*0.3 + простота*0.2 + скорость*0.1`).
+- `_determine_target_site()`: `classify_product_type` → `mm.get_sites` → лучший по `priority − consecutive_failures*0.5`, fallback `yandex.ru`.
+- Интеграция в `mcp_agent_runner.py`: `scheduler.ordered_specs(self.specs)` перед циклом; исходные индексы строк сохраняются через `{id(spec): i}` → `row_done_signal.emit(original_idx, result)`.
+
+### SemanticCache (`src/semantic_cache.py`)
+- Без embeddings: нормализация (скобки/размеры убираются) + Jaccard-схожесть, md5-ключ, JSON `data/semantic_cache.json` (лимит 1000, evict 20%).
+- В `process_row`: проверка после rule-8 (только `not fresh`, confidence > 0.8), запись через `_store_semantic_cache()` в точках возврата цены.
+
+### AdaptiveRoundManager (`src/adaptive_limits.py`)
+- `calculate_limit(site_profile, product_complexity)`: BASE=10, MIN=5, MAX=30, сложность = f(success_rate, failures, antibot).
+- `per_site_limits(sites)` надстраивается над `site_round_limits` (failures>=3 → MIN, иначе base).
+
+### Температура по фазам
+- `LLMClient.chat()` принимает опциональные `temperature`/`max_tokens` (обратно совместимо).
+- Константы в `agent_loop.py`: `TEMP_EXPLORATION=0.7`, `TEMP_NAVIGATION=0.3`, `TEMP_EXTRACTION=0.1`, `TEMP_RECOVERY=0.5`.
+- Применяется в `_query_llm(..., temperature=...)` в 4 вызовах process_row.
+
+### Контекстный бюджет
+- `_estimate_tokens()` (≈len/4), `_trim_messages_for_budget()` (бюджет 8000 токенов): сохраняет system + хвост от последнего user-сообщения, усекает старые tool/assistant.
+- Вызывается в `_query_llm()` перед каждым LLM-запросом.
+
 

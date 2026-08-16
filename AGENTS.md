@@ -5,8 +5,7 @@
 ## Команды
 
 - **Запуск приложения:** `python main.py`
-- **Тесты:** `python -m pytest -q`
-  - Известные падения (НЕ связаны с изменениями): 13 тестов в `tests/test_mcp_bridge.py` и `tests/test_pdf_parser.py` падают, т.к. в `venv` не установлен `pytest-asyncio` (async-тесты). Остальной набор должен быть зелёным.
+- **Тесты:** `python -m pytest -q` (ожидается полный зелёный набор; async-тесты mcp_bridge/pdf_parser могут падать, если в `venv` нет `pytest-asyncio`).
 - **Проверка синтаксиса:** `python -m py_compile <files>` (либо запуск pytest).
 - Окружения: `venv/` (основное), `mineru_venv/` (изолированный Python 3.11 для MinerU).
 
@@ -21,7 +20,7 @@
 ## Регламент коммитов и отката (рефакторинг v2.0)
 
 - **Коммит и тег фаз (`phase-N-done`) — ТОЛЬКО после явного подтверждения пользователем.** Без подтверждения изменения остаются незакоммиченными.
-- Ветки фаз: `phase/N-*` от `refactor/v2.0`; базовая точка — тег `v1.0-pre-refactor`.
+- Ветки фаз: `phase/N-*` от `refactor/v2.0` (или от последней завершённой фазы); базовая точка — тег `v1.0-pre-refactor`.
 - Бэкап БД: `data/pricer_backup_20260816.db` (откат БД). Откат кода: `git checkout v1.0-pre-refactor`.
 - Прогоны 25 товаров как критерий фазы **не выполняются** — фаза считается завершённой по тестам (`python -m pytest -q`) и ревью кода.
 
@@ -29,10 +28,13 @@
 
 - `main.py` — точка входа, главное окно (таблицы, toolbar, splitter).
 - `src/` — ядро:
-  - `agent_loop.py` — основной цикл обработки строк (MCP + graph tools, нативные tool_calls, `_query_llm` c circuit breaker, StuckDetector).
+  - `agent_loop.py` — основной цикл обработки строк (MCP + graph tools, нативные tool_calls, `_query_llm` c circuit breaker, StuckDetector, температуры фаз, контекстный бюджет 8000 токенов).
+  - `task_scheduler.py` — TaskScheduler: группировка товаров по сайтам, приоритизация батчей (Фаза 2).
+  - `semantic_cache.py` — SemanticCache: Jaccard-кэш похожих товаров в `data/semantic_cache.json` (Фаза 2).
+  - `adaptive_limits.py` — AdaptiveRoundManager: динамические лимиты раундов per-site (Фаза 2).
   - `mcp_bridge.py` — клиент Playwright MCP (`npx @playwright/mcp --browser chrome`), чтение пина версии из `config/settings.yaml → deps.playwright_mcp.version`, circuit breaker (`mcp_circuit`).
   - `graph_engine.py` + `memory_manager.py` — граф знаний (SQLite `data/pricer.db`, seed из `config/categories_and_sites.yaml`).
-  - `llm_client.py` — HTTP-клиент к локальному LLM (LM Studio/Ollama/llama.cpp), retry с backoff из `llm.retry`.
+  - `llm_client.py` — HTTP-клиент к локальному LLM (LM Studio/Ollama/llama.cpp), retry с backoff из `llm.retry`, per-call `temperature`/`max_tokens`.
   - `study_runner.py` — принудительное обучение (StudyRunner QThread).
   - `resilience.py` — CircuitBreaker (`llm_circuit`/`mcp_circuit`), `retry_with_backoff` (Фаза 1).
   - `models/schemas.py` — Pydantic-схемы: `ExtractionResult`, `AgentDecision`, `ExtractedPrice` (Фаза 1).
