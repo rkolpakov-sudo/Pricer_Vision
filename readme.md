@@ -90,8 +90,10 @@ C:\Projects\Pricer_Vision\
 │   ├── pricer.db                # SQLite БД графа
 │   └── output/                  # Excel результаты
 ├── gui/
-│   ├── graph_assistant.py       # 11-туловая панель (HelpPage + CRUD + обучение)
-│   ├── graph_explorer.py        # Визуализация графа (физ. симуляция, фильтры, без авто-фита)
+│   ├── agent_monitor.py        # Real-time мониторинг агента (вкладка «Мониторинг»)
+│   ├── metrics_panel.py        # Панель метрик прогона (9 метрик)
+│   ├── graph_assistant.py      # 11-туловая панель (HelpPage + CRUD + обучение)
+│   ├── graph_explorer.py       # Визуализация графа (физ. симуляция, фильтры, LOD, без авто-фита)
 │   └── spinner_widget.py        # Spinner
 ├── mcp_servers/
 │   ├── __init__.py
@@ -165,6 +167,27 @@ C:\Projects\Pricer_Vision\
 - **Фильтры**: панель чекбоксов, по умолчанию Цены и HAS_PRICE выключены
 - **Авто-фит отключён**: `_fit()` вызывается только по кнопке "По размеру" — зум/панорама не сбрасываются ни при стабилизации физики, ни при перерендере
 - **Информер**: `NodeInfoOverlay(QFrame)` — всплывающая панель при клике на ноду (title + type/id + details). Содержит spec, цены (product), URL (site), статистику (root). Авто-скрытие при перерендере/снятии выделения. QLabel с одним родительским stylesheet'ом (шрифты через `#objectName` селекторы).
+- **LOD (Level of Detail)**: при > `LOD_THRESHOLD` (500) нодах подписи и непрерывная физическая симуляция отключаются (`_lod_decision`), граф рендерится статично и автоматически фитится. Лимит нод — `MAX_GRAPH_NODES` (1000). Чистые функции `_lod_decision`, `_edge_touches`, `_physics_step` покрыты тестами.
+- **Производительность**: обновление позиций при физике троттлится (`PHYSICS_SYNC_INTERVAL` ~30fps), подписи пересчитываются только при стабилизации (`sync_all(update_labels=False)` во время физики). Фикс бага приоритета в `_update_edges` (оператор `or`/`and` без скобок давал IndexError при `u==idx` и `v` вне границ).
+
+## Мониторинг агента
+
+Вкладка **«Мониторинг»** в правой панели (main.py), два виджета:
+
+### AgentMonitorPanel (`gui/agent_monitor.py`)
+- Real-time отображение текущего действия (`monitor_signal` из `MCPAgentRunner`), прогресс по строкам, история действий (`QListWidget`, cap 500), кнопка «Очистить».
+- `handle_event(event: dict)` обрабатывает события: `start`/`row`/`action`/`row_done`/`done`/`stop`.
+- Источник событий — `monitor_signal` в `src/mcp_agent_runner.py` + `status_callback` из `src/agent_loop.py`.
+
+### MetricsPanel (`gui/metrics_panel.py`)
+- 9 метрик прогона: всего товаров, обработано, найдено, успешность, запросов к LLM, ср. время LLM, попаданий в кэш, застреваний, блокировок.
+- `metrics_signal` из `MCPAgentRunner` (`_build_metrics`) — после каждой строки и по завершении.
+- Форматирование — чистая функция `format_metric_value(key, value)`.
+
+### Прокидывание метрик из agent_loop
+- `process_row(..., monitor_callback)` — опциональный колбэк событий: `("llm_call", elapsed)`, `("cache_hit", similarity)`, `("stuck", None)`, `("block", captcha_type)`.
+- `_query_llm(..., monitor_callback)` — замеряет время LLM-вызова и репортит `llm_call`.
+- Скриншоты страницы в монитор НЕ выводятся (дополнительный MCP round-trip на каждый шаг + риск антибот-детекции) — реализовано как API-слот, не подключено.
 
 ## Splitter (main.py)
 

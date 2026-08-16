@@ -1081,3 +1081,43 @@ C:\Projects\Pricer_Vision\
 - Ветка: `phase/6-gui` (от `refactor/v2.0`).
 
 
+## 2026-08-16 — Фаза 6: GUI и мониторинг
+
+Реализована на ветке `phase/6-gui` (от `refactor/v2.0`).
+
+### 6.1 AgentMonitorPanel (`gui/agent_monitor.py` — новый)
+- Вкладка **«Мониторинг»** в правой панели (`main.py`).
+- `AgentMonitorPanel` — real-time действия агента: текущее действие, прогресс по строкам, история действий (`QListWidget`, cap 500), кнопка «Очистить».
+- `handle_event(event)` обрабатывает события: `start`/`row`/`action`/`row_done`/`done`/`stop`.
+- Источник — новый `monitor_signal` в `MCPAgentRunner` + `status_callback` из `agent_loop.py`.
+
+### 6.2 Оптимизация графа (`gui/graph_explorer.py`)
+- **Фикс бага `_update_edges`**: операторная предшественность `u == idx or v == idx and ...` (Python: `and` приоритетнее `or`) давала IndexError при `u==idx` и `v` вне границ. Вынесен чистый предикат `_edge_touches(idx, u, v, n)`.
+- **LOD**: `_lod_decision(node_count)` — при > 500 нод (`LOD_THRESHOLD`) подписи и физика отключаются, граф рендерится статично + авто-фит. Лимит нод поднят `MAX=250` → `MAX_GRAPH_NODES=1000`. `GraphScene.build(nodes, edges, labels=False)` не создаёт QGraphicsTextItem-ы вообще (LOD-режим).
+- **Троттлинг физики**: `_on_physics_update` ограничен `PHYSICS_SYNC_INTERVAL` (~30fps); `sync_all(update_labels=False)` во время физики — подписи пересчитываются только при стабилизации.
+- **Рефактор**: шаг физики вынесен в чистую функцию `_physics_step(nodes, edges, alpha)` — тестируется без Qt.
+
+### 6.3 MetricsPanel (`gui/metrics_panel.py` — новый)
+- 9 метрик: всего/обработано/найдено/успешность/LLM-запросы/ср. время LLM/кэш-хиты/застревания/блокировки.
+- Новый `metrics_signal` в `MCPAgentRunner`, агрегация в чистой `_build_metrics()` (после каждой строки и по завершении).
+- Форматирование — чистая `format_metric_value(key, value)`.
+
+### Прокидывание метрик из agent_loop
+- `process_row(..., monitor_callback)` — опциональный колбэк: `("llm_call", elapsed)`, `("cache_hit", similarity)`, `("stuck", None)`, `("block", captcha_type)`.
+- `_query_llm(..., monitor_callback)` — замер времени LLM-вызова (`time.monotonic`).
+- **Скриншоты в монитор НЕ выведены** — доп. MCP round-trip на каждый шаг + риск антибот-детекции (по заверению, критерии фазы этого не требуют).
+
+### Тесты
+- Новые: `tests/test_graph_lod.py` (15), `tests/test_metrics_panel.py` (8), `tests/test_agent_monitor.py` (9, Qt-виджеты через `QApplication.instance()`).
+- **Критерий «GUI не тормозит при 1000+ нодах»**: `_physics_step` с 1000 нодами < 2s; `GraphScene.build` 1000 нод без подписей < 5s; LOD включается при >500.
+- **360 passed** (было 328, +32 новых), 0 failed. Регрессий нет.
+
+### Изменённые/новые файлы
+- Новые: `gui/agent_monitor.py`, `gui/metrics_panel.py`, `tests/test_graph_lod.py`, `tests/test_metrics_panel.py`, `tests/test_agent_monitor.py`.
+- Изменённые: `gui/graph_explorer.py`, `main.py`, `src/agent_loop.py`, `src/mcp_agent_runner.py`, `readme.md`, `state.md`.
+
+### Следующий шаг
+- Пользователь проверяет → подтверждение → тег `phase-6-done` → слияние `phase/6-gui` в `refactor/v2.0`.
+- **Фаза 7: Тестирование и документация** (см. аналитику, строки ~2242+): юнит-тесты критичных модулей, интеграционные тесты `process_row`, обновление `SPEC_V32.md`.
+
+

@@ -3,6 +3,7 @@ import json
 import logging
 import re
 import threading
+import time
 from collections.abc import Callable
 from datetime import datetime
 from urllib.parse import urlparse
@@ -320,6 +321,7 @@ async def process_row(
     fresh: bool = True,
     spec_meta: dict | None = None,
     semantic_cache=None,
+    monitor_callback: Callable[[str, object], None] | None = None,
 ) -> dict:
     start_time = datetime.now()
 
@@ -356,6 +358,8 @@ async def process_row(
     if not fresh and semantic_cache is not None:
         cached = semantic_cache.get_similar(spec_text)
         if cached and cached.get("confidence", 0) > CONF_GOOD and cached.get("price") is not None:
+            if monitor_callback:
+                monitor_callback("cache_hit", cached.get("similarity", 0.0))
             elapsed = (datetime.now() - start_time).total_seconds()
             result = {
                 "spec_text": spec_text,
@@ -423,7 +427,7 @@ async def process_row(
         {"role": "user", "content": context},
     ]
 
-    response = await _query_llm(llm_client, messages, all_tools, temperature=TEMP_EXPLORATION)
+    response = await _query_llm(llm_client, messages, all_tools, temperature=TEMP_EXPLORATION, monitor_callback=monitor_callback)
     if "error" in response:
         return _error_result(spec_text, f"LLM: {response['error']}")
 
@@ -487,7 +491,7 @@ async def process_row(
             messages.append({"role": "assistant", "content": content or "(no output)"})
             messages.append({"role": "user", "content": "Верни JSON с результатом поиска цены.\nФормат: {\"price\": число|null, \"confidence\": 0.0-1.0, \"url\": \"...\", \"site\": \"...\", \"reason\": \"...\", \"requires_review\": bool}"})
             _stop_check()
-            response = await _query_llm(llm_client, messages, all_tools, temperature=TEMP_EXTRACTION)
+            response = await _query_llm(llm_client, messages, all_tools, temperature=TEMP_EXTRACTION, monitor_callback=monitor_callback)
             if "error" in response:
                 return _error_result(spec_text, f"LLM: {response['error']}")
             continue
@@ -569,6 +573,8 @@ async def process_row(
                 recommendation = CaptchaDetector.get_recommendation(captcha_type)
                 logger.warning("🚫 Captcha (%s, %s) detected on %s — skip site",
                                captcha_type.value, recommendation, current_site)
+                if monitor_callback:
+                    monitor_callback("block", captcha_type.value)
                 try:
                     failed_domain = _extract_domain(current_site)
                     _deprecate_site_approaches(memory_manager, product_type, failed_domain, "🚫 Captcha:")
@@ -647,6 +653,8 @@ async def process_row(
         stuck_level = stuck_detector.detect()
         if stuck_level == StuckLevel.CRITICAL and rounds_on_site > 5:
             logger.warning("StuckDetector CRITICAL — forcing site switch")
+            if monitor_callback:
+                monitor_callback("stuck", None)
             current_site = ""
             rounds_on_site = site_round_limits.get(_extract_domain(current_site), MAX_ROUNDS_PER_SITE) + 1
             stuck_detector.reset()
@@ -670,7 +678,7 @@ async def process_row(
             rounds_on_site = 0
             current_site = ""
             _stop_check()
-            response = await _query_llm(llm_client, messages, all_tools, temperature=TEMP_RECOVERY)
+            response = await _query_llm(llm_client, messages, all_tools, temperature=TEMP_RECOVERY, monitor_callback=monitor_callback)
             if "error" in response:
                 return _error_result(spec_text, f"LLM: {response['error']}")
             continue
@@ -684,7 +692,7 @@ async def process_row(
             })
 
         _stop_check()
-        response = await _query_llm(llm_client, messages, all_tools, temperature=TEMP_NAVIGATION)
+        response = await _query_llm(llm_client, messages, all_tools, temperature=TEMP_NAVIGATION, monitor_callback=monitor_callback)
         if "error" in response:
             return _error_result(spec_text, f"LLM: {response['error']}")
 
@@ -1078,7 +1086,7 @@ def _trim_messages_for_budget(messages: list[dict], budget: int = CONTEXT_TOKEN_
     return system + kept + tail
 
 
-async def _query_llm(llm_client, messages, tools, temperature: float | None = None):
+async def _query_llm(llm_client, messages, tools, temperature: float | None = None, monitor_callback: Callable[[str, object], None] | None = None):
     """Обёртка над llm_client.chat с Circuit Breaker и температурой фазы.
     chat() возвращает {"error": ...} вместо исключения — состояние фиксируем вручную."""
     if not llm_circuit.allow_request():
@@ -1086,9 +1094,13 @@ async def _query_llm(llm_client, messages, tools, temperature: float | None = No
         await asyncio.sleep(30)
         return {"error": "LLM circuit open"}
     messages = _trim_messages_for_budget(messages)
+    t0 = time.monotonic()
     response = await llm_client.chat(messages, tools, temperature=temperature)
+    elapsed = time.monotonic() - t0
     if "error" in response:
         llm_circuit.record_failure()
     else:
         llm_circuit.record_success()
+        if monitor_callback:
+            monitor_callback("llm_call", elapsed)
     return response
