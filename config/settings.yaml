@@ -1,5 +1,5 @@
 browser:
-  headless: true
+  headless: false
   no_sandbox: true
 deps:
   playwright_mcp:
