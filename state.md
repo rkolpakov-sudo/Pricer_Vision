@@ -757,3 +757,135 @@ C:\Projects\Pricer_Vision\
 - Прогон тестов: `python -m pytest -q` (ожидаемо 13 падений async без pytest-asyncio).
 
 
+## 2026-08-16 — Фаза 1: Стабильность ядра (Pydantic, StuckDetector, Circuit Breaker, Retry, Audit)
+
+Реализована на ветке `phase/1-core` (от `refactor/v2.0`).
+
+### 1.1 Pydantic-валидация
+- Новый пакет `src/models/`:
+  - `schemas.py` — `ActionType`, `AgentDecision`, `ExtractedPrice`, `ExtractionResult` (контракт `process_row`).
+  - `ExtractionResult` использует `model_validator`: `found=True` требует `price`, цена должна быть `> 0` и `<= 10_000_000` (совпадает с `PRICE_ANOMALY_HIGH` в `validator.py`), `spec_text` не пустой.
+  - `AgentDecision.validate_target` переведён с `field_validator` на `model_validator(mode="after")` — pydantic 2.13 **не запускает field_validator на значениях по умолчанию** (важная находка), поэтому `target`-проверка для CLICK/TYPE не срабатывала.
+- `agent_loop.py`: добавлена `_result_to_schema(result) -> dict` — валидирует финальный результат через `ExtractionResult`, наружу отдаёт `model_dump()` (контракт runner/ExcelWriter сохранён). Подключена ко всем трём return-точкам результата (rule8 reuse, final_attempt, save_confirmed_price).
+- `requirements.txt`: добавлен `pydantic>=2.0.0` (в venv уже был 2.13.4).
+
+### 1.2 StuckDetector
+- Новый `src/stuck_detector.py`: `StuckDetector` + `StuckLevel` (OK/WARNING/CRITICAL/BLOCKED), `ActionRecord`, `suggest_recovery`.
+- Интеграция в `process_row`: создаётся `StuckDetector()`, после каждого MCP-шага `record_action(tool_name, target, success/no_change)`; после цикла tool_calls `detect()` — при CRITICAL и `rounds_on_site > 5` принудительный уход с сайта через существующую логику `site_round_limits`. BLOCKED не дублируется — обрабатывается существующей captcha-логикой (`CAPTCHA_KEYWORDS`).
+
+### 1.3 Circuit Breaker
+- Новый `src/resilience.py`: `CircuitBreaker`, `CircuitState` (CLOSED/OPEN/HALF_OPEN), `CircuitBreakerOpenError`, `MaxRetriesExceeded`, синглтоны `llm_circuit` (3/30s) и `mcp_circuit` (5/60s), методы `allow_request()`, `call()`, `call_async()`, `record_success/failure`, `reset()`.
+- `mcp_bridge.py`: в `call_tool` — проверка `mcp_circuit.allow_request()`, при OPEN → restart; success/failure фиксируются по результату `session.call_tool`.
+- `agent_loop.py`: добавлена `_query_llm()` — обёртка над `llm_client.chat` с `llm_circuit` (chat возвращает `{"error": ...}` вместо исключения, состояние фиксируется вручную). Все 4 вызова chat в `process_row` переведены на `_query_llm`.
+
+### 1.4 Retry с exponential backoff
+- `src/resilience.py`: `retry_with_backoff()` — работает и с sync и с async функциями (через `inspect.iscoroutinefunction`, без deprecated `asyncio.iscoroutinefunction`).
+- `llm_client.py`: подключён `llm.retry` из `settings.yaml` (`max_attempts: 2`, `backoff_seconds: 1.0`) — повторные попытки перебора URL с экспоненциальной паузой.
+- `config_loader.py`: добавлен `get_llm_retry_config()`.
+
+### 1.5 Audit Logging
+- Новый `src/audit_logger.py`: `AuditLogger` пишет JSONL в `data/audit/session_<id>.jsonl` (data/ уже в .gitignore), методы `log_llm_request`, `log_browser_action`, `log_extraction`, `get_session_summary`.
+- `mcp_agent_runner.py`: создаётся `AuditLogger()` в `_run_async`, после каждого результата строки — `audit.log_extraction()`.
+
+### Тесты
+- Новые файлы: `tests/test_schemas.py`, `tests/test_stuck_detector.py`, `tests/test_resilience.py`, `tests/test_audit_logger.py`, дополнен `tests/test_agent_loop.py` (TestResultToSchema).
+- **196 passed** (+55 новых), 13 failed — предсуществующие (нет `pytest-asyncio` в venv, async-тесты mcp_bridge/pdf_parser). Регрессий нет.
+
+### Изменённые/новые файлы
+- Новые: `src/models/__init__.py`, `src/models/schemas.py`, `src/stuck_detector.py`, `src/resilience.py`, `src/audit_logger.py`.
+- Изменённые: `src/agent_loop.py`, `src/mcp_bridge.py`, `src/mcp_agent_runner.py`, `src/llm_client.py`, `src/config_loader.py`, `requirements.txt`, `tests/test_agent_loop.py`.
+
+
+## 2026-08-16 — Handoff: переход к новой сессии (после Фазы 1)
+
+### Состояние проекта (актуальная точка)
+- Ветки: `main` (базовая), `refactor/v2.0` (от `main`), `phase/1-core` (**текущая**, Фаза 1 закоммичена).
+- Теги: `v1.0-pre-refactor` (базовая точка до рефакторинга), `phase-1-done` (Фаза 1 завершена), `v0.1.0` (старый).
+- Коммиты: `d9a9e7b` — Фаза 1; `a303207` — baseline; `b0151c7` — handoff baseline.
+- Рабочее дерево чистое, всё закоммичено.
+- Бэкап БД: `data/pricer_backup_20260816.db` (точка отката).
+
+### Регламент (обязательно к соблюдению в новой сессии)
+- **Коммит ТОЛЬКО после подтверждения пользователем** (прогон/тест/осмотр). По умолчанию коммиты и теги фаз не ставить без явного «да».
+- Ветки фаз: `phase/N-*` от `refactor/v2.0`. Теги: `phase-N-done`.
+- Откат: `git checkout main` / `git checkout v1.0-pre-refactor`; БД — из `data/pricer_backup_20260816.db`.
+- Ветка новой фазы создаётся от `phase/1-core` или `refactor/v2.0` (в зависимости от того, замержим ли Фазу 1 в `refactor/v2.0`).
+- **Прогоны товаров не выполняются** (решение пользователя) — критерий «25 товаров без крэша» пропущен, завершение фазы оцениваем по тестам и коду.
+
+### Фаза 1 — итог
+- 5/5 задач: Pydantic-валидация, StuckDetector, Circuit Breaker (MCP+LLM), Retry с backoff, Audit Logger.
+- **196 passed** (+55 новых тестов), 13 failed — предсуществующие (нет `pytest-asyncio` в venv, async-тесты mcp_bridge/pdf_parser). Регрессий нет.
+- Важная находка: pydantic 2.13 не запускает `field_validator` на значениях по умолчанию → `model_validator(mode="after")`.
+
+### Следующий шаг (Фаза 2)
+- **Фаза 2: Оптимизация агентного цикла под локальную LLM** (см. `chat-Pricer_Vision Project Analysis.md`, строки ~679+): минимизация запросов к LLM и объёма контекста, скорость +33%.
+- Рекомендация: сначала замержить `phase/1-core` → `refactor/v2.0` (или продолжить ветвление от неё), затем ветка `phase/2-*`.
+
+
+## 2026-08-16 — Фаза 2: Оптимизация агентного цикла под локальную LLM
+
+Реализована на ветке `phase/2-llm` (от `phase/1-core`).
+
+### 2.1 TaskScheduler (`src/task_scheduler.py` — новый)
+- `TaskScheduler` + `ProcessingBatch`: группировка товаров по целевым сайтам для минимизации переключений контекста браузера.
+- `_determine_target_site()`: `classify_product_type(spec_text)` → `mm.get_sites(product_type)` → сайт с лучшим `priority − consecutive_failures*0.5`; fallback `yandex.ru`.
+- `_get_site_profile()`: success_rate из approaches (`success_count`/`failures_count`), has_antibot=False, speed_score=0.5.
+- `_calculate_priority()`: success_rate*0.4 + работа*0.3 + простота*0.2 + скорость*0.1.
+- Интеграция в `mcp_agent_runner.py`: `ordered_specs()` перед циклом; исходный индекс строки сохраняется через `{id(spec): i}` → `row_done_signal.emit(original_idx, result)` (GUI не путает порядок строк).
+
+### 2.2 SemanticCache (`src/semantic_cache.py` — новый)
+- Без embedding: нормализация (убирает скобки/размеры) + Jaccard-схожесть по словам, hash-md5 ключ, JSON в `data/semantic_cache.json`.
+- Лимит 1000 записей, evict 20% старейших.
+- Интеграция в `process_row`: проверка после rule-8 (только `not fresh`, confidence > 0.8); `_store_semantic_cache()` в обеих точках возврата цены.
+- `fresh=True` кэш не читается (не переиспользуются чужие цены), но пишется.
+
+### 2.3 AdaptiveRoundManager (`src/adaptive_limits.py` — новый)
+- `calculate_limit(site_profile, product_complexity)`: BASE=10, MIN=5, MAX=30; сложность = f(success_rate, consecutive_failures, has_antibot).
+- `per_site_limits(sites)` — надстройка над существующим `site_round_limits` (failures>=3 → MIN, иначе base). `should_extend(progress)` — есть прогресс → продлить.
+- Интеграция в `process_row`: `AdaptiveRoundManager(base_rounds=MAX_ROUNDS_PER_SITE)` вместо ручного цикла.
+
+### 2.4 Температура по фазам
+- `LLMClient.chat()` расширен: необязательные `temperature`/`max_tokens` (обратно совместимо; defaults — конструктор/8192).
+- `agent_loop.py`: константы `TEMP_EXPLORATION=0.7`, `TEMP_NAVIGATION=0.3`, `TEMP_EXTRACTION=0.1`, `TEMP_RECOVERY=0.5`.
+- `_query_llm(..., temperature=...)` — применяется в 4 вызовах: первый (exploration), force-JSON (extraction), force-switch (recovery), основной цикл (navigation).
+
+### 2.5 Контекстный бюджет
+- `_estimate_tokens()` (≈len/4), `_trim_messages_for_budget()` (бюджет 8000 токенов): сохраняет system + хвост от последнего user-сообщения, усекает старые tool/assistant.
+- Вызывается в `_query_llm()` перед каждым LLM-запросом.
+
+### Тесты
+- Новые: `tests/test_task_scheduler.py` (9), `tests/test_semantic_cache.py` (12), `tests/test_adaptive_limits.py` (10); расширены `test_agent_loop.py` (+7: температуры, контекстный бюджет), `test_llm_client.py` (+2: per-call temperature/max_tokens).
+- **247 passed** (было 209, +38 новых). Регрессий нет.
+
+### Изменённые/новые файлы
+- Новые: `src/task_scheduler.py`, `src/semantic_cache.py`, `src/adaptive_limits.py`.
+- Изменённые: `src/agent_loop.py`, `src/llm_client.py`, `src/mcp_agent_runner.py`, `tests/test_agent_loop.py`, `tests/test_llm_client.py`.
+
+
+## 2026-08-16 — Handoff: переход к новой сессии (после Фазы 2)
+
+### Состояние проекта (актуальная точка)
+- Ветки: `main` (базовая), `refactor/v2.0` (от `main`), `phase/1-core` (Фаза 1), `phase/2-llm` (**текущая**, Фаза 2 закоммичена).
+- Теги: `v1.0-pre-refactor` (базовая точка до рефакторинга), `phase-1-done`, `v0.1.0` (старый). `phase-2-done` НЕ установлен (ждёт подтверждения).
+- Коммиты: `4287129` — Фаза 2; `d9a9e7b` — Фаза 1; `a303207` — baseline; `b0151c7` — handoff baseline.
+- Рабочее дерево чистое, всё закоммичено.
+- Бэкап БД: `data/pricer_backup_20260816.db` (точка отката).
+
+### Регламент (обязательно к соблюдению в новой сессии)
+- **Коммит и тег фаз ТОЛЬКО после подтверждения пользователем.** По умолчанию коммиты и теги фаз не ставить без явного «да».
+- Ветки фаз: `phase/N-*` от `refactor/v2.0` (или от последней завершённой фазы). Теги: `phase-N-done`.
+- Откат: `git checkout main` / `git checkout v1.0-pre-refactor`; БД — из `data/pricer_backup_20260816.db`.
+- **Прогоны товаров не выполняются** — фаза считается завершённой по тестам (`python -m pytest -q`) и ревью кода.
+- Перед изменениями читать `readme.md`, `state.md`, `AGENTS.md`.
+- После действий — обновлять `state.md`.
+
+### Фаза 2 — итог
+- 5/5 задач: TaskScheduler (группировка по сайтам), SemanticCache, AdaptiveRoundManager, температура по фазам, контекстный бюджет 8000 токенов.
+- **247 passed** (+38 новых), 0 failed. Регрессий нет.
+- Коммит `4287129` на `phase/2-llm`. Следующий шаг: пользователь проверяет работу → подтверждение → тег `phase-2-done` → слияние в `refactor/v2.0`.
+
+### Следующий шаг (Фаза 3)
+- **Фаза 3: Антидетект и браузерная автоматизация** (см. `chat-Pricer_Vision Project Analysis.md`, строки ~1060+): расширенный stealth.js (патчи 13–17), имитация человеческого поведения, работа с captcha, ротация профилей браузера.
+- Ветка: `phase/3-antidetect` (от `phase/2-llm` или `refactor/v2.0` после слияния).
+
+

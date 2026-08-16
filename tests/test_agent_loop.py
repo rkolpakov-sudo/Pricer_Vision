@@ -2,7 +2,10 @@ import pytest
 from src.agent_loop import (
     GRAPH_TOOL_NAMES, GRAPH_TOOL_DEFS, SYSTEM_PROMPT,
     _build_context, _execute_graph_tool,
-    _error_result,
+    _error_result, _result_to_schema,
+    _estimate_tokens, _trim_messages_for_budget,
+    CONTEXT_TOKEN_BUDGET,
+    TEMP_EXPLORATION, TEMP_NAVIGATION, TEMP_EXTRACTION, TEMP_RECOVERY,
 )
 
 
@@ -23,6 +26,54 @@ class TestConstants:
     def test_tool_defs_have_descriptions(self):
         for td in GRAPH_TOOL_DEFS:
             assert len(td["function"]["description"]) > 5
+
+    def test_phase_temperatures_distinct(self):
+        temps = {TEMP_EXPLORATION, TEMP_NAVIGATION, TEMP_EXTRACTION, TEMP_RECOVERY}
+        assert len(temps) == 4
+        assert TEMP_EXTRACTION == 0.1
+        assert TEMP_EXPLORATION == 0.7
+
+
+class TestContextBudget:
+    def test_budget_constant(self):
+        assert CONTEXT_TOKEN_BUDGET == 8000
+
+    def test_estimate_tokens(self):
+        assert _estimate_tokens("") == 0
+        assert _estimate_tokens("short") == 1
+        assert _estimate_tokens("a" * 40) == 10
+
+    def test_trim_keeps_small_messages(self):
+        messages = [{"role": "system", "content": "s"}] + [
+            {"role": "user", "content": "hello world"}
+        ]
+        out = _trim_messages_for_budget(messages)
+        assert out == messages
+
+    def test_trim_removes_old_when_over_budget(self):
+        big = "x" * 40000  # ~10000 tokens, over budget alone
+        messages = [
+            {"role": "system", "content": "sys"},
+            {"role": "user", "content": big},
+            {"role": "assistant", "content": "a"},
+            {"role": "user", "content": "final"},
+        ]
+        out = _trim_messages_for_budget(messages)
+        # последний user + system сохраняются
+        roles = [m["role"] for m in out]
+        assert roles[-1] == "user"
+        assert roles[0] == "system"
+        total = sum(_estimate_tokens(m.get("content", "")) for m in out)
+        assert total <= CONTEXT_TOKEN_BUDGET
+
+    def test_trim_preserves_last_user(self):
+        messages = [{"role": "system", "content": "s"}]
+        for i in range(50):
+            messages.append({"role": "user", "content": "m" * 1000})
+        messages.append({"role": "assistant", "content": "tail"})
+        out = _trim_messages_for_budget(messages)
+        assert out[-1]["content"] == "tail"
+        assert any(m["role"] == "user" for m in out)
 
 
 class TestBuildContext:
@@ -104,3 +155,34 @@ class TestExecuteGraphTool:
         assert "сохранён" in result.lower()
         sites = mm.get_sites("cables")
         assert any(s["id"] == "new-site.ru" for s in sites)
+
+
+class TestResultToSchema:
+    def test_success_result(self):
+        result = {
+            "spec_text": "ВВГ 3x1.5", "product_type": "cables",
+            "price": 1500.5, "confidence": 0.95, "url": "https://tinko.ru",
+            "site": "tinko.ru", "reason": "", "requires_review": False,
+            "elapsed": 12.3,
+        }
+        out = _result_to_schema(result)
+        assert out["spec_text"] == "ВВГ 3x1.5"
+        assert out["found"] is True
+        assert out["price"] == 1500.5
+        assert out["requires_review"] is False
+        assert out["product_type"] == "cables"
+
+    def test_no_price_result(self):
+        result = {
+            "spec_text": "Кабель", "price": None, "confidence": 0.0,
+            "requires_review": True, "error": "Max rounds reached", "elapsed": 30.0,
+        }
+        out = _result_to_schema(result)
+        assert out["found"] is False
+        assert out["price"] is None
+        assert out["error"] == "Max rounds reached"
+
+    def test_returns_original_on_invalid(self):
+        result = {"spec_text": "", "price": -5, "requires_review": True}
+        out = _result_to_schema(result)
+        assert out is result

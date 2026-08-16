@@ -1,7 +1,10 @@
+import asyncio
 import httpx
 import json
 import logging
 from typing import Any
+
+from src.config_loader import get_llm_retry_config
 
 logger = logging.getLogger("pricer.llm")
 
@@ -66,13 +69,19 @@ class LLMClient:
 
     async def chat(self, messages: list[dict],
                    tools: list[dict] | None = None,
-                   force_json: bool = False) -> dict[str, Any]:
+                   force_json: bool = False,
+                   *,
+                   temperature: float | None = None,
+                   max_tokens: int | None = None) -> dict[str, Any]:
         if not self._client:
             return {"error": "client not initialized"}
 
+        temp = temperature if temperature is not None else self.temperature
+        tok = max_tokens if max_tokens is not None else 8192
+
         # if we already found a working URL, use it directly
         if self._active_url:
-            result = await self._try_chat(self._active_url, messages, tools, force_json)
+            result = await self._try_chat(self._active_url, messages, tools, force_json, temp, tok)
             if "error" not in result:
                 return result
             if self._is_retryable(result["error"]):
@@ -85,22 +94,31 @@ class LLMClient:
         urls.extend(self._fallback_urls)
 
         last_error = ""
-        for name, url in urls:
-            if name:
-                logger.info(f"Trying {name}...")
-            result = await self._try_chat(url, messages, tools, force_json)
-            if "error" not in result:
-                self._active_url = url
-                return result
-            last_error = result["error"]
-            if not self._is_retryable(last_error):
-                break
-            logger.warning(f"{name or 'primary'} {last_error}, trying fallback...")
+        max_attempts = get_llm_retry_config("max_attempts", 2)
+        backoff_seconds = get_llm_retry_config("backoff_seconds", 1.0)
+        for attempt in range(max_attempts):
+            for name, url in urls:
+                if name:
+                    logger.info(f"Trying {name}...")
+                result = await self._try_chat(url, messages, tools, force_json, temp, tok)
+                if "error" not in result:
+                    self._active_url = url
+                    return result
+                last_error = result["error"]
+                if not self._is_retryable(last_error):
+                    break
+                logger.warning(f"{name or 'primary'} {last_error}, trying fallback...")
+            if attempt < max_attempts - 1:
+                delay = backoff_seconds * (2 ** attempt)
+                logger.warning(f"LLM retry {attempt + 1}/{max_attempts} in {delay:.1f}s...")
+                await asyncio.sleep(delay)
         return {"error": f"LLM недоступен: {last_error}. Проверьте LM Studio / Ollama"}
 
     async def _try_chat(self, url: str, messages: list[dict],
                         tools: list[dict] | None = None,
-                        force_json: bool = False) -> dict[str, Any]:
+                        force_json: bool = False,
+                        temperature: float | None = None,
+                        max_tokens: int | None = None) -> dict[str, Any]:
         model_name = self.model
         if not model_name and not self._detected:
             await self.detect_model()
@@ -111,8 +129,8 @@ class LLMClient:
         body = {
             "model": model_name,
             "messages": messages,
-            "max_tokens": 8192,
-            "temperature": self.temperature,
+            "max_tokens": max_tokens if max_tokens is not None else 8192,
+            "temperature": temperature if temperature is not None else self.temperature,
         }
         if tools:
             body["tools"] = tools

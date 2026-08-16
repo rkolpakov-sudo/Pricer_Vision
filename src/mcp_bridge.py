@@ -6,6 +6,8 @@ from pathlib import Path
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
 
+from src.resilience import mcp_circuit, CircuitState
+
 logger = logging.getLogger("pricer.bridge")
 
 _HASH_REF_RE = __import__("re").compile(r"^[ef]\d+$|^f\d+e\d+$")
@@ -103,6 +105,11 @@ class MCPBridge:
         srv = self._tool_map.get(tool_name)
         if not srv or not srv.session:
             return f"error: tool '{tool_name}' not found on any server"
+        # Circuit Breaker: блокируем вызовы при открытом состоянии (после восстановления — restart)
+        if not mcp_circuit.allow_request():
+            logger.error("MCP unavailable, restarting...")
+            await self.restart()
+            return "error: MCP circuit open"
         # Clean empty selector args that cause Playwright parsing errors
         for key in ("target", "element", "ref"):
             if key in arguments and not arguments[key]:
@@ -127,8 +134,10 @@ class MCPBridge:
                         parts.append(f"[binary: {len(content.data)} bytes]")
                     elif hasattr(content, "type") and content.type == "resource":
                         parts.append(f"[resource: {getattr(content, 'uri', '?')}]")
+                mcp_circuit.record_success()
                 return "\n".join(parts)
             except Exception as e:
+                mcp_circuit.record_failure()
                 logger.warning("MCP tool '%s' on '%s' failed: %s", tool_name, srv.name, e)
                 return f"error: tool call failed: {e}"
 

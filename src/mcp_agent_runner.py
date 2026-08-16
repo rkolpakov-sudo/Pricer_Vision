@@ -9,6 +9,9 @@ from src.memory_manager import MemoryManager
 from src.llm_client import LLMClient
 from src.mcp_bridge import MCPBridge
 from src.agent_loop import process_row
+from src.audit_logger import AuditLogger
+from src.task_scheduler import TaskScheduler
+from src.semantic_cache import SemanticCache
 
 logger = logging.getLogger("pricer.runner")
 
@@ -49,6 +52,8 @@ class MCPAgentRunner(QThread):
         engine = GraphEngine(self.db_path)
         engine.build()
         mm = MemoryManager(engine)
+        audit = AuditLogger()
+        semantic_cache = SemanticCache()
 
         yaml_path = "config/categories_and_sites.yaml"
         from pathlib import Path
@@ -77,8 +82,11 @@ class MCPAgentRunner(QThread):
         try:
             results = []
             total = len(self.specs)
+            scheduler = TaskScheduler(mm)
+            ordered = scheduler.ordered_specs(self.specs)
+            original_index = {id(spec): i for i, spec in enumerate(self.specs)}
             last_health_check = datetime.now()
-            for i, spec in enumerate(self.specs):
+            for i, spec in enumerate(ordered):
                 if self._stop_event.is_set():
                     self.status_signal.emit("stop")
                     break
@@ -116,6 +124,7 @@ class MCPAgentRunner(QThread):
                                 status_callback=_status,
                                 fresh=self._fresh,
                                 spec_meta=spec_meta,
+                                semantic_cache=semantic_cache,
                             ),
                             timeout=300.0,
                         )
@@ -139,7 +148,9 @@ class MCPAgentRunner(QThread):
                 if self._stop_event.is_set():
                     break
                 results.append(result)
-                self.row_done_signal.emit(i, result)
+                audit.log_extraction(spec_text, result.get("price") is not None, result.get("price"))
+                row_idx = original_index.get(id(spec), i)
+                self.row_done_signal.emit(row_idx, result)
 
                 if self._restart_bridge.is_set():
                     new_headless = self._restart_bridge_value

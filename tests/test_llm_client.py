@@ -8,7 +8,6 @@ class TestLLMClient:
         assert client.temperature == 0.3
         assert client.timeout == 150.0
         assert "/chat/completions" in client.completions_url
-
     def test_init_custom_url(self):
         client = LLMClient(url="http://localhost:1234/v1/chat/completions")
         assert client.base_url == "http://localhost:1234/v1"
@@ -59,3 +58,44 @@ class TestLLMClient:
 
         import asyncio
         asyncio.run(test())
+
+    def test_chat_passes_temperature_and_max_tokens(self):
+        import asyncio
+        client = LLMClient()
+
+        captured = {}
+
+        async def fake_try_chat(url, messages, tools, force_json, temperature, max_tokens):
+            captured["temperature"] = temperature
+            captured["max_tokens"] = max_tokens
+            return {"choices": [{"message": {"content": "ok"}}]}
+
+        async def test():
+            async with client:
+                client._try_chat = fake_try_chat
+                await client.chat([{"role": "user", "content": "hi"}],
+                                  temperature=0.1, max_tokens=2048)
+
+        asyncio.run(test())
+        assert captured["temperature"] == 0.1
+        assert captured["max_tokens"] == 2048
+
+    def test_chat_uses_defaults_when_not_passed(self):
+        import asyncio
+        client = LLMClient(temperature=0.7)
+
+        captured = {}
+
+        async def fake_try_chat(url, messages, tools, force_json, temperature, max_tokens):
+            captured["temperature"] = temperature
+            captured["max_tokens"] = max_tokens
+            return {"choices": [{"message": {"content": "ok"}}]}
+
+        async def test():
+            async with client:
+                client._try_chat = fake_try_chat
+                await client.chat([{"role": "user", "content": "hi"}])
+
+        asyncio.run(test())
+        assert captured["temperature"] == 0.7
+        assert captured["max_tokens"] == 8192

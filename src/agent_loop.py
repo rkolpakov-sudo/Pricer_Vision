@@ -14,6 +14,10 @@ from src.graph_engine import GraphEngine
 from src.memory_manager import MemoryManager
 from src.validator import validate_result
 from src.config_loader import get_run_config
+from src.models.schemas import ExtractionResult
+from src.stuck_detector import StuckDetector, StuckLevel
+from src.resilience import llm_circuit
+from src.adaptive_limits import AdaptiveRoundManager
 
 logger = logging.getLogger("pricer.agent")
 
@@ -28,6 +32,11 @@ UNKNOWN_PT = "unknown"
 CONF_TRUSTED = 0.9
 CONF_GOOD = 0.8
 CONF_MIN = 0.6
+
+TEMP_EXPLORATION = 0.7
+TEMP_NAVIGATION = 0.3
+TEMP_EXTRACTION = 0.1
+TEMP_RECOVERY = 0.5
 
 _SNAPSHOT_LINE_RE = re.compile(r'^- \d+: \[')
 
@@ -309,6 +318,7 @@ async def process_row(
     status_callback: Callable[[str], None] | None = None,
     fresh: bool = True,
     spec_meta: dict | None = None,
+    semantic_cache=None,
 ) -> dict:
     start_time = datetime.now()
 
@@ -339,17 +349,31 @@ async def process_row(
                 reason="rule8_reuse",
             )
             logger.info("Row: price=%s validated=%.2f in %.1fs", result["price"], result["confidence"], elapsed)
-            return result
+            return _result_to_schema(result)
+
+    # Semantic cache: reuse results for similar products (skipped when fresh)
+    if not fresh and semantic_cache is not None:
+        cached = semantic_cache.get_similar(spec_text)
+        if cached and cached.get("confidence", 0) > CONF_GOOD and cached.get("price") is not None:
+            elapsed = (datetime.now() - start_time).total_seconds()
+            result = {
+                "spec_text": spec_text,
+                "product_type": product_type,
+                "price": cached["price"],
+                "confidence": cached["confidence"],
+                "url": cached.get("url", ""),
+                "site": cached.get("site", ""),
+                "reason": f"semantic_cache hit ({cached.get('similarity', 0.0):.2f})",
+                "requires_review": False,
+                "elapsed": elapsed,
+            }
+            logger.info("Cache hit for '%s' (similarity: %.2f)", spec_text[:40], cached.get("similarity", 0.0))
+            return _result_to_schema(result)
 
     sites = memory_manager.get_sites(product_type)
     # Adaptive rounds per-site: reduce for high-failure sites
-    site_round_limits = {}
-    if sites:
-        for s in sites:
-            if s.get("consecutive_failures", 0) >= 3:
-                site_round_limits[s["id"]] = 5
-            else:
-                site_round_limits[s["id"]] = MAX_ROUNDS_PER_SITE
+    adaptive_limits = AdaptiveRoundManager(base_rounds=MAX_ROUNDS_PER_SITE)
+    site_round_limits = adaptive_limits.per_site_limits(sites) if sites else {}
     hints = memory_manager.get_hints(product_type) or []
     if product_type != UNKNOWN_PT:
         hints += memory_manager.get_hints(UNKNOWN_PT)
@@ -398,7 +422,7 @@ async def process_row(
         {"role": "user", "content": context},
     ]
 
-    response = await llm_client.chat(messages, all_tools)
+    response = await _query_llm(llm_client, messages, all_tools, temperature=TEMP_EXPLORATION)
     if "error" in response:
         return _error_result(spec_text, f"LLM: {response['error']}")
 
@@ -406,6 +430,7 @@ async def process_row(
     current_site = ""
     rounds_on_site = 0
     steps = []
+    stuck_detector = StuckDetector()
     yandex_reminded = False
     yandex_price_saved = False
 
@@ -449,13 +474,15 @@ async def process_row(
                 _save_price_and_approach(memory_manager, spec_text, product_type, result, steps, record_soldat=True)
             elapsed = (datetime.now() - start_time).total_seconds()
             logger.info("Row: price=%s conf=%.2f in %.1fs rounds=%d", result.get('price'), result.get('confidence', 0), elapsed, rounds)
-            return {"spec_text": spec_text, "product_type": product_type, **result, "elapsed": elapsed}
+            final = {"spec_text": spec_text, "product_type": product_type, **result, "elapsed": elapsed}
+            _store_semantic_cache(semantic_cache, spec_text, final)
+            return _result_to_schema(final)
 
         if not tool_calls:
             messages.append({"role": "assistant", "content": content or "(no output)"})
             messages.append({"role": "user", "content": "Верни JSON с результатом поиска цены.\nФормат: {\"price\": число|null, \"confidence\": 0.0-1.0, \"url\": \"...\", \"site\": \"...\", \"reason\": \"...\", \"requires_review\": bool}"})
             _stop_check()
-            response = await llm_client.chat(messages, all_tools)
+            response = await _query_llm(llm_client, messages, all_tools, temperature=TEMP_EXTRACTION)
             if "error" in response:
                 return _error_result(spec_text, f"LLM: {response['error']}")
             continue
@@ -507,6 +534,14 @@ async def process_row(
                 result_str = str(result)
                 if not result_str.startswith("error:"):
                     steps.append(step)
+
+            # StuckDetector: после каждого MCP-шага (не дублирует captcha-логику)
+            target = tool_args.get("target") or tool_args.get("url") or ""
+            stuck_detector.record_action(
+                action_type=tool_name,
+                target=str(target),
+                result="success" if not str(result).startswith("error:") else "no_change",
+            )
 
             tool_content = str(result)
             if tool_name in ("browser_snapshot", "snapshot"):
@@ -582,10 +617,12 @@ async def process_row(
                         logger.warning("Failed to save price/approach in save_confirmed_price: %s", e)
                     # Low confidence → save price but keep searching (rule 5)
                     if validated.get("confidence", 0) >= CONF_MIN:
-                        return {
+                        final = {
                             "spec_text": spec_text, "product_type": product_type,
                             **validated, "elapsed": elapsed,
                         }
+                        _store_semantic_cache(semantic_cache, spec_text, final)
+                        return _result_to_schema(final)
                     logger.info("Low confidence (%.2f) — saved, continuing search", validated['confidence'])
 
         for tc_last in tool_calls:
@@ -594,6 +631,14 @@ async def process_row(
                           "get_hints", "save_discovered_site", "save_approach"):
                 rounds_on_site += 1
                 break
+
+        # StuckDetector: принудительный уход с сайта при зацикливании
+        stuck_level = stuck_detector.detect()
+        if stuck_level == StuckLevel.CRITICAL and rounds_on_site > 5:
+            logger.warning("StuckDetector CRITICAL — forcing site switch")
+            current_site = ""
+            rounds_on_site = site_round_limits.get(_extract_domain(current_site), MAX_ROUNDS_PER_SITE) + 1
+            stuck_detector.reset()
 
         current_domain = _extract_domain(current_site)
         if rounds_on_site > site_round_limits.get(current_domain, MAX_ROUNDS_PER_SITE):
@@ -614,7 +659,7 @@ async def process_row(
             rounds_on_site = 0
             current_site = ""
             _stop_check()
-            response = await llm_client.chat(messages, all_tools)
+            response = await _query_llm(llm_client, messages, all_tools, temperature=TEMP_RECOVERY)
             if "error" in response:
                 return _error_result(spec_text, f"LLM: {response['error']}")
             continue
@@ -628,7 +673,7 @@ async def process_row(
             })
 
         _stop_check()
-        response = await llm_client.chat(messages, all_tools)
+        response = await _query_llm(llm_client, messages, all_tools, temperature=TEMP_NAVIGATION)
         if "error" in response:
             return _error_result(spec_text, f"LLM: {response['error']}")
 
@@ -880,6 +925,15 @@ def _deprecate_site_approaches(memory_manager, product_type, domain, reason_pref
         logger.warning("%s deprecated %d approaches on %s", reason_prefix, len(approaches), domain)
 
 
+def _store_semantic_cache(semantic_cache, spec_text, result):
+    if semantic_cache is None or result.get("price") is None:
+        return
+    try:
+        semantic_cache.store(spec_text, result)
+    except Exception as e:
+        logger.warning("Semantic cache store failed: %s", e)
+
+
 def _save_price_and_approach(memory_manager, spec_text, product_type, price_data, steps, record_soldat=False):
     memory_manager.save_price(
         spec_text=spec_text, product_type=product_type,
@@ -930,3 +984,100 @@ def _error_result(spec_text: str, error: str, elapsed: float | None = None) -> d
         "reason": error, "requires_review": True, "error": error,
         "elapsed": elapsed,
     }
+
+
+def _result_to_schema(result: dict) -> dict:
+    """Переводит result-dict в ExtractionResult для строгой валидации.
+    Наружу отдаём .model_dump() чтобы не ломать MCPAgentRunner/ExcelWriter."""
+    try:
+        model = ExtractionResult(
+            spec_text=result.get("spec_text", ""),
+            product_type=result.get("product_type", "unknown"),
+            found=result.get("price") is not None,
+            price=result.get("price"),
+            confidence=result.get("confidence", 0.0),
+            url=result.get("url", ""),
+            site=result.get("site", ""),
+            reason=result.get("reason", ""),
+            requires_review=result.get("requires_review", True),
+            error=result.get("error"),
+            elapsed=result.get("elapsed"),
+        )
+        return model.model_dump()
+    except Exception as e:
+        logger.warning("Schema validation failed: %s", e)
+        return result
+
+
+CONTEXT_TOKEN_BUDGET = 8000
+
+
+def _estimate_tokens(text: str) -> int:
+    """Грубая оценка токенов (~4 символа на токен для кириллицы/ASCII)."""
+    if not text:
+        return 0
+    return max(1, len(text) // 4)
+
+
+def _message_size(msg: dict) -> int:
+    size = _estimate_tokens(str(msg.get("content") or ""))
+    size += _estimate_tokens(str(msg.get("role") or ""))
+    for tc in msg.get("tool_calls") or []:
+        fn = tc.get("function", {})
+        size += _estimate_tokens(fn.get("name", "") + str(fn.get("arguments", "")))
+    return size
+
+
+def _trim_messages_for_budget(messages: list[dict], budget: int = CONTEXT_TOKEN_BUDGET) -> list[dict]:
+    """Сжимает историю, если суммарный объём превышает бюджет.
+
+    Сохраняет system, последнее user-сообщение и хвост диалога;
+    выкидывает самые старые tool/assistant сообщения (они не входят в
+    system+хвост, чтобы не порвать связку tool_call_id ↔ tool).
+    """
+    if not messages:
+        return messages
+    total = sum(_message_size(m) for m in messages)
+    if total <= budget:
+        return messages
+
+    # Находим последнее user-сообщение — всё после него сохраняем целиком
+    last_user_idx = -1
+    for i, m in enumerate(messages):
+        if m.get("role") == "user":
+            last_user_idx = i
+    tail_start = last_user_idx if last_user_idx >= 0 else len(messages)
+
+    tail = messages[tail_start:]
+    tail_size = sum(_message_size(m) for m in tail)
+    system = messages[:1] if messages and messages[0].get("role") == "system" else []
+
+    # Пробегаем сообщения между system и хвостом, усекая до бюджета
+    kept = []
+    kept_size = tail_size
+    for m in messages[len(system):tail_start]:
+        size = _message_size(m)
+        if kept_size + size <= budget:
+            kept.append(m)
+            kept_size += size
+        else:
+            break
+    logger.info("Context trim: %d → %d tokens (kept %d of %d messages)",
+                total, kept_size, len(system) + len(kept) + len(tail), len(messages))
+    return system + kept + tail
+
+
+async def _query_llm(llm_client, messages, tools, temperature: float | None = None):
+    """Обёртка над llm_client.chat с Circuit Breaker и температурой фазы.
+    chat() возвращает {"error": ...} вместо исключения — состояние фиксируем вручную."""
+    if not llm_circuit.allow_request():
+        logger.error("LLM unavailable, pausing agent...")
+        await asyncio.sleep(30)
+        return {"error": "LLM circuit open"}
+    messages = _trim_messages_for_budget(messages)
+    response = await llm_client.chat(messages, tools, temperature=temperature)
+    if "error" in response:
+        llm_circuit.record_failure()
+    else:
+        llm_circuit.record_success()
+    return response
