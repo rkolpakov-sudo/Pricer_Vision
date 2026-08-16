@@ -298,12 +298,16 @@ class MainWindow(QMainWindow):
         self.results_table.itemDoubleClicked.connect(self._on_url_double_click)
         center_tabs.addTab(self.results_table, "Результаты")
 
-        self.preview_table = QTableWidget(0, 4)
-        self.preview_table.setHorizontalHeaderLabels(["#", "Наименование", "Артикул", "Кол-во"])
-        self.preview_table.horizontalHeader().setStretchLastSection(True)
+        self.preview_table = QTableWidget(0, 6)
+        self.preview_table.setHorizontalHeaderLabels(
+            ["#", "Наименование", "Производитель", "Тип/обозначение", "Артикул", "Кол-во"]
+        )
         self.preview_table.setColumnWidth(0, 30)
-        self.preview_table.setColumnWidth(1, 300)
-        self.preview_table.setColumnWidth(2, 150)
+        self.preview_table.setColumnWidth(1, 260)
+        self.preview_table.setColumnWidth(2, 110)
+        self.preview_table.setColumnWidth(3, 140)
+        self.preview_table.setColumnWidth(4, 130)
+        self.preview_table.setColumnWidth(5, 60)
         self.preview_table.setAlternatingRowColors(True)
         center_tabs.addTab(self.preview_table, "Предпросмотр")
 
@@ -419,11 +423,29 @@ class MainWindow(QMainWindow):
             self._show_preview()
             self._center_tabs.setCurrentIndex(1)  # switch to Предпросмотр
             self.add_log("INFO", "init", f"Loaded {self._total_rows} rows from {Path(path).name}")
-            self.status_label.setText(f"Загружено: {self._total_rows} строк")
+            mapping = self.excel_writer.detect_columns(headers)
+            self.status_label.setText(
+                f"Загружено: {self._total_rows} строк · Колонки: {self._mapping_hint(mapping)}"
+            )
             self.toast_manager.success(f"Loaded {self._total_rows} rows")
         except Exception as e:
             self.add_log("ERR", "init", f"Failed to load: {e}")
             QMessageBox.critical(self, "Ошибка", f"Не удалось загрузить файл:\n{e}")
+
+    @staticmethod
+    def _mapping_hint(mapping: dict) -> str:
+        """Краткий список распознанных колонок для статусной строки."""
+        roles = [
+            ("name", "Наименование"), ("brand", "Производитель"), ("spec", "Тип/обозначение"),
+            ("article", "Артикул"), ("uom", "Ед.изм."), ("qty", "Кол-во"),
+        ]
+        found = []
+        for key, label in roles:
+            value = mapping.get(key)
+            present = bool(value) if key in ("name", "brand", "spec", "article") else value is not None
+            if present:
+                found.append(label)
+        return ", ".join(found) if found else "нет распознанных колонок"
 
     def _show_preview(self):
         ws = self.excel_writer.ws
@@ -432,9 +454,11 @@ class MainWindow(QMainWindow):
             return
 
         mapping = self.excel_writer.detect_columns(headers)
-        name_cols = mapping["name"]
-        article_cols = mapping["article"]
-        qty_col = mapping["qty"]
+        name_cols = mapping.get("name", [])
+        brand_cols = mapping.get("brand", [])
+        spec_cols = mapping.get("spec", [])
+        article_cols = mapping.get("article", [])
+        qty_col = mapping.get("qty")
 
         self.preview_table.setRowCount(0)
         for excel_row in range(2, ws.max_row + 1):
@@ -447,19 +471,36 @@ class MainWindow(QMainWindow):
 
             self.preview_table.setItem(row, 1, QTableWidgetItem(name[:80]))
 
+            brand = self._concat_display(ws, excel_row, brand_cols)
+            self.preview_table.setItem(row, 2, QTableWidgetItem(brand))
+
+            spec = self._concat_display(ws, excel_row, spec_cols)
+            self.preview_table.setItem(row, 3, QTableWidgetItem(spec[:80]))
+
             article_parts = []
             for idx in article_cols:
                 val = str(ws.cell(excel_row, idx + 1).value or "").strip()
                 if val and val not in ("None", ""):
                     article_parts.append(val)
-            self.preview_table.setItem(row, 2, QTableWidgetItem(", ".join(article_parts)))
+            self.preview_table.setItem(row, 4, QTableWidgetItem(", ".join(article_parts)))
 
             qty_val = ""
             if qty_col is not None:
                 v = ws.cell(excel_row, qty_col + 1).value
                 if v is not None:
                     qty_val = str(v)
-            self.preview_table.setItem(row, 3, QTableWidgetItem(qty_val))
+            self.preview_table.setItem(row, 5, QTableWidgetItem(qty_val))
+
+    @staticmethod
+    def _concat_display(ws, excel_row: int, indices: list[int]) -> str:
+        """Собирает значения колонок для предпросмотра (без кавычек бренда)."""
+        parts = []
+        for idx in indices:
+            val = str(ws.cell(excel_row, idx + 1).value or "").strip()
+            val = val.strip('"«»')
+            if val and val not in ("None", ""):
+                parts.append(val)
+        return " ".join(parts)
 
     def _tick_spinner(self):
         self._spinner.tick()
