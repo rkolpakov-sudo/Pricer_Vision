@@ -1135,3 +1135,53 @@ C:\Projects\Pricer_Vision\
 - Ветка: `phase/7-testing` (от `refactor/v2.0`).
 
 
+## 2026-08-16 — Фаза 7: Тесты и документация
+
+Реализована на ветке `phase/7-testing` (от `refactor/v2.0`).
+
+### 7.1 Юнит-тесты критичных модулей
+- **Новый `tests/test_config_loader.py`** (14 тестов) — все геттеры и save-функции конфига; реальный `settings.yaml` НЕ трогается (monkeypatch пути через `os.path.dirname` + `_SETTINGS_CACHE`). `config_loader` покрытие 57% → 100%.
+- **Новый `tests/test_context_optimizer.py`** (16 тестов) — `_estimate_tokens`/`_message_size`/`_trim_messages_for_budget` (выделено из test_agent_loop в отдельный файл по структуре Фазы 7).
+- **Новый `tests/test_smart_review.py`** (13 тестов) — edge cases SmartReview: порог 0.8, сброс между вызовами, пустой вход, строковый/отрицательный qty, cap 1.0.
+- **Новый `tests/test_excel_writer.py`** (22 теста) — Qt-free (openpyxl): load_spec, detect_columns, build_item_name, get_specs, write_result, save_output_copy. `excel_writer` покрытие 0% → 97%.
+- Существующие критичные модули уже покрыты: schemas (96%), stuck_detector (100%), semantic_cache (95%), rate_limiter (100%), learning_loop (89%).
+
+### 7.2 Интеграционные тесты `process_row`
+- **Новый `tests/integration/test_agent_flow.py`** (9 тестов, `@pytest.mark.asyncio`) — полный цикл с моками (FakeLLM/FakeBridge/FakeEngine/FakeMemoryManager):
+  - Полное извлечение (LLM сразу даёт цену)
+  - Tool_call цикл (navigate → финальная цена)
+  - Reuse rule 8 (fresh=False, confidence ≥ 0.9 → без LLM)
+  - Semantic cache hit (без LLM)
+  - Ошибка LLM → error-result
+  - Max rounds (monkeypatch MAX_ROUNDS=3)
+  - **Captcha → событие `block`** в monitor_callback
+  - **Stuck recovery** → CRITICAL → принудительный уход с сайта → событие `stuck`
+  - Контракт `_error_result`
+
+### 7.3 Документация
+- **Новый `SPEC_V32.md`** — спецификация v2.0 (пост-рефакторинг): архитектурные решения фаз 1–7, контракт `process_row`, монитор-события, карта фаз, тестирование, метрики.
+- `readme.md` — раздел «Тестирование (Фаза 7)», SPEC_V32 в структуре, tests/integration.
+
+### Исправления, найденные тестами
+- **`src/pdf_parser/review.py`**: `qty` строкой ("10") падал в `qty > 0` → TypeError. Вынесен `_positive_qty(value)` — принимает числовые строки, игнорирует невалидные.
+- **`src/excel_writer.py`**: `detect_columns` fallback добавлял `None`-заголовки в name-колонки (мусор в имени товара). Fallback теперь исключает пустые/None заголовки.
+
+### Окружение
+- В `venv/` установлены: `coverage` (7.15.4), `pytest-asyncio` (были 19 async-падений из-за отсутствия плагина — теперь 0).
+
+### Покрытие
+- TOTAL src: 43% → **52%** (Qt-тяжёлые модули dialog/worker/study_runner/toast/widget_base остаются 0% — не входят в критичные).
+- Критичные модули все >80% (см. 7.1 + 7.2).
+
+### Тесты
+- **434 passed, 0 failed** (было 360, +74 новых: 9 integration + 14 config + 16 context + 13 smart_review + 22 excel_writer).
+
+### Изменённые/новые файлы
+- Новые: `SPEC_V32.md`, `tests/test_config_loader.py`, `tests/test_context_optimizer.py`, `tests/test_smart_review.py`, `tests/test_excel_writer.py`, `tests/integration/__init__.py`, `tests/integration/test_agent_flow.py`.
+- Изменённые: `src/pdf_parser/review.py`, `src/excel_writer.py`, `readme.md`, `state.md`.
+
+### Следующий шаг
+- Пользователь проверяет → подтверждение → тег `phase-7-done` → слияние `phase/7-testing` в `refactor/v2.0`.
+- После Фазы 7 рефакторинг v2.0 завершён (все 7 фаз); дальше — приёмка по метрикам (прогоны 25 товаров по решению пользователя).
+
+
