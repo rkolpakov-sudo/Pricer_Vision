@@ -181,7 +181,7 @@ SYSTEM_PROMPT = """Ты — опытный пользователь с дост�
 13. После save_confirmed_price можно продолжить поиск на других сайтах для лучшей цены, но базовая цена уже сохранена.
 14. Если сайт явно НЕ ПОДХОДИТ для товара (например, сантехнический сайт для кабеля, или производитель труб для электроники) — НЕМЕДЛЕННО переключайся на следующий сайт. Не трать больше 2 раундов на заведомо неподходящий сайт.
 15. Если сайт использует SPA (результаты поиска не появляются после Enter) — попробуй browser_navigate напрямую на URL поиска: site.ru/search?q=ТОВАР. Не нажимай Enter на SPA-сайтах — используй прямые URL.
-16. Если в структуре файла указан завод-изготовитель, тип/обозначение или артикул/код — используй их для правильного выбора товара. Бренд/тип не обязательно вставлять в поисковый запрос: сначала найди товар по наименованию, затем среди результатов отдай предпочтение позиции того же производителя/модели/артикула. Если товар выпускается несколькими заводами — это критично для выбора правильного аналога.
+16. Если в структуре файла указан завод-изготовитель, тип/обозначение или артикул/код — используй их для правильного выбора товара. Бренд/тип не обязательно вставлять в поисковый запрос: сначала найди товар по наименованию, затем среди результатов отдай предпочтение позиции того же производителя/модели/артикула. Если товар выпускается несколькими заводами — это критично для выбора правильного аналога. Если «производитель» — это страна (например «Россия») или ссылка на стандарт (ГОСТ/ТУ/СНиП) — НЕ используй их как бренд и не вставляй в поиск.
 
 Ограничение — 60 шагов на один товар. У тебя полная свобода действий. Кратко поясняй свои намерения перед каждым действием."""
 
@@ -238,8 +238,6 @@ def _apply_approach(approach: dict, spec_text: str) -> dict:
     # always update search_query to current spec_text
     adapted["search_query"] = spec_text[:200]
     slots = approach.get("param_slots") or {}
-    if not slots:
-        return adapted
     adapted["concrete"] = []
     for step in approach.get("concrete", []):
         step = dict(step)
@@ -248,6 +246,18 @@ def _apply_approach(approach: dict, spec_text: str) -> dict:
             for field in ("text", "url", "value"):
                 if field in step and isinstance(step[field], str):
                     step[field] = step[field].replace(f"{{{slot_name}}}", spec_text[:200])
+        elif step.get("action") in ("browser_type", "type_text") and isinstance(step.get("text"), str):
+            # Текст в шаге ввода: либо шаблон с плейсхолдером {slot}, либо жёстко
+            # зашитый текст СТАРОГО товара (подход сохранён от другого продукта).
+            # Во втором случае подменяем на текущий — иначе агент ищет чужое имя.
+            text = step["text"]
+            placeholders = re.findall(r"\{(\w+)\}", text)
+            if placeholders and any(p in slots for p in placeholders):
+                for sname in slots:
+                    text = text.replace(f"{{{sname}}}", spec_text[:200])
+                step["text"] = text
+            else:
+                step["text"] = spec_text[:200]
         adapted["concrete"].append(step)
     adapted["_adapted"] = True
     return adapted
@@ -505,7 +515,7 @@ async def process_row(
             tool_args = tc.get("arguments", {})
 
             if tool_name in GRAPH_TOOL_NAMES:
-                result = _execute_graph_tool(tool_name, tool_args, graph_engine, memory_manager)
+                result = _execute_graph_tool(tool_name, tool_args, graph_engine, memory_manager, spec_text=spec_text)
             elif tool_name in ("browser_navigate", "navigate"):
                 new_site = tool_args.get("url", "")
                 # Soft Yandex reminder: warn but do NOT block navigation
@@ -708,6 +718,19 @@ async def process_row(
     return _error_result(spec_text, f"Max rounds ({MAX_ROUNDS}) reached", elapsed=elapsed)
 
 
+_STANDARD_REF_RE = re.compile(
+    r"^(гост|ту|снип|сп |iso|din|en |astm|фнп|пнст|мто|рм|сбн|гос[тт] р)\b",
+    re.IGNORECASE,
+)
+
+
+def _is_standard_reference(spec: str) -> bool:
+    """True, если «Тип/обозначение» — это ссылка на стандарт (ГОСТ/ТУ/СНиП/ISO...),
+    а не модель товара. Такие значения не полезны для поиска."""
+    s = spec.strip().lower()
+    return bool(_STANDARD_REF_RE.match(s))
+
+
 def _build_context(spec_text, product_type, approaches, confirmed_prices, sites, hints, product_data=None, site_guides=None, concepts=None, spec_meta=None):
     parts = [f"ТОВАР ДЛЯ ПОИСКА: {spec_text}"]
     if spec_meta:
@@ -718,7 +741,7 @@ def _build_context(spec_text, product_type, approaches, confirmed_prices, sites,
             parts.append(f"  Артикул/код: {spec_meta['article']}")
         if spec_meta.get("brand"):
             parts.append(f"  Завод-изготовитель: {spec_meta['brand']}")
-        if spec_meta.get("spec"):
+        if spec_meta.get("spec") and not _is_standard_reference(spec_meta["spec"]):
             parts.append(f"  Тип/обозначение: {spec_meta['spec']}")
         if spec_meta.get("name_raw"):
             parts.append(f"  Наименование: {spec_meta['name_raw']}")
@@ -811,7 +834,7 @@ def _build_context(spec_text, product_type, approaches, confirmed_prices, sites,
     return "\n".join(parts)
 
 
-def _execute_graph_tool(name: str, args: dict, engine, mm) -> str:
+def _execute_graph_tool(name: str, args: dict, engine, mm, spec_text: str = "") -> str:
     try:
         if name == "get_approaches":
             pt = args.get("product_type", "")
@@ -826,6 +849,9 @@ def _execute_graph_tool(name: str, args: dict, engine, mm) -> str:
                 return "Нет сохранённых подходов"
             lines = [f"Подходов: {len(approaches)}"]
             for a in approaches[:5]:
+                # адаптируем подход к текущему товару: устаревший хардкод-текст
+                # в шагах ввода заменяется на актуальный spec_text
+                a = _apply_approach(a, spec_text)
                 pat = " -> ".join(s.get("action", "?") for s in a.get("pattern", []))
                 concrete = a.get("concrete", [])
                 detail_parts = []

@@ -5,7 +5,7 @@ from pathlib import Path
 import openpyxl
 import pytest
 
-from src.excel_writer import ExcelWriter, SpecItem
+from src.excel_writer import ExcelWriter, SpecItem, _clean_brand
 
 
 def make_spec_xlsx(tmp_path, headers, rows):
@@ -126,6 +126,24 @@ class TestGetSpecs:
     def test_empty_ws(self):
         w = ExcelWriter({})
         assert w.get_specs() == []
+
+
+class TestCleanBrand:
+    def test_strips_quotes(self):
+        assert _clean_brand('"Ридан"') == "Ридан"
+        assert _clean_brand('«SPL»') == "SPL"
+
+    def test_drops_country_only(self):
+        for v in ["Россия", '"Россия"', "РФ", "Российская Федерация"]:
+            assert _clean_brand(v) == "", f"brand not dropped: {v!r}"
+
+    def test_keeps_real_brand(self):
+        assert _clean_brand("Арктос (Россия)") == "Арктос (Россия)"
+        assert _clean_brand("Aerostar") == "Aerostar"
+
+    def test_empty(self):
+        assert _clean_brand("") == ""
+        assert _clean_brand("  ") == ""
 
 
 class TestWriteAndSave:

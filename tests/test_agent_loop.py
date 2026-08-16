@@ -4,6 +4,7 @@ from src.agent_loop import (
     _build_context, _execute_graph_tool,
     _error_result, _result_to_schema,
     _estimate_tokens, _trim_messages_for_budget,
+    _apply_approach, _is_standard_reference,
     CONTEXT_TOKEN_BUDGET,
     TEMP_EXPLORATION, TEMP_NAVIGATION, TEMP_EXTRACTION, TEMP_RECOVERY,
 )
@@ -125,6 +126,52 @@ class TestErrorResult:
         assert r["price"] is None
         assert r["error"] == "something broke"
         assert r["requires_review"] is True
+
+
+class TestApplyApproach:
+    def test_replaces_param_slots(self):
+        approach = {
+            "concrete": [{"action": "browser_type", "text": "искать {product_name}", "target": "e1"}],
+            "param_slots": {"product_name": {"type": "string"}},
+        }
+        adapted = _apply_approach(approach, "Кран Ду15")
+        assert adapted["concrete"][0]["text"] == "искать Кран Ду15"
+        assert adapted["search_query"] == "Кран Ду15"
+
+    def test_scrubs_stale_text_in_type_steps(self):
+        """Подход сохранён от ДРУГОГО товара: жёстко зашитый текст подменяется."""
+        approach = {
+            "concrete": [
+                {"action": "browser_navigate", "url": "https://site.ru"},
+                {"action": "browser_type", "text": "SRE-Е-2,5/STY-2,5", "target": "e84"},
+                {"action": "browser_snapshot"},
+            ],
+        }
+        adapted = _apply_approach(approach, "Воздуховод из оцинкованной стали Ø100")
+        texts = [s.get("text") for s in adapted["concrete"]]
+        assert "SRE-Е-2,5/STY-2,5" not in texts
+        assert adapted["concrete"][1]["text"] == "Воздуховод из оцинкованной стали Ø100"
+
+    def test_keeps_navigate_url(self):
+        approach = {"concrete": [{"action": "browser_navigate", "url": "https://site.ru/catalog"}]}
+        adapted = _apply_approach(approach, "Товар")
+        assert adapted["concrete"][0]["url"] == "https://site.ru/catalog"
+
+
+class TestStandardReference:
+    def test_gost_filtered(self):
+        assert _is_standard_reference("ГОСТ 14918-2020") is True
+
+    def test_tu_filtered(self):
+        assert _is_standard_reference("ТУ 36-1234") is True
+
+    def test_model_not_filtered(self):
+        assert _is_standard_reference("CC11 500x400") is False
+        assert _is_standard_reference("Aerostar-100") is False
+        assert _is_standard_reference("Осв 21-12 №6,3") is False
+
+    def test_empty_not_filtered(self):
+        assert _is_standard_reference("") is False
 
 
 class TestExecuteGraphTool:

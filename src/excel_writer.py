@@ -39,6 +39,26 @@ from src._labels import _CAT_RU_LABELS, _SUBCAT_RU_LABELS
 from src.column_classifier import classify_columns
 
 
+logger = logging.getLogger(__name__)
+
+# Значения колонки «Завод-изготовитель», которые НЕ являются брендом
+_COUNTRY_ONLY = {
+    "россия", "рф", "российская федерация", "снг", "россия (рф)",
+    "казахстан", "беларусь", "украина", "китай", "кнр", "германия",
+    "италия", "польша", "турция", "япония", "сша", "швеция", "финляндия",
+}
+
+
+def _clean_brand(value: str) -> str:
+    """Очищает значение производителя: кавычки и «страновые» значения."""
+    v = value.strip().strip('"«»')
+    if not v:
+        return ""
+    if v.lower() in _COUNTRY_ONLY or v in ("—", "-"):
+        return ""
+    return v
+
+
 class ExcelWriter:
     def __init__(self, config: dict):
         self.config = config
@@ -229,7 +249,7 @@ class ExcelWriter:
         for excel_row in range(2, self._ws.max_row + 1):
             name, uom, article = self.build_item_name(excel_row, mapping)
             if name and name.strip() not in ("", "None", "none"):
-                brand_raw = self._concat_cells(excel_row, mapping.get("brand", []))
+                brand_raw = _clean_brand(self._concat_cells(excel_row, mapping.get("brand", [])))
                 name_raw = self._concat_cells(excel_row, mapping.get("name", []))
                 spec_raw = self._concat_cells(excel_row, mapping.get("spec", []))
                 specs.append(SpecItem(
