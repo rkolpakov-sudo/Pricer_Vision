@@ -52,12 +52,16 @@ class PdfParserRunner(QThread):
     async def _run(self):
         await self._llm_client.__aenter__()
         try:
-            self.progress_signal.emit("Парсинг PDF через MinerU...", 0, 5)
+            self.progress_signal.emit("Парсинг PDF через MinerU...", 0, 100)
 
             backend = MinerUBackend(lang=self._mineru_lang, method=self._mineru_method)
-            raw_text = backend.parse(self._pdf_path, timeout=self._mineru_timeout)
-
-            if self._stop_event.is_set():
+            raw_text = await self._run_parse(
+                lambda: backend.parse_async(
+                    self._pdf_path, timeout=self._mineru_timeout,
+                    progress_callback=self._on_mineru_progress,
+                )
+            )
+            if raw_text is None:
                 self.done_signal.emit(False, "Остановлено пользователем")
                 return
 
@@ -66,17 +70,21 @@ class PdfParserRunner(QThread):
             if ocr.needs_ocr(raw_text):
                 self.progress_signal.emit("Текст короткий — повторный парсинг с OCR...", 1, 5)
                 logger.info("Low text extraction, retrying via MinerU OCR")
-                raw_text = await ocr.extract_with_ocr(self._pdf_path, timeout=self._mineru_timeout)
-
-            if self._stop_event.is_set():
-                self.done_signal.emit(False, "Остановлено пользователем")
-                return
+                raw_text = await self._run_parse(
+                    lambda: ocr.extract_with_ocr_async(
+                        self._pdf_path, timeout=self._mineru_timeout,
+                        progress_callback=self._on_mineru_progress,
+                    )
+                )
+                if raw_text is None:
+                    self.done_signal.emit(False, "Остановлено пользователем")
+                    return
 
             if not raw_text.strip():
                 self.done_signal.emit(False, "PDF пуст — не удалось извлечь текст")
                 return
 
-            self.progress_signal.emit("Структурирование через LLM...", 2, 5)
+            self.progress_signal.emit("Структурирование...", 2, 5)
 
             structurer = SpecStructurer(
                 self._llm_client,
@@ -119,3 +127,23 @@ class PdfParserRunner(QThread):
             self.done_signal.emit(False, f"Ошибка: {e}")
         finally:
             await self._llm_client.__aexit__(None, None, None)
+
+    async def _run_parse(self, coro_factory):
+        """Запускает MinerU-задачу, реагирует на Стоп (убивает дерево процессов)."""
+        task = asyncio.create_task(coro_factory())
+        while True:
+            if self._stop_event.is_set():
+                task.cancel()
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass
+                except Exception:
+                    pass
+                return None
+            done, _ = await asyncio.wait({task}, timeout=0.3)
+            if done:
+                return task.result()
+
+    def _on_mineru_progress(self, stage: str, percent: int):
+        self.progress_signal.emit(f"MinerU: {stage} {percent}%", percent, 100)

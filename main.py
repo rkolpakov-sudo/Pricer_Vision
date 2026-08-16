@@ -508,6 +508,11 @@ class MainWindow(QMainWindow):
         self.add_log("INFO", "init", f"Processing {self._total_rows} rows")
 
     def stop_processing(self):
+        if hasattr(self, '_pdf_runner') and self._pdf_runner and self._pdf_runner.isRunning():
+            self._pdf_runner.stop()
+            self.add_log("INFO", "pdf", "Остановлено пользователем")
+            self.status_label.setText("Остановлен")
+            return
         if hasattr(self, '_runner') and self._runner:
             self._runner.stop()
         self._spinner_timer.stop()
@@ -635,6 +640,7 @@ class MainWindow(QMainWindow):
             return
 
         self.pdf_btn.setEnabled(False)
+        self.stop_btn.setEnabled(True)
         self._spinner_timer.start()
         self._spinner.setFixedSize(20, 20)
 
@@ -753,6 +759,8 @@ class MainWindow(QMainWindow):
         self._spinner_timer.stop()
         self._spinner.setFixedSize(0, 0)
         self.pdf_btn.setEnabled(True)
+        if not self._processing_active:
+            self.stop_btn.setEnabled(False)
         self.status_label.setText(msg if success else f"Ошибка: {msg}")
         if success:
             self.add_log("INFO", "pdf", msg)

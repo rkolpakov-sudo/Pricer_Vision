@@ -240,6 +240,10 @@ PDF → MinerU (subprocess Python 3.11) → сырой текст
 - **LLM — опция** (`pdf_parser.use_llm: false` по умолчанию): `SpecStructurer(use_llm=True)` сначала зовёт LLM, при неудаче/пустом результате автоматически падает в `_fallback_parse`. Параметры: `llm_max_chars`, `llm_max_tokens`, `llm_temperature`.
 - **OCRFallback** (`src/pdf_parser/ocr_fallback.py`): `needs_ocr(text)` — True при < `ocr_min_text_length` (100) символов; повторный запуск MinerU через `asyncio.to_thread`. Бэкенд — `MinerUBackend` (mineru_venv), без PaddleOCR/Tesseract.
 - **SmartReview** (`src/pdf_parser/review.py`): `_calculate_confidence()` (name 0.4 + qty 0.2 + unit 0.1 + code|mfg 0.2 + specs 0.1), порог 0.8 → `(auto_approved, needs_review)`; `row["confidence"]` добавляется к каждой позиции.
+- **Асинхронный запуск MinerU** (`MinerUBackend.parse_async`): `asyncio.create_subprocess_exec` + **kill всего дерева процессов** при таймауте/отмене (Windows `taskkill /T /F`). Без этого `subprocess.run(timeout=...)` на Windows вешается навсегда: MinerU 3.4 поднимает временный API-сервис и multiprocessing-воркеров, потомки держат пайпы и `communicate()` не возвращается.
+- **Живой прогресс**: стадия/процент из stderr MinerU (Layout/MFR/Table-OCR) парсятся регэкспом `_STAGE_RE` и шлются в `progress_signal` (`progress_callback(stage, percent)`) → прогрессбар приложения двигается.
+- **Кнопка «Стоп»** работает и для PDF-парсинга: `PdfParserRunner.stop()` → отмена задачи → kill дерева MinerU.
+- `pdf_parser.timeout` (900с по умолчанию) — жёсткий лимит; по истечении дерево убивается и выдаётся ошибка `mineru timeout`.
 - `structurer.py` — fallback `_parse_pipe_line()` классифицирует колонки по содержимому.
 - Результаты PDF проходят тот же pipeline что и XLSX: сохранение → загрузка как spec → preview_table → Старт → агент.
 - `_load_pdf_item_into_spec` — мёртвый код (не вызывается, может пригодиться для прямого логирования).
@@ -257,6 +261,7 @@ pdf_parser:
   llm_temperature: 0.0
   ocr_min_text_length: 100
   review_threshold: 0.8
+  timeout: 900
 ```
 
 ## Помощник ассистента (HelpPage)

@@ -1205,3 +1205,34 @@ C:\Projects\Pricer_Vision\
 - Ветка по умолчанию для следующей сессии: `refactor/v2.0`.
 
 
+## 2026-08-16 — CRITICAL FIX: PDF-парсер зависал навсегда (реальный запуск)
+
+### Симптом
+Загрузка PDF → «Парсинг PDF через MinerU...» → прогрессбар не двигался >10 минут, процесс не останавливался, результат не появлялся.
+
+### Root Cause (две проблемы)
+1. **`subprocess.run(timeout=300)` на Windows не срабатывает**: MinerU 3.4.0 поднимает временный FastAPI-сервис + multiprocessing-воркеров (`--help`: "mineru starts a temporary local mineru-api service"). `subprocess.run` при таймауте убивает только прямой дочерний процесс (mineru.exe), а **внуки держат stdout/stderr пайпы** → `communicate()` блокируется навсегда → QThread runner висит бесконечно. Воспроизведено: PID 23448 жег 4630 CPU-сек, temp-папка пустая.
+2. **Прогресс не отображался**: MinerU пишет прогресс в stderr (tqdm), но он захватывался и не показывался — пользователь не видел, что процесс жив.
+
+### Диагностика
+- 58-страничный скан PDF, CPU-only (нет GPU), `-m auto`: Layout 58/58, MFR 126/126, Table-ocr — это НЕ зависание, а медленная CPU-обработка (>10 мин). Но без прогресса и с нерабочим таймаутом выглядело как мёртвый процесс.
+- Путь PDF содержит кириллицу — НЕ причина (проверено на ASCII-копии, MinerU работал).
+
+### Fix (`src/pdf_parser/mineru_backend.py`, `ocr_fallback.py`, `runner.py`, `main.py`, `config/settings.yaml`)
+1. **`MinerUBackend.parse_async()`** — `asyncio.create_subprocess_exec` + параллельное чтение stdout/stderr (`_pump`, иначе переполнение пайпа) + `asyncio.wait_for` с таймаутом.
+2. **`_kill_tree(proc)`** — при таймауте/отмене убивает ВСЁ дерево (`taskkill /PID <pid> /T /F` на Windows, `killpg` на POSIX). Старый `parse()` переведён на `Popen`+`communicate(timeout)` с тем же kill дерева.
+3. **Живой прогресс**: `_STAGE_RE` парсит `Stage: NN%` из stderr → `progress_callback(stage, percent)` → `progress_signal` → прогрессбар показывает `MinerU: Layout Predict 66%`.
+4. **`runner.py`**: `_run_parse()` — поллит `_stop_event` каждые 0.3с, при Стоп отменяет задачу (→ kill дерева) и эмитит «Остановлено пользователем». OCR fallback переведён на `extract_with_ocr_async`.
+5. **`main.py`**: кнопка «Стоп» теперь останавливает и PDF-парсинг (`_pdf_runner.stop()`), не только агента.
+6. **`config/settings.yaml`**: добавлен `pdf_parser.timeout: 900` (15 мин на большие сканы; таймаут теперь реально срабатывает).
+
+### Верификация
+- Smoke-тест на реальном PDF (ASCII-копия): `parse_async(timeout=40)` получил **15 живых событий прогресса** (`Layout Predict 0%→24%`), таймаут поднялся, kill дерева отработал — процесс вернулся без зависания, `mineru`-процессов не осталось.
+- Тесты: `test_pdf_parser.py` 52→**53** (+parse_async success/timeout/progress, sync Popen timeout, `_kill_tree`, `_STAGE_RE`, OCR async).
+- Полный прогон: **443 passed, 0 failed** (было 434, +9).
+
+### Важно для пользователя
+- Остаточные воркеры от зависшего экземпляра (PIDs 10468/23380/23448) — убить вручную или закрыть приложение: они не умрут сами.
+- 58-страничный скан на CPU обрабатывается MinerU долго (10–20 мин) — теперь это видно по прогрессу, и можно остановить кнопкой «Стоп».
+
+

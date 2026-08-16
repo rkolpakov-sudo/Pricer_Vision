@@ -1,3 +1,6 @@
+import asyncio
+import subprocess
+
 import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -8,16 +11,41 @@ from src.pdf_parser.structurer import SpecStructurer, _html_to_text, _extract_ll
 from src.pdf_parser.feedback import FeedbackCollector
 
 
+def _fake_subprocess_proc(returncode=0, stdout=b"", stderr=b"", hang=False):
+    proc = AsyncMock()
+    proc.returncode = returncode
+
+    class _Stream:
+        def __init__(self, data):
+            self._data = data
+            self._done = False
+
+        async def read(self, n=-1):
+            if hang:
+                await asyncio.sleep(5)
+            if self._done:
+                return b""
+            self._done = True
+            return self._data
+
+    proc.stdout = _Stream(stdout)
+    proc.stderr = _Stream(stderr)
+    return proc
+
+
 class TestMinerUBackend:
     def test_init(self):
         b = MinerUBackend(lang="east_slavic", method="auto")
         assert b._lang == "east_slavic"
         assert b._method == "auto"
 
-    @patch("src.pdf_parser.mineru_backend.subprocess.run")
+    @patch("src.pdf_parser.mineru_backend.subprocess.Popen")
     @patch("src.pdf_parser.mineru_backend.Path.exists", return_value=True)
-    def test_parse_success(self, mock_exists, mock_run):
-        mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
+    def test_parse_success(self, mock_exists, mock_popen):
+        proc = MagicMock()
+        proc.returncode = 0
+        proc.communicate.return_value = ("", "")
+        mock_popen.return_value = proc
         import tempfile
         with tempfile.TemporaryDirectory() as tmp:
             import os
@@ -30,12 +58,120 @@ class TestMinerUBackend:
                 result = b.parse("dummy.pdf")
                 assert "Кабель" in result
 
+    @patch("src.pdf_parser.mineru_backend.subprocess.Popen")
+    @patch("src.pdf_parser.mineru_backend.Path.exists", return_value=True)
+    def test_parse_timeout_kills_tree(self, mock_exists, mock_popen):
+        proc = MagicMock()
+        proc.returncode = None
+        proc.communicate.side_effect = [subprocess.TimeoutExpired("cmd", 1), ("", "")]
+        mock_popen.return_value = proc
+        b = MinerUBackend()
+        with pytest.raises(TimeoutError):
+            b.parse("dummy.pdf", timeout=1)
+        # после таймаута вызывается kill дерева (taskkill /T /F)
+        kill_calls = [c for c in mock_popen.call_args_list]  # noqa
+
+    @patch("src.pdf_parser.mineru_backend.subprocess.Popen")
+    @patch("src.pdf_parser.mineru_backend.Path.exists", return_value=True)
+    def test_parse_error_raises_runtime_error(self, mock_exists, mock_popen):
+        proc = MagicMock()
+        proc.returncode = 1
+        proc.communicate.return_value = ("", "boom")
+        mock_popen.return_value = proc
+        b = MinerUBackend()
+        with pytest.raises(RuntimeError) as exc:
+            b.parse("dummy.pdf")
+        assert "boom" in str(exc.value)
+
     @patch("src.pdf_parser.mineru_backend.Path.exists", return_value=True)
     def test_parse_not_found(self, mock_exists):
         mock_exists.return_value = False
         b = MinerUBackend()
         with pytest.raises(FileNotFoundError):
             b.parse("nonexistent.pdf")
+
+    def test_stage_regex(self):
+        import re
+        from src.pdf_parser.mineru_backend import _STAGE_RE
+        line = "Layout Predict:  66%|######5   | 38/58 [00:17<00:09,  2.07it/s]"
+        matches = _STAGE_RE.findall(line)
+        assert ("Layout Predict", "66") in matches
+        assert _STAGE_RE.findall("no progress here") == []
+
+    def test_emit_progress_calls_callback(self):
+        b = MinerUBackend()
+        events = []
+        b._emit_progress(b"Layout Predict:  66%|#", lambda s, p: events.append((s, p)))
+        assert events == [("Layout Predict", 66)]
+
+    def test_kill_tree_windows(self):
+        proc = MagicMock()
+        proc.returncode = None
+        proc.pid = 12345
+        with patch("src.pdf_parser.mineru_backend.os.name", "nt"), \
+             patch("src.pdf_parser.mineru_backend.subprocess.run") as mock_run:
+            from src.pdf_parser.mineru_backend import _kill_tree
+            _kill_tree(proc)
+            args = mock_run.call_args[0][0]
+            assert "taskkill" in args
+            assert "/T" in args
+            assert "/F" in args
+            assert "12345" in args
+
+    @pytest.mark.asyncio
+    async def test_parse_async_success(self):
+        async def fake_create_subprocess(*args, **kwargs):
+            return _fake_subprocess_proc(returncode=0)
+        with patch("src.pdf_parser.mineru_backend.Path.exists", return_value=True), \
+             patch("src.pdf_parser.mineru_backend.asyncio.create_subprocess_exec",
+                   new=fake_create_subprocess):
+            import tempfile, os
+            with tempfile.TemporaryDirectory() as tmp:
+                with open(os.path.join(tmp, "out.md"), "w", encoding="utf-8") as f:
+                    f.write("# PDF\nКабель ВВГнг")
+                with patch("src.pdf_parser.mineru_backend.tempfile.TemporaryDirectory") as mock_tmp:
+                    mock_tmp.return_value.__enter__.return_value = tmp
+                    b = MinerUBackend()
+                    result = await b.parse_async("dummy.pdf")
+                    assert "Кабель" in result
+
+    @pytest.mark.asyncio
+    async def test_parse_async_timeout_kills_tree(self):
+        async def fake_create_subprocess(*args, **kwargs):
+            return _fake_subprocess_proc(returncode=None, hang=True)
+        with patch("src.pdf_parser.mineru_backend.Path.exists", return_value=True), \
+             patch("src.pdf_parser.mineru_backend.asyncio.create_subprocess_exec",
+                   new=fake_create_subprocess), \
+             patch("src.pdf_parser.mineru_backend._kill_tree") as mock_kill:
+            b = MinerUBackend()
+            with pytest.raises(TimeoutError):
+                await b.parse_async("dummy.pdf", timeout=1)
+            mock_kill.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_parse_async_progress_callback(self):
+        events = []
+
+        async def fake_create_subprocess(*args, **kwargs):
+            return _fake_subprocess_proc(
+                returncode=0, stderr=b"Layout Predict:  40%|#  | 20/58\n"
+                                      b"Layout Predict:  80%|## | 40/58\n",
+            )
+        with patch("src.pdf_parser.mineru_backend.Path.exists", return_value=True), \
+             patch("src.pdf_parser.mineru_backend.asyncio.create_subprocess_exec",
+                   new=fake_create_subprocess):
+            import tempfile, os
+            with tempfile.TemporaryDirectory() as tmp:
+                with open(os.path.join(tmp, "out.md"), "w", encoding="utf-8") as f:
+                    f.write("# PDF")
+                with patch("src.pdf_parser.mineru_backend.tempfile.TemporaryDirectory") as mock_tmp:
+                    mock_tmp.return_value.__enter__.return_value = tmp
+                    b = MinerUBackend()
+                    await b.parse_async(
+                        "dummy.pdf",
+                        progress_callback=lambda s, p: events.append((s, p)),
+                    )
+        assert ("Layout Predict", 80) in events
 
 
 class TestHtmlToText:
@@ -281,6 +417,17 @@ class TestOCRFallback:
         ocr.mineru_backend = None
         result = await ocr.extract_with_ocr("dummy.pdf")
         assert result == ""
+
+    @pytest.mark.asyncio
+    async def test_extract_with_ocr_async_calls_backend(self):
+        backend = AsyncMock()
+        backend.parse_async = AsyncMock(return_value="extracted text")
+        ocr = OCRFallback(mineru_backend=backend)
+        result = await ocr.extract_with_ocr_async(
+            "dummy.pdf", timeout=60, progress_callback=lambda s, p: None,
+        )
+        assert result == "extracted text"
+        backend.parse_async.assert_called_once()
 
 
 class TestSmartReview:

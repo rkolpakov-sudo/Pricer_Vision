@@ -34,6 +34,7 @@ pdf_parser:
   llm_temperature: 0.0
   ocr_min_text_length: 100
   review_threshold: 0.8
+  timeout: 900
 price:
   stale_days: 30
   vat_rate: 1.2

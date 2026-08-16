@@ -29,3 +29,12 @@ class OCRFallback:
         if not self.mineru_backend:
             return ""
         return await asyncio.to_thread(self.mineru_backend.parse, pdf_path, timeout)
+
+    async def extract_with_ocr_async(self, pdf_path: str, timeout: int = 300,
+                                     progress_callback=None) -> str:
+        """Асинхронный запуск MinerU с kill дерева и прогрессом (см. parse_async)."""
+        if not self.mineru_backend:
+            return ""
+        return await self.mineru_backend.parse_async(
+            pdf_path, timeout=timeout, progress_callback=progress_callback,
+        )
