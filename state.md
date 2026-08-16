@@ -1121,3 +1121,17 @@ C:\Projects\Pricer_Vision\
 - **Фаза 7: Тестирование и документация** (см. аналитику, строки ~2242+): юнит-тесты критичных модулей, интеграционные тесты `process_row`, обновление `SPEC_V32.md`.
 
 
+## 2026-08-16 — Фаза 6 подтверждена: теги и слияние
+
+- Пользователь подтвердил Фазу 6.
+- Тег: `phase-6-done` → `23e373c`.
+- `refactor/v2.0` = `2f37a6d` (merge `phase/6-gui`, --no-ff) — вобрал Фазу 6 целиком.
+- Рабочее дерево чистое, всё закоммичено.
+- **360 passed, 0 failed** — полный зелёный прогон после слияния.
+- Ветка по умолчанию для следующей сессии: `refactor/v2.0`.
+
+### Следующий шаг (Фаза 7)
+- **Фаза 7: Тестирование и документация** (см. `chat-Pricer_Vision Project Analysis.md`, строки ~2242+): юнит-тесты для критичных модулей (test_schemas, test_stuck_detector, test_semantic_cache, test_context_optimizer, test_rate_limiter, test_learning_loop, test_smart_review), интеграционные тесты `process_row` (моки LLM/MCP), обновление `SPEC_V32.md`.
+- Ветка: `phase/7-testing` (от `refactor/v2.0`).
+
+
