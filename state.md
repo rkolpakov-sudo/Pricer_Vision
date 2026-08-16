@@ -1020,3 +1020,50 @@ C:\Projects\Pricer_Vision\
 - Ветка: `phase/5-pdf` (от `refactor/v2.0`).
 
 
+## 2026-08-16 — Фаза 5: Модернизация PDF-парсера
+
+Реализована на ветке `phase/5-pdf` (от `refactor/v2.0`).
+
+### 5.1 Lightweight LLM Structurer (опция)
+- `src/pdf_parser/structurer.py` — `SpecStructurer` получил параметры `use_llm`, `max_chars`, `max_tokens`, `temperature`.
+- `structure()`: если `use_llm=True` → сначала LLM-ветка `_llm_structure()`, при неудаче/пустом результате — автоматический fallback на существующий `_fallback_parse`.
+- `_extract_llm_content()` — извлекает текст из ответа `LLMClient.chat()` (OpenAI envelope `choices[0].message.content` ИЛИ `{"content": ...}`), пусто при `{"error": ...}`.
+- `_safe_parse_items()` — вырезает JSON-массив из ответа, `_normalize_item()` приводит к контракту `{pos, name, specs, code, manufacturer, qty, unit, weight}` (qty/weight → float, pos → int).
+- Важно: `chat()` реально принимает per-call `temperature`/`max_tokens` (в аналитике было «не принимает» — сверка устарела). LLM-ветка — это обычная малая модель, reasoning не требуется (промпт явно запрещает).
+- Конфиг: `pdf_parser.use_llm: false` (по умолчанию выключено), `llm_max_chars: 3000`, `llm_max_tokens: 1024`, `llm_temperature: 0.0`.
+
+### 5.2 OCR Fallback для сканированных PDF
+- Новый `src/pdf_parser/ocr_fallback.py` — `OCRFallback`:
+  - `needs_ocr(text)` — True, если извлечено меньше `MIN_TEXT_LENGTH` (100) символов.
+  - `extract_with_ocr(pdf_path, timeout)` — повторный запуск MinerU через `asyncio.to_thread` (не блокирует event loop).
+  - Реальный бэкенд — `MinerUBackend` (mineru_venv), НЕ PaddleOCR/Tesseract — новых зависимостей нет.
+- В `runner.py`: после первичного парсинга MinerU, если текст короткий (`ocr_min_text_length`) → повторный парсинг с OCR, сигнал прогресса.
+
+### 5.3 Smart Review с Confidence Scoring
+- Новый `src/pdf_parser/review.py` — `SmartReview`:
+  - `process_extraction(items)` → `(auto_approved, needs_review)`, добавляет `row["confidence"]` (0..1).
+  - `_calculate_confidence()`: name=0.4, qty>0=0.2, unit=0.1, code|manufacturer=0.2, specs=0.1, cap 1.0. Порог `CONFIDENCE_THRESHOLD=0.8` (настраиваемый `threshold`).
+  - Цена в контракте отсутствует — не участвует в скорринге (по аналитике).
+- В `runner.py`: после `feedback.apply_corrections` → SmartReview, лог `N auto-approved, M need review`.
+- В `review_dialog.py`: колонка «Уверенность» (%), авто-подтверждённые — обычные, низкая уверенность (<0.8) — янтарная подсветка строк; заголовок показывает «Авто-подтверждено: N, требует проверки: M».
+- В `main.py`: лог SmartReview при получении позиций.
+
+### Конфиг
+- `config/settings.yaml → pdf_parser`: добавлены `use_llm`, `llm_max_chars`, `llm_max_tokens`, `llm_temperature`, `ocr_min_text_length: 100`, `review_threshold: 0.8`.
+- `config_loader.py`: добавлен `get_pdf_config(key, default)`.
+
+### Тесты
+- `tests/test_pdf_parser.py`: +35 новых (TestExtractLlmContent 5, TestSpecStructurerLlm 6, TestOCRFallback 5, TestSmartReview 5, TestConfigLoaderPdf 1, плюс существующие).
+- `_extract_llm_content`, LLM-структура с мок-ответом, fallback при `{"error"}` и не-JSON, нормализация, needs_ocr/extract_with_ocr, confidence-скорринг/сплит, порог, чтение конфига.
+- **328 passed** (было 293, +35 новых), 0 failed. Регрессий нет.
+- `python -m py_compile` по всем изменённым файлам — OK.
+
+### Изменённые/новые файлы
+- Новые: `src/pdf_parser/ocr_fallback.py`, `src/pdf_parser/review.py`.
+- Изменённые: `src/pdf_parser/structurer.py`, `src/pdf_parser/runner.py`, `src/pdf_parser/review_dialog.py`, `src/pdf_parser/__init__.py`, `src/config_loader.py`, `config/settings.yaml`, `main.py`, `tests/test_pdf_parser.py`, `readme.md` (см. ниже), `state.md`.
+
+### Следующий шаг
+- Пользователь проверяет → подтверждение → тег `phase-5-done` → слияние `phase/5-pdf` в `refactor/v2.0`.
+- Фаза 6: GUI и мониторинг (real-time монитор агента) — см. аналитику, строки ~2052+.
+
+
