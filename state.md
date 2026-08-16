@@ -1005,3 +1005,18 @@ C:\Projects\Pricer_Vision\
 - Пользователь проверяет → подтверждение → тег `phase-4-done` → слияние `phase/4-graph` в `refactor/v2.0`.
 - Фаза 5: Модернизация PDF-парсера (LLM structurer как опция, OCR-fallback через MinerU-режим) — см. аналитику, строки ~1854+.
 
+
+## 2026-08-16 — Фаза 4 подтверждена: теги и слияние
+
+- Пользователь подтвердил Фазу 4.
+- Теги: `phase-3-done` → `b7bda76`, `phase-4-done` → `cd5417e`.
+- `refactor/v2.0` = `ee1a5fc` (merge `phase/4-graph`, --no-ff) — вобрал Фазы 1–4 целиком.
+- Рабочее дерево чистое, всё закоммичено.
+- **293 passed, 13 failed** — те же предсуществующие async-падения (нет `pytest-asyncio`). Регрессий нет.
+- Ветка по умолчанию для следующей сессии: `refactor/v2.0`.
+
+### Следующий шаг (Фаза 5)
+- **Фаза 5: Модернизация PDF-парсера** (см. `chat-Pricer_Vision Project Analysis.md`, строки ~1854+): Lightweight LLM Structurer как ОПЦИЯ (конфиг `pdf_parser.use_llm`, fallback остаётся), OCR-fallback через MinerU-режим (без новых зависимостей), покрытие форматов 60% → 95%.
+- Ветка: `phase/5-pdf` (от `refactor/v2.0`).
+
+
