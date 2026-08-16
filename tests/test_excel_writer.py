@@ -101,9 +101,12 @@ class TestBuildItemName:
     def test_combines_brand_and_name(self, writer):
         mapping = writer.detect_columns(writer.headers)
         name, uom, article = writer.build_item_name(2, mapping)
-        assert name == "Спецкабель Кабель ВВГ"
+        # производитель НЕ конкатенируется в имя (держится отдельно)
+        assert name == "Кабель ВВГ"
         assert uom == "м"
         assert article == "ВВГ-3x2.5"
+        brand = writer._concat_cells(2, mapping.get("brand", []))
+        assert brand == "Спецкабель"
 
     def test_no_ws(self):
         w = ExcelWriter({})

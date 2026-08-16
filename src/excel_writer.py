@@ -25,16 +25,18 @@ logger = logging.getLogger(__name__)
 class SpecItem:
     """Структурированное описание товара из Excel."""
     def __init__(self, text: str, article: str = "", brand: str = "", name_raw: str = "",
-                 uom: str = "шт", headers: list | None = None):
+                 uom: str = "шт", headers: list | None = None, spec: str = ""):
         self.text = text
         self.article = article
         self.brand = brand
         self.name_raw = name_raw
         self.uom = uom
         self.headers = headers or []
+        self.spec = spec
 
 
 from src._labels import _CAT_RU_LABELS, _SUBCAT_RU_LABELS
+from src.column_classifier import classify_columns
 
 
 class ExcelWriter:
@@ -66,6 +68,11 @@ class ExcelWriter:
         self._total_rows = data_rows
 
         self._header_map = self._find_output_headers()
+        mapping = self.detect_columns(raw_headers)
+        logger.info("Spec loaded: %d rows; columns: name=%s article=%s brand=%s spec=%s uom=%s qty=%s weight=%s position=%s",
+                    data_rows, mapping.get("name"), mapping.get("article"),
+                    mapping.get("brand"), mapping.get("spec"), mapping.get("uom"),
+                    mapping.get("qty"), mapping.get("weight"), mapping.get("position"))
         return raw_headers, data_rows
 
     @property
@@ -90,40 +97,19 @@ class ExcelWriter:
 
     # --- Column Detection ---------------------------------------------------
 
-    def detect_columns(self, headers: list) -> dict:
-        mapping = {"name": [], "article": [], "brand": [], "uom": None, "qty": None}
-        name_patterns = ["наименование", "название", "описание", "товар", "продукция", "материал"]
-        article_patterns = ["артикул", "article", "код", "sku", "part", "тип"]
-        brand_patterns = ["марка", "бренд", "производитель", "brand", "maker"]
-        uom_patterns = ["ед", "единица", "упак", "unit"]
-        qty_patterns = ["кол", "количество", "qty", "quantity", "число"]
+    def detect_columns(self, headers: list, ws=None) -> dict:
+        """Системная классификация колонок (см. src.column_classifier).
 
-        for idx, header in enumerate(headers):
-            header_lower = str(header).lower()
-            if not header or header == "None":
-                continue
-            if any(p in header_lower for p in name_patterns):
-                mapping["name"].append(idx)
-            elif any(p in header_lower for p in article_patterns):
-                mapping["article"].append(idx)
-            elif any(p in header_lower for p in brand_patterns):
-                mapping["brand"].append(idx)
-            elif any(p in header_lower for p in uom_patterns):
-                mapping["uom"] = idx
-            elif any(p in header_lower for p in qty_patterns):
-                mapping["qty"] = idx
-
-        if not mapping["name"]:
-            reserved = {mapping["uom"], mapping["qty"]} - {None}
-            mapping["name"] = [
-                i for i in range(len(headers))
-                if i not in reserved
-                and i is not None
-                and headers[i] is not None
-                and str(headers[i]).strip() not in ("", "None")
-            ][:3]
-
-        return mapping
+        Учитывает заголовки И значения колонок (сэмпл первых 50 строк) —
+        корректно обрабатывает «Завод-изготовитель», «Код оборудования…»,
+        «Масса единицы (кг)» и прочие реальные заголовки спецификаций.
+        """
+        ws = ws or self._ws
+        rows = []
+        if ws is not None:
+            for r in range(2, min(ws.max_row + 1, 2 + 50)):
+                rows.append([ws.cell(r, c).value for c in range(1, ws.max_column + 1)])
+        return classify_columns(headers, value_rows=rows).as_dict()
 
     def _find_output_headers(self) -> dict:
         ws = self._ws
@@ -156,6 +142,12 @@ class ExcelWriter:
         return header_map
 
     def build_item_name(self, row: int, mapping: dict) -> tuple:
+        """Собирает наименование из name-колонок (БЕЗ производителя).
+
+        Завод-изготовитель держится отдельно (SpecItem.brand) — он важен
+        для выбора правильного товара агентом, а не как часть поискового
+        запроса.
+        """
         ws = self._ws
         if ws is None:
             return "", "шт", None
@@ -163,23 +155,18 @@ class ExcelWriter:
         parts = []
         article = None
 
-        for idx in mapping["article"]:
+        for idx in mapping.get("article", []):
             val = str(ws.cell(row, idx + 1).value or "").strip()
             if val and val not in ("None", ""):
                 article = val
 
-        for idx in mapping["brand"]:
-            val = str(ws.cell(row, idx + 1).value or "").strip()
-            if val and val not in ("None", ""):
-                parts.append(val)
-
-        for idx in mapping["name"]:
+        for idx in mapping.get("name", []):
             val = str(ws.cell(row, idx + 1).value or "").strip()
             if val and val not in ("None", ""):
                 parts.append(val)
 
         full_name = " ".join(parts)
-        uom = str(ws.cell(row, mapping["uom"] + 1).value or "шт") if mapping["uom"] is not None else "шт"
+        uom = str(ws.cell(row, mapping["uom"] + 1).value or "шт") if mapping.get("uom") is not None else "шт"
         return full_name, uom, article
 
     # --- Writing Results ----------------------------------------------------
@@ -242,14 +229,16 @@ class ExcelWriter:
         for excel_row in range(2, self._ws.max_row + 1):
             name, uom, article = self.build_item_name(excel_row, mapping)
             if name and name.strip() not in ("", "None", "none"):
-                brand_raw = self._concat_cells(excel_row, mapping["brand"])
-                name_raw = self._concat_cells(excel_row, mapping["name"])
+                brand_raw = self._concat_cells(excel_row, mapping.get("brand", []))
+                name_raw = self._concat_cells(excel_row, mapping.get("name", []))
+                spec_raw = self._concat_cells(excel_row, mapping.get("spec", []))
                 specs.append(SpecItem(
                     text=name,
                     article=article or "",
                     brand=brand_raw,
                     name_raw=name_raw,
                     uom=uom,
+                    spec=spec_raw,
                     headers=self._headers,
                 ))
         return specs

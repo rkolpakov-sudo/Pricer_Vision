@@ -170,6 +170,7 @@ class MCPAgentRunner(QThread):
 
                     spec_meta = {"article": spec.article, "brand": spec.brand,
                                  "name_raw": spec.name_raw, "uom": spec.uom,
+                                 "spec": getattr(spec, "spec", ""),
                                  "headers": spec.headers} if hasattr(spec, 'article') else None
 
                     try:
