@@ -46,6 +46,7 @@ run:
   max_study_rounds: 50
   study_temperature: 0.5
   summarize_max_chars: 800
+  group_by_site: false
 ui:
   log_rotation_mb: 10
   telemetry_update_ms: 1000

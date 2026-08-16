@@ -127,6 +127,29 @@ class TestGetSpecs:
         w = ExcelWriter({})
         assert w.get_specs() == []
 
+    def test_skips_section_headers_without_qty(self, tmp_path):
+        """Строки-заголовки разделов (без количества) не становятся товарами."""
+        path = make_spec_xlsx(
+            tmp_path,
+            ["Позиция", "Наименование", "Кол-во"],
+            [
+                ["", "Отопление", ""],
+                ["1.", "Воздухоотводчик", "48"],
+                ["2.", "Кран шаровой", "18"],
+            ],
+        )
+        w = ExcelWriter({})
+        w.load_spec(path)
+        specs = w.get_specs()
+        assert [s.text for s in specs] == ["Воздухоотводчик", "Кран шаровой"]
+
+    def test_no_qty_column_keeps_all(self, tmp_path):
+        path = make_spec_xlsx(tmp_path, ["Наименование"], [["Кабель"], ["Труба"]])
+        w = ExcelWriter({})
+        w.load_spec(path)
+        specs = w.get_specs()
+        assert len(specs) == 2
+
 
 class TestCleanBrand:
     def test_strips_quotes(self):

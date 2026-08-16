@@ -129,7 +129,13 @@ class MCPAgentRunner(QThread):
             results = []
             total = len(self.specs)
             scheduler = TaskScheduler(mm, site_profiles=learning_loop.site_profiles)
-            ordered = scheduler.ordered_specs(self.specs)
+            from src.config_loader import get_run_config
+            # Построчная обработка по умолчанию (порядок файла). Группировка
+            # по сайтам — опция group_by_site (переупорядочивает строки).
+            if get_run_config("group_by_site", False):
+                ordered = scheduler.ordered_specs(self.specs)
+            else:
+                ordered = list(self.specs)
             original_index = {id(spec): i for i, spec in enumerate(self.specs)}
             last_health_check = datetime.now()
             for i, spec in enumerate(ordered):
