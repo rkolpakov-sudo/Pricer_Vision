@@ -1,0 +1,51 @@
+# ── Python ──────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.eggs/
+build/
+dist/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# ── Virtual environments ────────────────────────────────────────
+venv/
+mineru_venv/
+.venv/
+env/
+
+# ── Runtime data (DB, results, inputs, state) ──────────────────
+data/*
+!data/.gitkeep
+!data/input/
+!data/output/
+data/input/*
+!data/input/.gitkeep
+data/output/*
+!data/output/.gitkeep
+logs/*
+!logs/.gitkeep
+graph.json
+*.db
+*.db-shm
+*.db-wal
+
+# ── Sample assets kept out of the repo ──────────────────────────
+/santech-variant.png
+/*.pdf
+
+# ── Local tooling / environment-specific ───────────────────────
+.opencode/
+.playwright-mcp/
+node_modules/
+.pip-cache/
+
+# ── OS / IDE ────────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/

@@ -1,0 +1,15 @@
+{
+  "browser": {
+    "launchOptions": {
+      "args": [
+        "--no-sandbox",
+        "--disable-session-crashed-bubble",
+        "--disable-infobars",
+        "--disable-notifications",
+        "--no-first-run",
+        "--disable-default-apps",
+        "--hide-scrollbars"
+      ]
+    }
+  }
+}

@@ -1,0 +1,52 @@
+browser:
+  headless: true
+  no_sandbox: true
+deps:
+  playwright_mcp:
+    version: null
+limits:
+  max_retries_per_site: 3
+  save_interval: 5
+llm:
+  llama_cpp_url: http://localhost:8080/v1/chat/completions
+  lm_studio_url: http://localhost:1234/v1/chat/completions
+  model: local-model
+  ollama_url: http://localhost:11434/api/chat
+  retry:
+    backoff_seconds: 1.0
+    max_attempts: 2
+    rate_limit_seconds: 0.05
+  temperature: 0.3
+  timeout: 150
+paths:
+  backup: data/backup
+  data_input: data/input
+  data_output: data/output
+  logs: logs
+  state: state.json
+pdf_parser:
+  lang: east_slavic
+  method: auto
+  min_chars: 10
+price:
+  stale_days: 30
+  vat_rate: 1.2
+run:
+  fresh: false
+  main_temperature: 0.3
+  max_rounds: 50
+  max_rounds_per_site: 15
+  max_study_rounds: 50
+  study_temperature: 0.5
+  summarize_max_chars: 800
+ui:
+  log_rotation_mb: 10
+  telemetry_update_ms: 1000
+  theme: dark
+vision_search:
+  enabled: true
+  max_vision_attempts: 2
+  screenshot_format: jpeg
+  screenshot_quality: 85
+  search_url_first: true
+  strategy: primary_fallback

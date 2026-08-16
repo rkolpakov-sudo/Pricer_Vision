@@ -1,0 +1,11 @@
+# Normalize line endings to LF across the repo (Windows CRLF only in working tree if needed).
+* text=auto
+*.py text eol=lf
+*.md text eol=lf
+*.yaml text eol=lf
+*.yml text eol=lf
+*.json text eol=lf
+*.js text eol=lf
+*.ini text eol=lf
+*.txt text eol=lf
+*.js text eol=lf
