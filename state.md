@@ -701,3 +701,36 @@ C:\Projects\Pricer_Vision\
 ### Тесты
 - UI-only изменения, тесты не затронуты
 
+
+## 2026-08-16 — Инструмент «Зависимости» + проверка chromium + публикация на GitHub
+
+### 1. Инструмент «Зависимости» (src/dependency_manager/)
+- Новая кнопка **«🧩 Зависимости»** в toolbar (`main.py` → `open_dependency_manager()`) → модальное окно `DependencyManagerDialog`.
+- Qt-free ядро (тестируется без QApplication):
+  - `models.py` — `Dependency`, `ReqLine`, `Env`, `ApplyChange`, `BrowserInfo`, `Status`/`Manager`.
+  - `versioning.py` — сортировка PEP440 / semver (pre-release перед релизом, невалидные → в конец).
+  - `requirements.py` — парсинг/перезапись requirements.txt **с сохранением комментариев, пустых строк и порядка** (round-trip точный); операторы `~=`/`!=`/неверсионные → пинятся в `==`.
+  - `pypi.py` / `npm.py` — клиенты PyPI JSON API / npm registry (httpx).
+  - `envs.py` — детект окружений (venv, mineru_venv) + `pip list --json`.
+  - `manager.py` — оркестрация: бэкап → перезапись манифеста → pip install → откат при ошибке; пин `@playwright/mcp` в `config/settings.yaml → deps.playwright_mcp.version`.
+  - `worker.py` — QThread-воркеры (Check/Apply/Browser), UI не блокируется.
+  - `dialog.py` — таблица (✓|Пакет|Менеджер|Текущая|Актуальная|Версия|Статус), выбор окружения, прогресс-бар, лог, «Проверить / Применить / Откатить».
+- `mcp_bridge.py` читает пин версии (`@playwright/mcp@<ver>` или `@playwright/mcp`) — версия пакета больше не «что npx качнёт».
+- **Фикс колонки «Версия»**: убран `QComboBox`-виджет (создавал доп. элемент, плохо размещался) → значение пишется **прямо в ячейку** (`QTableWidgetItem`), редактируется двойным кликом/F2; у остальных колонок снят `ItemIsEditable`; тултип показывает доступные версии.
+
+### 2. Проверка и обновление браузера chromium
+- Панель **«Chromium (MCP)»** в диалоге: ожидаемая ревизия из `playwright-core/browsers.json` активного `@playwright/mcp` (учитывает пин) vs установленная в `%LOCALAPPDATA%\ms-playwright` (папки `chromium-*`, флаг `INSTALLATION_COMPLETE`).
+- Кнопка **«Обновить браузер»** → `npx -y @playwright/mcp[@{пин}] install-browser chromium` (фоновый воркер + лог).
+- **Найден реальный дрейф**: на машине `@playwright/mcp` 0.0.79 актуален (npm-проверка не ловила проблему), но chromium ожидает ревизию **1237**, установлен **1223** — кнопка обновления это чинит.
+- Новая функция: `mcp_package_dir`, `expected_browser_revisions`, `browsers_root`, `installed_browser_revisions` (npm.py), `browser_status()`/`update_browser()` (manager.py), `BrowserWorker` (worker.py).
+
+### 3. Публикация на GitHub
+- `git init -b main`, `.gitignore` (venv, кэши, runtime-данные, `.opencode`, `.playwright-mcp`, корневые бинарники), `.gitattributes` (LF), `AGENTS.md` (контекст разработки).
+- Первый коммит `45daa3b7` «feat: initial release of Pricer Vision» (69 файлов, 17.5K строк).
+- Репозиторий: **https://github.com/rkolpakov-sudo/Pricer_Vision** (private, ветка `main`), создан через OAuth device-flow + REST API (`repo` scope), remote `origin` → push `main`.
+
+### Тесты
+- `tests/test_dependency_manager.py`: 37 тестов (парсинг requirements, версии, browser-функциональность, пин, update_browser).
+- Полный прогон: **141 passed**, 13 failed — предсуществующие (нет `pytest-asyncio` в venv, async-тесты mcp_bridge/pdf_parser).
+
+
