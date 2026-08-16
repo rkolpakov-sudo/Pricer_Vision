@@ -27,6 +27,8 @@ from src.llm_client import LLMClient
 from src.mcp_agent_runner import MCPAgentRunner
 from gui.graph_assistant import AssistantToolPanel
 from gui.graph_explorer import GraphExplorerWidget
+from gui.agent_monitor import AgentMonitorPanel
+from gui.metrics_panel import MetricsPanel
 from gui.spinner_widget import SpinnerWidget
 from src.graph_engine import GraphEngine
 
@@ -172,6 +174,8 @@ class MainWindow(QMainWindow):
         if self._processing_active and hasattr(self, '_runner') and self._runner:
             self._runner.stop()
             self._runner.wait(3000)
+        if hasattr(self, 'graph_widget'):
+            self.graph_widget._physics.stop()
         super().closeEvent(event)
 
     def _load_config(self):
@@ -324,6 +328,16 @@ class MainWindow(QMainWindow):
         self.assistant_panel.engine = self._engine
         self.assistant_panel.llm_config = self.config.get("llm", {})
         right_tabs.addTab(self.assistant_panel, "Ассистент")
+
+        monitor_widget = QWidget()
+        monitor_layout = QVBoxLayout(monitor_widget)
+        monitor_layout.setContentsMargins(0, 0, 0, 0)
+        monitor_layout.setSpacing(4)
+        self.monitor_panel = AgentMonitorPanel()
+        monitor_layout.addWidget(self.monitor_panel, 2)
+        self.metrics_panel = MetricsPanel()
+        monitor_layout.addWidget(self.metrics_panel, 1)
+        right_tabs.addTab(monitor_widget, "Мониторинг")
 
         splitter.addWidget(right_tabs)
 
@@ -479,10 +493,14 @@ class MainWindow(QMainWindow):
             llm_client=llm_client,
             fresh=self.fresh_cb.isChecked(),
         )
+        self.monitor_panel.reset()
+        self.metrics_panel.reset()
         self._runner.status_signal.connect(self._on_runner_status)
         self._runner.row_done_signal.connect(self._on_row_done)
         self._runner.done_signal.connect(self._on_all_done)
         self._runner.error_signal.connect(self._on_runner_error)
+        self._runner.monitor_signal.connect(self._on_monitor_event)
+        self._runner.metrics_signal.connect(self._on_metrics)
         self._runner.start()
 
         self.start_btn.setEnabled(False)
@@ -509,6 +527,12 @@ class MainWindow(QMainWindow):
         elif status == "start":
             self.status_label.setText("Запуск...")
             self.add_log("INFO", "init", "Обработка начата")
+
+    def _on_monitor_event(self, event):
+        self.monitor_panel.handle_event(event)
+
+    def _on_metrics(self, stats):
+        self.metrics_panel.update_metrics(stats)
 
     def _on_row_done(self, idx, result):
         row = self.results_table.rowCount()

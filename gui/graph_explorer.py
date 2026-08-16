@@ -31,6 +31,25 @@ ECOLORS = {
     "SIMILAR":   (249, 115, 22),     # Orange (matches site)
 }
 
+LOD_THRESHOLD = 500  # выше этого числа нод — отключаем подписи и физику
+MAX_GRAPH_NODES = 1000  # максимальное число нод в графе (свыше включается LOD)
+PHYSICS_SYNC_INTERVAL = 0.033  # ~30 fps для синхронизации позиций на UI
+
+
+def _edge_touches(idx: int, u: int, v: int, n: int) -> bool:
+    """True, если ребро (u,v) инцидентно узлу idx и оба конца в границах."""
+    return (u == idx or v == idx) and u < n and v < n
+
+
+def _lod_decision(node_count: int, threshold: int = LOD_THRESHOLD) -> dict:
+    """Решение по уровню детализации (LOD).
+
+    При превышении порога подписи и непрерывная физика отключаются —
+    рендерится только статичный граф, чтобы UI не тормозил.
+    """
+    lod = node_count > threshold
+    return {"lod": lod, "labels": not lod, "physics": not lod}
+
 
 class GraphNode:
     __slots__ = ("id", "label", "type", "x", "y", "vx", "vy",
@@ -49,6 +68,90 @@ class GraphNode:
         self.fixed = False
         self.item = None
         self.data = None
+
+
+def _physics_step(nodes, edges, alpha: float):
+    """Один шаг физической симуляции. Мутирует позиции узлов на месте.
+
+    Вынесен из PhysicsWorker._run в чистую функцию — тестируется без Qt.
+    """
+    n = len(nodes)
+    if n == 0:
+        return
+
+    positions = np.zeros((n, 2), dtype=np.float64)
+    forces = np.zeros((n, 2), dtype=np.float64)
+    fixed = np.zeros(n, dtype=bool)
+    sizes = np.zeros(n, dtype=np.float64)
+    for i, nd in enumerate(nodes):
+        positions[i, 0] = nd.x
+        positions[i, 1] = nd.y
+        fixed[i] = nd.fixed
+        sizes[i] = nd.size
+
+    fd = alpha * 200.0
+    for i in range(n):
+        if fixed[i]:
+            continue
+        dx = positions[i, 0] - positions[:, 0]
+        dy = positions[i, 1] - positions[:, 1]
+        d = np.sqrt(dx * dx + dy * dy)
+        d = np.maximum(d, 1.0)
+        f = fd / (d * d)
+        forces[i, 0] = np.sum(dx / d * f)
+        forces[i, 1] = np.sum(dy / d * f)
+
+    for u, v, *_ in edges:
+        if u >= n or v >= n:
+            continue
+        dx = positions[v, 0] - positions[u, 0]
+        dy = positions[v, 1] - positions[u, 1]
+        d = max(math.sqrt(dx * dx + dy * dy), 1)
+        f = alpha * (d - 180) * 0.03
+        fx = dx / d * f
+        fy = dy / d * f
+        if not fixed[u]:
+            forces[u, 0] += fx
+            forces[u, 1] += fy
+        if not fixed[v]:
+            forces[v, 0] -= fx
+            forces[v, 1] -= fy
+
+    center_strength = 0.002
+    for i in range(n):
+        if not fixed[i]:
+            forces[i, 0] -= positions[i, 0] * alpha * center_strength
+            forces[i, 1] -= positions[i, 1] * alpha * center_strength
+
+    for i in range(n):
+        if not fixed[i]:
+            cur_vx = nodes[i].vx + forces[i, 0]
+            cur_vy = nodes[i].vy + forces[i, 1]
+            cur_vx *= 0.6
+            cur_vy *= 0.6
+            nodes[i].vx = cur_vx
+            nodes[i].vy = cur_vy
+            nodes[i].x += cur_vx
+            nodes[i].y += cur_vy
+
+    for i in range(n):
+        if fixed[i]:
+            continue
+        for j in range(i + 1, n):
+            if fixed[j]:
+                continue
+            dx = nodes[j].x - nodes[i].x
+            dy = nodes[j].y - nodes[i].y
+            d = math.sqrt(dx * dx + dy * dy)
+            min_d = max(30, (sizes[i] + sizes[j]) * 1.5)
+            if d < min_d and d > 0.1:
+                overlap = (min_d - d) / 2
+                fx = dx / d * overlap
+                fy = dy / d * overlap
+                nodes[i].x -= fx
+                nodes[j].x += fx
+                nodes[i].y -= fy
+                nodes[j].y += fy
 
 
 class PhysicsWorker(QObject):
@@ -115,84 +218,7 @@ class PhysicsWorker(QObject):
                 break
             nodes = self._nodes
             edges = self._edges
-            n = len(nodes)
-            if n == 0:
-                time.sleep(0.05)
-                continue
-
-            positions = np.zeros((n, 2), dtype=np.float64)
-            forces = np.zeros((n, 2), dtype=np.float64)
-            fixed = np.zeros(n, dtype=bool)
-            sizes = np.zeros(n, dtype=np.float64)
-            for i, nd in enumerate(nodes):
-                positions[i, 0] = nd.x
-                positions[i, 1] = nd.y
-                fixed[i] = nd.fixed
-                sizes[i] = nd.size
-
-            fd = alpha * 200.0
-            for i in range(n):
-                if fixed[i]:
-                    continue
-                dx = positions[i, 0] - positions[:, 0]
-                dy = positions[i, 1] - positions[:, 1]
-                d = np.sqrt(dx * dx + dy * dy)
-                d = np.maximum(d, 1.0)
-                f = fd / (d * d)
-                forces[i, 0] = np.sum(dx / d * f)
-                forces[i, 1] = np.sum(dy / d * f)
-
-            for u, v, *_ in edges:
-                if u >= n or v >= n:
-                    continue
-                dx = positions[v, 0] - positions[u, 0]
-                dy = positions[v, 1] - positions[u, 1]
-                d = max(math.sqrt(dx * dx + dy * dy), 1)
-                f = alpha * (d - 180) * 0.03
-                fx = dx / d * f
-                fy = dy / d * f
-                if not fixed[u]:
-                    forces[u, 0] += fx
-                    forces[u, 1] += fy
-                if not fixed[v]:
-                    forces[v, 0] -= fx
-                    forces[v, 1] -= fy
-
-            center_strength = 0.002
-            for i in range(n):
-                if not fixed[i]:
-                    forces[i, 0] -= positions[i, 0] * alpha * center_strength
-                    forces[i, 1] -= positions[i, 1] * alpha * center_strength
-
-            for i in range(n):
-                if not fixed[i]:
-                    cur_vx = nodes[i].vx + forces[i, 0]
-                    cur_vy = nodes[i].vy + forces[i, 1]
-                    cur_vx *= 0.6
-                    cur_vy *= 0.6
-                    nodes[i].vx = cur_vx
-                    nodes[i].vy = cur_vy
-                    nodes[i].x += cur_vx
-                    nodes[i].y += cur_vy
-
-            for i in range(n):
-                if fixed[i]:
-                    continue
-                for j in range(i + 1, n):
-                    if fixed[j]:
-                        continue
-                    dx = nodes[j].x - nodes[i].x
-                    dy = nodes[j].y - nodes[i].y
-                    d = math.sqrt(dx * dx + dy * dy)
-                    min_d = max(30, (sizes[i] + sizes[j]) * 1.5)
-                    if d < min_d and d > 0.1:
-                        overlap = (min_d - d) / 2
-                        fx = dx / d * overlap
-                        fy = dy / d * overlap
-                        nodes[i].x -= fx
-                        nodes[j].x += fx
-                        nodes[i].y -= fy
-                        nodes[j].y += fy
+            _physics_step(nodes, edges, alpha)
 
             if gen == self._gen:
                 self.updated.emit(nodes)
@@ -268,7 +294,7 @@ class GraphScene(QGraphicsScene):
         self._glow_items = {}
         self._edge_glow_items = {}
 
-    def build(self, nodes, edges):
+    def build(self, nodes, edges, labels=True):
         self.clear()
         self._label_items.clear()
         self._edge_data.clear()
@@ -295,6 +321,9 @@ class GraphScene(QGraphicsScene):
             node.item = item
             self._node_items.append(item)
 
+            if not labels:
+                continue
+
             txt = QGraphicsTextItem()
             display = node.label
             txt.setPlainText(display)
@@ -306,8 +335,9 @@ class GraphScene(QGraphicsScene):
             self._label_items[i] = txt
 
     def _update_edges(self, idx):
+        n = len(self._nodes)
         for li, u, v, *_ in self._edge_data:
-            if u == idx or v == idx and u < len(self._nodes) and v < len(self._nodes):
+            if _edge_touches(idx, u, v, n):
                 li.setLine(self._nodes[u].x, self._nodes[u].y,
                            self._nodes[v].x, self._nodes[v].y)
 
@@ -398,7 +428,7 @@ class GraphScene(QGraphicsScene):
                 bh = txt.boundingRect().height()
                 txt.setPos(node.x - bw / 2, node.y + node.size + 2)
 
-    def sync_all(self):
+    def sync_all(self, update_labels: bool = True):
         for i, node in enumerate(self._nodes):
             if node.item and node.item.scene() is self:
                 node.item.setPos(node.x, node.y)
@@ -414,12 +444,18 @@ class GraphScene(QGraphicsScene):
                     x2, y2 = self._nodes[v].x, self._nodes[v].y
                     for gli in glows:
                         gli.setLine(x1, y1, x2, y2)
-        self.reposition_labels()
+        if update_labels:
+            self.reposition_labels()
 
     def update_theme(self, is_dark):
         color = QColor(224, 224, 224) if is_dark else QColor(30, 30, 35)
         for txt in self._label_items.values():
             txt.setDefaultTextColor(color)
+
+    def set_labels_visible(self, visible: bool):
+        """Включает/выключает подписи нод (LOD: при 1000+ нодах — off)."""
+        for txt in self._label_items.values():
+            txt.setVisible(visible)
 
 
 class GraphCanvas(QGraphicsView):
@@ -497,8 +533,8 @@ class GraphCanvas(QGraphicsView):
             return
         super().mouseReleaseEvent(e)
 
-    def set_data(self, nodes, edges):
-        self._scene.build(nodes, edges)
+    def set_data(self, nodes, edges, labels=True):
+        self._scene.build(nodes, edges, labels=labels)
         self._scene.reposition_labels()
         self._update_theme()
 
@@ -603,6 +639,8 @@ class GraphExplorerWidget(QWidget):
         }
 
         self._cached_pos = {}
+        self._lod_active = False
+        self._last_sync_time = 0.0
 
         layout = QVBoxLayout(self)
         layout.setSpacing(6)
@@ -666,7 +704,12 @@ class GraphExplorerWidget(QWidget):
         super().changeEvent(event)
 
     def _on_physics_update(self):
-        self._canvas._scene.sync_all()
+        now = time.monotonic()
+        if now - self._last_sync_time < PHYSICS_SYNC_INTERVAL:
+            return
+        self._last_sync_time = now
+        # Во время физики подписи не пересчитываем — они позиционируются при стабилизации
+        self._canvas._scene.sync_all(update_labels=False)
         if self._nodes:
             self._cached_pos = {node.id: (node.x, node.y) for node in self._nodes}
 
@@ -768,7 +811,7 @@ class GraphExplorerWidget(QWidget):
                 self._info.setText("  Граф пуст — загрузите данные через YAML или обработайте спецификацию")
                 return
 
-            MAX = 250
+            MAX = MAX_GRAPH_NODES
             gnodes = []
             seen = set()
 
@@ -902,9 +945,17 @@ class GraphExplorerWidget(QWidget):
             self._physics.stop()
             self._nodes = graph_nodes
             self._edges = graph_edges
-            self._canvas.set_data(graph_nodes, graph_edges)
-            self._physics.start(graph_nodes, graph_edges)
-            self._info.setText(f"Узлов: {len(graph_nodes)} | Связей: {len(graph_edges)}")
+            lod = _lod_decision(len(graph_nodes))
+            self._lod_active = lod["lod"]
+            self._canvas.set_data(graph_nodes, graph_edges, labels=lod["labels"])
+            if lod["physics"]:
+                self._physics.start(graph_nodes, graph_edges)
+            else:
+                self._canvas._scene.reposition_labels()
+                self._canvas.fitInView(self._canvas._scene.itemsBoundingRect().adjusted(-60, -60, 60, 60),
+                                       Qt.KeepAspectRatio)
+            lod_note = f" | LOD: подписи и физика отключены ({len(graph_nodes)} нод)" if self._lod_active else ""
+            self._info.setText(f"Узлов: {len(graph_nodes)} | Связей: {len(graph_edges)}{lod_note}")
         except Exception as e:
             import traceback
             traceback.print_exc()
@@ -913,6 +964,7 @@ class GraphExplorerWidget(QWidget):
     def _on_stabilized(self):
         if self._nodes:
             self._cached_pos = {node.id: (node.x, node.y) for node in self._nodes}
+        self._canvas._scene.sync_all(update_labels=True)
         self._info.setText(f"  Узлов: {len(self._nodes)} | Связей: {len(self._edges)} | Стабилен ✓")
 
     def _show_node_info(self, node_id):
