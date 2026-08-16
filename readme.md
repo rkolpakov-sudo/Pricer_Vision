@@ -98,12 +98,14 @@ C:\Projects\Pricer_Vision\
 │   ├── pricer_server.py         # MCP сервер (DrissionPage, не используется)
 │   └── patchright_server.py     # MCP сервер (patchright, не используется)
 ├── src/
-│   ├── pdf_parser/              # Парсер PDF (MinerU → fallback structurer, без LLM)
+│   ├── pdf_parser/              # Парсер PDF (MinerU → fallback structurer, LLM-опция)
 │   │   ├── mineru_backend.py    #   subprocess MinerU 3.4 в изолированном Python 3.11
-│   │   ├── structurer.py        #   Fallback-only (pipe-парсинг колонок, LLM удалён)
+│   │   ├── ocr_fallback.py      #   OCR-резерв для сканов (через MinerUBackend, to_thread)
+│   │   ├── structurer.py        #   Fallback-only pipe-парсинг + LLM-ветка (use_llm)
+│   │   ├── review.py            #   SmartReview — confidence scoring (≥0.8 авто-утверждение)
 │   │   ├── feedback.py          #   Таблица pdf_corrections в pricer.db
-│   │   ├── review_dialog.py     #   QTableWidget редактирования
-│   │   └── runner.py            #   QThread оркестратор
+│   │   ├── review_dialog.py     #   QTableWidget редактирования (колонка Уверенность)
+│   │   └── runner.py            #   QThread оркестратор (OCR fallback + SmartReview)
 │   ├── agent_loop.py            # Основной цикл (3-веточный routing, format_steps, negative feedback, _query_llm, StuckDetector, температуры фаз, контекстный бюджет)
 │   ├── adaptive_limits.py       # AdaptiveRoundManager — динамические лимиты раундов per-site (Фаза 2)
 │   ├── audit_logger.py          # Audit-лог JSONL (data/audit/session_*.jsonl)
@@ -201,18 +203,22 @@ C:\Projects\Pricer_Vision\
 ### Pipeline
 ```
 PDF → MinerU (subprocess Python 3.11) → сырой текст
-  → Structurer (fallback-only, LLM отключён) → pipe-парсинг колонок
-  → ReviewDialog (редактирование строк)
+  → OCRFallback (повторный MinerU, если текст < ocr_min_text_length)
+  → SpecStructurer (LLM-опция use_llm → fallback pipe-парсинг колонок)
+  → SmartReview (confidence scoring, авто-утверждение ≥0.8)
+  → ReviewDialog (редактирование строк, подсветка низкой уверенности)
   → _save_pdf_items_to_excel() → временный .xlsx
   → load_spec(path=xlsx_path) → preview_table (тот же путь что и XLSX)
 ```
 
 ### Ключевые особенности
-- **LLM отключён** — Qwen3.6 тратит 7700+ токенов на reasoning, оставляя 0–500 на JSON
-- `structurer.py` — только `_parse_pipe_line()` классифицирует колонки по содержимому
-- Результаты PDF проходят тот же pipeline что и XLSX: сохранение → загрузка как spec → preview_table → Старт → агент
-- `_load_pdf_item_into_spec` — мёртвый код (не вызывается, может пригодиться для прямого логирования)
-- Экспорт в xlsx использует "Изготовитель" вместо "Производитель" — чтобы `detect_columns` не конкатенировал brand в name
+- **LLM — опция** (`pdf_parser.use_llm: false` по умолчанию): `SpecStructurer(use_llm=True)` сначала зовёт LLM, при неудаче/пустом результате автоматически падает в `_fallback_parse`. Параметры: `llm_max_chars`, `llm_max_tokens`, `llm_temperature`.
+- **OCRFallback** (`src/pdf_parser/ocr_fallback.py`): `needs_ocr(text)` — True при < `ocr_min_text_length` (100) символов; повторный запуск MinerU через `asyncio.to_thread`. Бэкенд — `MinerUBackend` (mineru_venv), без PaddleOCR/Tesseract.
+- **SmartReview** (`src/pdf_parser/review.py`): `_calculate_confidence()` (name 0.4 + qty 0.2 + unit 0.1 + code|mfg 0.2 + specs 0.1), порог 0.8 → `(auto_approved, needs_review)`; `row["confidence"]` добавляется к каждой позиции.
+- `structurer.py` — fallback `_parse_pipe_line()` классифицирует колонки по содержимому.
+- Результаты PDF проходят тот же pipeline что и XLSX: сохранение → загрузка как spec → preview_table → Старт → агент.
+- `_load_pdf_item_into_spec` — мёртвый код (не вызывается, может пригодиться для прямого логирования).
+- Экспорт в xlsx использует "Изготовитель" вместо "Производитель" — чтобы `detect_columns` не конкатенировал brand в name.
 
 ### Параметры (config/settings.yaml)
 ```yaml
@@ -220,6 +226,12 @@ pdf_parser:
   lang: east_slavic
   method: auto
   min_chars: 10
+  use_llm: false
+  llm_max_chars: 3000
+  llm_max_tokens: 1024
+  llm_temperature: 0.0
+  ocr_min_text_length: 100
+  review_threshold: 0.8
 ```
 
 ## Помощник ассистента (HelpPage)

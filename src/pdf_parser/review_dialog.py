@@ -9,6 +9,7 @@ from PySide6.QtCore import Qt
 from PySide6.QtGui import QColor
 
 from src.theme import TOKENS, Theme
+from src.pdf_parser.review import SmartReview
 
 logger = logging.getLogger("pricer.pdf.review")
 
@@ -21,8 +22,9 @@ COLUMNS = [
     ("Производитель", 180),
     ("Кол-во", 80),
     ("Ед.", 60),
+    ("Уверенность", 90),
 ]
-NAME_COL, SPECS_COL, CODE_COL, MFG_COL, QTY_COL, UNIT_COL = 1, 2, 3, 4, 5, 6
+NAME_COL, SPECS_COL, CODE_COL, MFG_COL, QTY_COL, UNIT_COL, CONFIDENCE_COL = 1, 2, 3, 4, 5, 6, 7
 COL_COUNT = len(COLUMNS)
 
 
@@ -41,8 +43,11 @@ class ReviewDialog(QDialog):
         layout = QVBoxLayout(self)
         layout.setSpacing(10)
 
+        auto = sum(1 for it in self._items if (it.get("confidence") or 0) >= SmartReview.CONFIDENCE_THRESHOLD)
+        needs = len(self._items) - auto
         header = QLabel(
             f"Найдено {len(self._items)} позиций. "
+            f"Авто-подтверждено: {auto}, требует проверки: {needs}. "
             "Отредактируйте при необходимости и подтвердите."
         )
         layout.addWidget(header)
@@ -59,6 +64,7 @@ class ReviewDialog(QDialog):
         self.table.setAlternatingRowColors(True)
 
         corrected_bg = QColor("#3a3a2a") if self._theme_name == Theme.DARK else QColor("#fff9e0")
+        low_conf_bg = QColor("#3a2a1a") if self._theme_name == Theme.DARK else QColor("#ffe9c2")
 
         for row, item in enumerate(self._items):
             pos_item = QTableWidgetItem(str(item.get("pos", row + 1)))
@@ -72,11 +78,21 @@ class ReviewDialog(QDialog):
             self.table.setItem(row, QTY_COL, QTableWidgetItem(str(item.get("qty", ""))))
             self.table.setItem(row, UNIT_COL, QTableWidgetItem(item.get("unit", "шт")))
 
+            confidence = float(item.get("confidence", 1.0) or 0)
+            conf_item = QTableWidgetItem(f"{int(confidence * 100)}%")
+            conf_item.setFlags(conf_item.flags() & ~Qt.ItemIsEditable)
+            self.table.setItem(row, CONFIDENCE_COL, conf_item)
+
             if item.get("_corrected"):
                 for c in range(COL_COUNT):
                     cell = self.table.item(row, c)
                     if cell:
                         cell.setBackground(corrected_bg)
+            elif confidence < SmartReview.CONFIDENCE_THRESHOLD:
+                for c in range(COL_COUNT):
+                    cell = self.table.item(row, c)
+                    if cell:
+                        cell.setBackground(low_conf_bg)
 
         layout.addWidget(self.table)
 

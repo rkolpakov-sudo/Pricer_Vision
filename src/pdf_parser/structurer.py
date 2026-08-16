@@ -1,3 +1,4 @@
+import json
 import logging
 import re
 
@@ -6,6 +7,23 @@ from src.llm_client import LLMClient
 logger = logging.getLogger("pricer.pdf.structurer")
 
 MAX_INPUT_CHARS = 24000
+
+
+def _extract_llm_content(response) -> str:
+    """Extract text content from an LLMClient.chat() response dict.
+
+    Handles both the OpenAI chat-completions envelope and a plain
+    {"content": ...} dict. Returns "" for error responses.
+    """
+    if not isinstance(response, dict):
+        return ""
+    if response.get("error"):
+        return ""
+    try:
+        return response["choices"][0]["message"]["content"]
+    except (KeyError, IndexError, TypeError):
+        pass
+    return str(response.get("content", ""))
 
 
 def _html_to_text(text: str) -> str:
@@ -23,8 +41,14 @@ def _html_to_text(text: str) -> str:
 
 
 class SpecStructurer:
-    def __init__(self, llm_client: LLMClient):
+    def __init__(self, llm_client: LLMClient, use_llm: bool = False,
+                 max_chars: int = 3000, max_tokens: int = 1024,
+                 temperature: float = 0.0):
         self._llm = llm_client
+        self.use_llm = use_llm
+        self._max_chars = max_chars
+        self._max_tokens = max_tokens
+        self._temperature = temperature
 
     async def structure(self, raw_text: str) -> list[dict]:
         if not raw_text.strip():
@@ -41,7 +65,64 @@ class SpecStructurer:
 
         safe_text = cleaned[:max_chars]
 
+        if self.use_llm and self._llm is not None:
+            items = await self._llm_structure(safe_text)
+            if items:
+                return items
+            logger.warning("LLM structuring returned no items, falling back to regex parser")
+
         return self._fallback_parse(safe_text)
+
+    async def _llm_structure(self, text: str) -> list[dict]:
+        """Structure table text via the LLM (option). Returns [] on any failure."""
+        truncated = text[: self._max_chars] or text
+        prompt = (
+            "Преобразуй текст таблицы в JSON список позиций. "
+            "Только результат, без пояснений и рассуждений.\n\n"
+            'Формат каждой позиции: {"pos": 1, "name": "Кабель ВВГнг", "specs": "3х2.5", '
+            '"code": "A001", "manufacturer": "ООО Кабель", "qty": 100.0, "unit": "м", "weight": 0.0}\n\n'
+            "Текст таблицы:\n"
+            f"{truncated}\n\n"
+            "JSON:"
+        )
+        response = await self._llm.chat(
+            messages=[{"role": "user", "content": prompt}],
+            force_json=True,
+            temperature=self._temperature,
+            max_tokens=self._max_tokens,
+        )
+        return self._safe_parse_items(response)
+
+    def _safe_parse_items(self, response: dict) -> list[dict]:
+        """Parse the list of items from an LLM response. Falls back to []."""
+        content = _extract_llm_content(response)
+        if not content:
+            return []
+        try:
+            start, end = content.find("["), content.rfind("]") + 1
+            if start >= 0 and end > start:
+                items = json.loads(content[start:end])
+                if isinstance(items, list):
+                    return [self._normalize_item(it) for it in items]
+        except (json.JSONDecodeError, TypeError, AttributeError):
+            logger.warning("Failed to parse LLM JSON, using fallback")
+        return []
+
+    @staticmethod
+    def _normalize_item(it) -> dict:
+        """Coerce an item to the SpecStructurer contract."""
+        if not isinstance(it, dict):
+            return {}
+        return {
+            "pos": int(it.get("pos", 0) or 0),
+            "name": str(it.get("name", "")).strip(),
+            "specs": str(it.get("specs", "")),
+            "code": str(it.get("code", "")),
+            "manufacturer": str(it.get("manufacturer", "")),
+            "qty": float(it.get("qty", 0) or 0),
+            "unit": str(it.get("unit", "")),
+            "weight": float(it.get("weight", 0) or 0),
+        }
 
     def _fallback_parse(self, text: str) -> list[dict]:
         items = []

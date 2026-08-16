@@ -644,6 +644,11 @@ class MainWindow(QMainWindow):
     def _on_pdf_items_ready(self, items: list[dict]):
         self.add_log("INFO", "pdf", f"Извлечено {len(items)} позиций из PDF")
 
+        from src.pdf_parser.review import SmartReview
+        auto = sum(1 for it in items if (it.get("confidence") or 0) >= SmartReview.CONFIDENCE_THRESHOLD)
+        if auto:
+            self.add_log("INFO", "pdf", f"SmartReview: {auto} авто-подтверждено, {len(items) - auto} требует проверки")
+
         dlg = ReviewDialog(items, self, theme_name=self._current_theme)
         if dlg.exec() and dlg.is_confirmed:
             confirmed = dlg.items

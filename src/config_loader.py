@@ -41,6 +41,10 @@ def get_learning_config(key: str, default):
     cfg = load_settings()
     return cfg.get("learning", {}).get(key, default)
 
+def get_pdf_config(key: str, default):
+    cfg = load_settings()
+    return cfg.get("pdf_parser", {}).get(key, default)
+
 def save_browser_headless(headless: bool):
     cfg = load_settings()
     cfg.setdefault("browser", {})["headless"] = headless
