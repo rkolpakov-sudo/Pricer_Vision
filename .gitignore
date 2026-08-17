@@ -36,6 +36,7 @@ graph.json
 
 # ── Sample assets kept out of the repo ──────────────────────────
 /santech-variant.png
+/*.png
 /*.pdf
 
 # ── Local tooling / environment-specific ───────────────────────
