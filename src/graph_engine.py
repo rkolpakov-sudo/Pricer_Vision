@@ -9,6 +9,7 @@ from pathlib import Path
 from collections import defaultdict
 
 from src.config_loader import get_price_config
+from src.approach_relevance import product_name_matches
 
 logger = logging.getLogger("pricer.graph")
 
@@ -407,7 +408,9 @@ class GraphEngine:
         now = datetime.now()
         scored = []
         for pid, info in candidates.items():
-            if info["overlap"] >= 2:
+            if info["overlap"] >= 2 and product_name_matches(
+                spec_text, info["price"].get("spec_text", "")
+            ):
                 price = dict(info["price"])
                 created_at = price.get("created_at")
                 if created_at:

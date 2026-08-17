@@ -5,6 +5,8 @@ import time
 from pathlib import Path
 from typing import Optional
 
+from src.approach_relevance import product_name_matches
+
 CACHE_MAX_ENTRIES = 1000
 _EVICT_RATIO = 0.2
 
@@ -28,7 +30,9 @@ class SemanticCache:
             similarity = self._calculate_similarity(
                 normalized, cached_data.get("normalized_name", "")
             )
-            if similarity >= threshold:
+            if similarity >= threshold and product_name_matches(
+                product_name, cached_data.get("original_name", "")
+            ):
                 return {
                     **cached_data.get("result", {}),
                     "cache_hit": True,

@@ -61,8 +61,42 @@ class TestGraphEngine:
             "site_id": "tinko.ru",
             "price": 100,
         })
-        similar = graph_engine.get_confirmed_prices("ВВГ-нг 3x2.5 ОГНЕСТОЙКИЙ КАБЕЛЬ")
-        assert len(similar) >= 1
+        same_size = graph_engine.get_confirmed_prices("ВВГ-нг 3x1.5 ОГНЕСТОЙКИЙ КАБЕЛЬ")
+        assert len(same_size) >= 1
+
+        # Разный типоразмер (3x1.5 vs 3x2.5) — цена НЕ переиспользуется
+        other_size = graph_engine.get_confirmed_prices("ВВГ-нг 3x2.5 ОГНЕСТОЙКИЙ КАБЕЛЬ")
+        assert other_size == []
+
+    def test_get_confirmed_prices_rejects_other_size(self, graph_engine):
+        """Кран шаровой Ду15 ≠ Ду20: цена с одного типоразмера не уходит на другой."""
+        graph_engine.save_confirmed_price({
+            "spec_text": "Кран шаровой Ду15, завод-изготовитель Ридан",
+            "product_type_id": "valves",
+            "site_id": "santech.ru",
+            "price": 1193.2,
+        })
+        assert graph_engine.get_confirmed_prices("Кран шаровой Ду20") == []
+        assert graph_engine.get_confirmed_prices("Кран шаровой Ду15")[0]["price"] == 1193.2
+
+    def test_get_confirmed_prices_rejects_other_product(self, graph_engine):
+        """Теплосчетчик ≠ Кран шаровой: общие структурные слова не дают совпадения."""
+        graph_engine.save_confirmed_price({
+            "spec_text": "Кран шаровой Ду15, завод-изготовитель Ридан",
+            "product_type_id": "valves",
+            "site_id": "santech.ru",
+            "price": 1193.2,
+        })
+        assert graph_engine.get_confirmed_prices("Теплосчетчик, завод-изготовитель Пульсар") == []
+
+    def test_get_confirmed_prices_rejects_other_brand(self, graph_engine):
+        graph_engine.save_confirmed_price({
+            "spec_text": "Кран шаровой Ду15, завод-изготовитель Ридан",
+            "product_type_id": "valves",
+            "site_id": "santech.ru",
+            "price": 1193.2,
+        })
+        assert graph_engine.get_confirmed_prices("Кран шаровой Ду15, завод-изготовитель Пульсар") == []
 
     def test_save_hint(self, graph_engine):
         hid = graph_engine.save_hint("cables", "tinko.ru", "Искать в разделе Кабель", 0.8)

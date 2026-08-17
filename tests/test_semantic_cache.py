@@ -34,6 +34,22 @@ def test_no_hit_for_different_product(cache):
     assert cache.get_similar("индукционный котёл") is None
 
 
+def test_no_hit_for_other_size(cache):
+    """Разный типоразмер не даёт cache hit (Ду15 ≠ Ду20), даже при низком пороге."""
+    cache.store("Кран шаровой Ду15, завод-изготовитель Ридан",
+                {"price": 1193.2, "confidence": 0.95})
+    assert cache.get_similar("Кран шаровой Ду20, завод-изготовитель Ридан", threshold=0.5) is None
+    hit = cache.get_similar("Кран шаровой Ду15, завод-изготовитель Ридан")
+    assert hit is not None and hit["price"] == 1193.2
+
+
+def test_no_hit_for_other_brand(cache):
+    """Разный бренд не даёт cache hit (Ридан ≠ Пульсар), даже при низком пороге."""
+    cache.store("Кран шаровой Ду15, завод-изготовитель Ридан",
+                {"price": 1193.2, "confidence": 0.95})
+    assert cache.get_similar("Кран шаровой Ду15, завод-изготовитель Пульсар", threshold=0.5) is None
+
+
 def test_low_threshold_blocks(cache):
     cache.store("ВВГнг 3x1.5 кабель", {"price": 100.0, "confidence": 0.95})
     # Схожесть "кабель ввгнг 3x1.5" vs "труба пвх" < 1.0 — threshold 1.0 блокирует

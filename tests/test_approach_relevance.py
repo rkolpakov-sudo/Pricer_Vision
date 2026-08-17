@@ -79,3 +79,36 @@ class TestProductNameMatches:
     def test_stem_variants(self):
         assert product_name_matches("Клапан балансировочный автоматический Ду15",
                                     "Клапан балансировочный автомат Ду15") is True
+
+    def test_different_size_rejected(self):
+        """Фатальный случай из лога: страница Ду20 не подходит для строки Ду15."""
+        assert product_name_matches("Кран шаровой Ду15",
+                                    "Кран шаровой BVR-R Ду 20 (DN 20) Ридан") is False
+
+    def test_same_size_accepted(self):
+        assert product_name_matches("Кран шаровой Ду15",
+                                    "Кран шаровой BVR-R Ду 15 (DN 15) Ридан") is True
+
+    def test_different_inch_size_rejected(self):
+        assert product_name_matches("Труба стальная водогазопроводная 1/2\"",
+                                    "Труба стальная водогазопроводная 3/4\"") is False
+
+    def test_different_dimension_rejected(self):
+        assert product_name_matches("Радиатор стальной панельный 500x800",
+                                    "Радиатор стальной панельный 500x1000") is False
+
+    def test_different_duct_diameter_rejected(self):
+        assert product_name_matches("Воздуховод Ø100", "Воздуховод оцинкованный Ø200") is False
+
+    def test_brand_mismatch_rejected(self):
+        assert product_name_matches("Кран шаровой Ду15, завод-изготовитель Ридан",
+                                    "Кран шаровой Ду15, завод-изготовитель Пульсар") is False
+
+    def test_brand_match_accepted(self):
+        assert product_name_matches("Кран шаровой Ду15, завод-изготовитель Ридан",
+                                    "Кран шаровой Ду15, завод-изготовитель Ридан") is True
+
+    def test_structural_words_are_not_similarity_evidence(self):
+        """Общие «завод-изготовитель» не делают теплосчетчик похожим на кран."""
+        assert product_name_matches("Теплосчетчик, завод-изготовитель Пульсар",
+                                    "Кран шаровой Ду15, завод-изготовитель Ридан") is False

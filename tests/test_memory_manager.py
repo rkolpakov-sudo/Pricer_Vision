@@ -136,8 +136,10 @@ class TestMemoryManager:
 
     def test_get_relevant_prices(self, mm):
         mm.save_price("ВВГ-нг 3x1.5 ОГНЕСТОЙКИЙ КАБЕЛЬ", "cables", "tinko.ru", 100, "http://x.ru", 0.95)
-        prices = mm.get_relevant_prices("ВВГ-нг 3x2.5 ОГНЕСТОЙКИЙ КАБЕЛЬ")
-        assert len(prices) >= 1
+        same = mm.get_relevant_prices("ВВГ-нг 3x1.5 ОГНЕСТОЙКИЙ КАБЕЛЬ")
+        assert len(same) >= 1
+        # Разный типоразмер (3x1.5 vs 3x2.5) — цена не переиспользуется
+        assert mm.get_relevant_prices("ВВГ-нг 3x2.5 ОГНЕСТОЙКИЙ КАБЕЛЬ") == []
 
     def test_hints_crud(self, mm):
         hid = mm.add_hint("cables", "Начинать с каталога", priority=0.9)
