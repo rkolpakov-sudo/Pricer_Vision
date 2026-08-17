@@ -21,7 +21,7 @@ from src.resilience import llm_circuit
 from src.adaptive_limits import AdaptiveRoundManager
 from src.rate_limiter import DomainRateLimiter
 from src.captcha_detector import CaptchaDetector, CaptchaType
-from src.approach_relevance import approach_relevant
+from src.approach_relevance import approach_relevant, product_name_matches
 
 logger = logging.getLogger("pricer.agent")
 
@@ -95,7 +95,7 @@ GRAPH_TOOL_DEFS = [
         "type": "function",
         "function": {
             "name": "save_confirmed_price",
-            "description": "Записать подтверждённую цену в граф. Confidence < 0.6 — не записывай. После вызова цена считается финальной.",
+            "description": "Записать подтверждённую цену в граф. Обязательно передай product_name — точное название товара со страницы. Если товар на странице НЕ соответствует позиции спецификации (другой тип: кран вместо клапана, воздуховод вместо воздухоотводчика) — НЕ вызывай этот инструмент. Confidence < 0.6 — не записывай.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -105,9 +105,10 @@ GRAPH_TOOL_DEFS = [
                     "price": {"type": "number"},
                     "url": {"type": "string"},
                     "confidence": {"type": "number"},
+                    "product_name": {"type": "string", "description": "Точное наименование товара со страницы (обязательно)"},
                     "reason": {"type": "string"}
                 },
-                "required": ["spec_text", "product_type", "site", "price", "url", "confidence"]
+                "required": ["spec_text", "product_type", "site", "price", "url", "confidence", "product_name"]
             }
         }
     },
@@ -171,7 +172,7 @@ SYSTEM_PROMPT = """Ты — опытный пользователь с дост�
 2. Работай с ОДНИМ сайтом за раз. НЕ переключайся между сайтами без причины.
 3. browser_snapshot даёт accessibility-tree. Если цены не видны — используй browser_evaluate с JS (querySelectorAll) для прямого извлечения данных из DOM.
 4. После поиска на сайте: кликни на карточку товара → откроется страница с ценой. Если цены нет в карточке — ищи на странице через browser_evaluate.
-5. Если точного совпадения нет — сохрани лучший найденный аналог НЕМЕДЛЕННО через save_confirmed_price с confidence 0.3-0.5 и requires_review=True. Укажи в reason расхождение в названии. Можно найти лучшую цену на другом сайте — она перезапишет эту. НЕ трать раунды на поиск более точного совпадения на том же сайте.
+5. Если точного совпадения нет — сохрани лучший найденный АНАЛОГ через save_confirmed_price с confidence 0.3-0.5 и requires_review=True, НО только если это товар ТОГО ЖЕ ТИПА (кран для крана, клапан для клапана, воздуховод для воздуховода). НЕ подставляй товар другого типа даже как аналог. Укажи в reason расхождение в названии. Можно найти лучшую цену на другом сайте — она перезапишет эту. НЕ трать раунды на поиск более точного совпадения на том же сайте.
 6. После нахождения цены: save_confirmed_price + save_approach.
 7. Если цена не найдена — верни null, не выдумывай.
 8. Если get_confirmed_prices вернул цену с confidence >= 0.9 — используй её как финальную, НЕ проверяй в браузере. Сразу вызови save_confirmed_price.
@@ -183,6 +184,7 @@ SYSTEM_PROMPT = """Ты — опытный пользователь с дост�
 14. Если сайт явно НЕ ПОДХОДИТ для товара (например, сантехнический сайт для кабеля, или производитель труб для электроники) — НЕМЕДЛЕННО переключайся на следующий сайт. Не трать больше 2 раундов на заведомо неподходящий сайт.
 15. Если сайт использует SPA (результаты поиска не появляются после Enter) — попробуй browser_navigate напрямую на URL поиска: site.ru/search?q=ТОВАР. Не нажимай Enter на SPA-сайтах — используй прямые URL.
 16. Если в структуре файла указан завод-изготовитель, тип/обозначение или артикул/код — используй их для правильного выбора товара. Бренд/тип не обязательно вставлять в поисковый запрос: сначала найди товар по наименованию, затем среди результатов отдай предпочтение позиции того же производителя/модели/артикула. Если товар выпускается несколькими заводами — это критично для выбора правильного аналога. Если «производитель» — это страна (например «Россия») или ссылка на стандарт (ГОСТ/ТУ/СНиП) — НЕ используй их как бренд и не вставляй в поиск.
+17. При вызове save_confirmed_price ВСЕГДА передавай product_name — точное наименование товара, которое ты видишь на странице (заголовок карточки). Система проверит, что товар соответствует позиции спецификации. Сохраняй цену только если это действительно нужный товар (или аналог того же типа). Кран шаровой и клапан балансировочный — это РАЗНЫЕ товары, воздуховод и воздухоотводчик — РАЗНЫЕ товары.
 
 Ограничение — 60 шагов на один товар. У тебя полная свобода действий. Кратко поясняй свои намерения перед каждым действием."""
 
@@ -628,6 +630,19 @@ async def process_row(
             })
 
             if tool_name == "save_confirmed_price":
+                # Программная проверка соответствия товара спецификации
+                found_name = tool_args.get("product_name", "")
+                if found_name and not product_name_matches(spec_text, found_name):
+                    logger.warning("⚠️ Product mismatch rejected: spec=%s vs found=%s",
+                                   spec_text[:50], str(found_name)[:50])
+                    messages.append({
+                        "role": "tool",
+                        "tool_call_id": tc.get("id", ""),
+                        "content": ("error: найденный товар не соответствует спецификации "
+                                    "(например кран вместо клапана). НЕ сохраняй эту цену — "
+                                    "продолжи поиск правильного товара."),
+                    })
+                    continue
                 validated = validate_result({
                     "price": tool_args.get("price"),
                     "confidence": tool_args.get("confidence", 0.5),
@@ -908,6 +923,12 @@ def _execute_graph_tool(name: str, args: dict, engine, mm, spec_text: str = "") 
             return "\n".join(lines)
 
         elif name == "save_confirmed_price":
+            found_name = args.get("product_name", "")
+            if found_name and not product_name_matches(args.get("spec_text", ""), found_name):
+                logger.warning("⚠️ Product mismatch rejected: spec=%s vs found=%s",
+                               str(args.get("spec_text", ""))[:50], str(found_name)[:50])
+                return ("error: найденный товар не соответствует спецификации "
+                        "(например кран вместо клапана). НЕ сохраняй эту цену — продолжи поиск.")
             pid = mm.save_price(
                 spec_text=args.get("spec_text", ""),
                 product_type=args.get("product_type", ""),

@@ -2,7 +2,7 @@
 
 import pytest
 
-from src.approach_relevance import tokenize, approach_relevant
+from src.approach_relevance import tokenize, approach_relevant, product_name_matches
 
 
 class TestTokenize:
@@ -44,3 +44,38 @@ class TestApproachRelevant:
     def test_exact_match_relevant(self):
         approach = {"search_query": "Воздуховод из оцинкованной стали Ø100"}
         assert approach_relevant(approach, "Воздуховод из оцинкованной стали Ø100") is True
+
+
+class TestProductNameMatches:
+    def test_ball_valve_vs_balancing_valve(self):
+        """Кран шаровой vs Клапан балансировочный — РАЗНЫЕ товары (общий только Ду15)."""
+        assert product_name_matches("Кран шаровой Ду15", "Клапан балансировочный Ду15") is False
+
+    def test_same_product_with_extras(self):
+        assert product_name_matches("Кран шаровой Ду15", "Кран шаровой дренажный Ду15 Ридан") is True
+
+    def test_balancing_valve_variants(self):
+        assert product_name_matches("Клапан балансировочный авт. Ду15",
+                                    "Клапан балансировочный автомат латунь APT-R3 Ду15") is True
+
+    def test_air_vent_vs_air_duct(self):
+        """Воздухоотводчик vs Воздуховод — РАЗНЫЕ товары."""
+        assert product_name_matches("Воздухоотводчик автоматический Ду15",
+                                    "Воздуховод из оцинкованной стали Ø100") is False
+
+    def test_air_duct_short_name(self):
+        assert product_name_matches("Воздуховод Ø100", "Воздуховод оцинкованный Ø100") is True
+
+    def test_flanged_vs_ball_valve(self):
+        """Кран фланцевый не подходит для крана шарового (разный подтип)."""
+        assert product_name_matches("Кран шаровой Ду15", "Кран фланцевый Ду100") is False
+
+    def test_no_found_name_allowed(self):
+        assert product_name_matches("Кран шаровой Ду15", "") is True
+
+    def test_no_spec_allowed(self):
+        assert product_name_matches("", "Кран шаровой Ду15") is True
+
+    def test_stem_variants(self):
+        assert product_name_matches("Клапан балансировочный автоматический Ду15",
+                                    "Клапан балансировочный автомат Ду15") is True
