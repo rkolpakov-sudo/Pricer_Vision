@@ -336,12 +336,24 @@ async def process_row(
     spec_meta: dict | None = None,
     semantic_cache=None,
     monitor_callback: Callable[[str, object], None] | None = None,
+    negative_cache=None,
 ) -> dict:
     start_time = datetime.now()
 
     def _stop_check():
         if stop_event and stop_event.is_set():
             raise asyncio.CancelledError("stopped by user")
+
+    # Сессионный отрицательный кэш: товар уже дважды не найден — не ищем снова
+    if negative_cache is not None and negative_cache.is_blocked(spec_text):
+        elapsed = (datetime.now() - start_time).total_seconds()
+        logger.info("Row: negative cache hit — '%s' already not found this session", spec_text[:40])
+        result = {
+            "spec_text": spec_text, "price": None, "confidence": 0.0,
+            "reason": "negative cache: не найдено ранее в сессии",
+            "requires_review": True, "error": "not_found_cached", "elapsed": elapsed,
+        }
+        return _result_to_schema(result)
 
     product_type = graph_engine.classify_product_type(spec_text)
     approaches = memory_manager.get_all_approaches(product_type) if product_type != UNKNOWN_PT else memory_manager.get_all_approaches_flat()

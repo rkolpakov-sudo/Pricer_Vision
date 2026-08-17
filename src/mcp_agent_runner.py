@@ -13,6 +13,7 @@ from src.audit_logger import AuditLogger
 from src.task_scheduler import TaskScheduler
 from src.semantic_cache import SemanticCache
 from src.learning_loop import LearningLoop
+from src.session_cache import NegativeCache
 
 logger = logging.getLogger("pricer.runner")
 
@@ -138,6 +139,8 @@ class MCPAgentRunner(QThread):
                 ordered = list(self.specs)
             original_index = {id(spec): i for i, spec in enumerate(self.specs)}
             last_health_check = datetime.now()
+            # Сессионный отрицательный кэш «не найденных» товаров (только в памяти)
+            negative_cache = NegativeCache()
             for i, spec in enumerate(ordered):
                 if self._stop_event.is_set():
                     self.status_signal.emit("stop")
@@ -145,6 +148,22 @@ class MCPAgentRunner(QThread):
                     break
                 result = None
                 retries = 0
+                spec_text = spec.text if hasattr(spec, 'text') else str(spec)
+                # Товар уже дважды не найден в этой сессии — пропускаем без поиска
+                if negative_cache.is_blocked(spec_text):
+                    result = {"spec_text": spec_text, "price": None, "confidence": 0.0,
+                              "reason": "negative cache: не найдено ранее в сессии",
+                              "requires_review": True, "error": "not_found_cached", "elapsed": 0.0}
+                    logger.info("Row %d: negative cache — '%s' not found earlier, skipping", i + 1, spec_text[:40])
+                    self.status_signal.emit(("progress", i + 1, total, f"Пропуск (не найдено ранее): {spec_text[:60]}..."))
+                    results.append(result)
+                    audit.log_extraction(spec_text, False, None)
+                    row_idx = original_index.get(id(spec), i)
+                    self._processed += 1
+                    self.metrics_signal.emit(self._current_metrics())
+                    self.monitor_signal.emit({"type": "row_done", "idx": i + 1, "total": total})
+                    self.row_done_signal.emit(row_idx, result)
+                    continue
                 while retries < 3 and result is None:
                     if self._stop_event.is_set():
                         break
@@ -157,7 +176,6 @@ class MCPAgentRunner(QThread):
                     preview = spec.text[:60] if hasattr(spec, 'text') else str(spec)[:60]
                     self.status_signal.emit(("progress", i + 1, total, f"Обработка: {preview}..."))
                     self.monitor_signal.emit({"type": "row", "idx": i + 1, "total": total, "preview": preview})
-                    spec_text = spec.text if hasattr(spec, 'text') else str(spec)
 
                     def _status(msg):
                         self.status_signal.emit(("progress", i + 1, total, str(msg)[:120]))
@@ -193,6 +211,7 @@ class MCPAgentRunner(QThread):
                                 spec_meta=spec_meta,
                                 semantic_cache=semantic_cache,
                                 monitor_callback=_monitor,
+                                negative_cache=negative_cache,
                             ),
                             timeout=300.0,
                         )
@@ -216,6 +235,10 @@ class MCPAgentRunner(QThread):
                 if self._stop_event.is_set():
                     self.monitor_signal.emit({"type": "stop"})
                     break
+                # Сессионный отрицательный кэш: не найденный товар учитываем
+                # (прерывания пользователем/cancelled/Stopped — не считаем)
+                if result.get("price") is None and result.get("error") not in ("cancelled", "Stopped"):
+                    negative_cache.record(spec_text)
                 results.append(result)
                 audit.log_extraction(spec_text, result.get("price") is not None, result.get("price"))
                 row_idx = original_index.get(id(spec), i)

@@ -320,6 +320,48 @@ class TestAgentFlow:
         assert result.get("price") == 120.0
         assert result.get("site") == "other.ru"
 
+    async def test_negative_cache_skips_search(self):
+        """Товар из отрицательного кэша пропускается без вызова LLM/браузера."""
+        from src.session_cache import NegativeCache
+        llm, bridge, engine, mm, cache = make_env(responses=[llm_final(100.0)])
+        neg = NegativeCache()
+        neg.record("Труба ПНД 32")
+        neg.record("Труба ПНД 32")
+        result = await process_row(
+            spec_text="Труба ПНД 32",
+            llm_client=llm,
+            mcp_bridge=bridge,
+            graph_engine=engine,
+            memory_manager=mm,
+            fresh=True,
+            semantic_cache=cache,
+            negative_cache=neg,
+        )
+        assert result.get("price") is None
+        assert result.get("error") == "not_found_cached"
+        assert result.get("requires_review") is True
+        assert llm.calls == []
+        assert bridge.calls == []
+
+    async def test_negative_cache_one_failure_still_searches(self):
+        """Одна неудача — товар ещё не в блокировке, поиск выполняется."""
+        from src.session_cache import NegativeCache
+        llm, bridge, engine, mm, cache = make_env(responses=[llm_final(100.0)])
+        neg = NegativeCache()
+        neg.record("Труба ПНД 32")
+        result = await process_row(
+            spec_text="Труба ПНД 32",
+            llm_client=llm,
+            mcp_bridge=bridge,
+            graph_engine=engine,
+            memory_manager=mm,
+            fresh=True,
+            semantic_cache=cache,
+            negative_cache=neg,
+        )
+        assert result.get("price") == 100.0
+        assert llm.calls  # поиск состоялся
+
 
 @pytest.mark.asyncio
 class TestErrorResultContract:
