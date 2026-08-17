@@ -34,31 +34,23 @@ try {
     originalQuery(p)
   );
 
-  // 7. WebGL vendor
-  const getParameter = WebGLRenderingContext.prototype.getParameter;
-  WebGLRenderingContext.prototype.getParameter = function(p) {
-    if (p === 37445) return 'Intel Open Source Technology Center';
-    if (p === 37446) return 'Mesa DRI Intel(R) HD Graphics (KBL GT2)';
-    return getParameter.call(this, p);
-  };
-
-  // 8. Screen
+  // 7. Screen
   Object.defineProperty(screen, 'colorDepth', { get: () => 24 });
   Object.defineProperty(screen, 'pixelDepth', { get: () => 24 });
   Object.defineProperty(screen, 'availWidth', { get: () => window.innerWidth });
   Object.defineProperty(screen, 'availHeight', { get: () => window.innerHeight });
 
-  // 9. Connection
+  // 8. Connection
   if (navigator.connection) {
     Object.defineProperty(navigator.connection, 'rtt', { get: () => 50 });
     Object.defineProperty(navigator.connection, 'downlink', { get: () => 10 });
     Object.defineProperty(navigator.connection, 'effectiveType', { get: () => '4g' });
   }
 
-  // 10. Platform
+  // 9. Platform
   Object.defineProperty(navigator, 'platform', { get: () => 'Win32' });
 
-  // 11. Media devices
+  // 10. Media devices
   if (navigator.mediaDevices) {
     navigator.mediaDevices.enumerateDevices = () => Promise.resolve([
       { deviceId: '', kind: 'audioinput', label: '', groupId: '' },
@@ -67,7 +59,7 @@ try {
     ]);
   }
 
-  // 12. Battery
+  // 11. Battery
   if (navigator.getBattery) {
     navigator.getBattery = () => Promise.resolve({
       charging: true, chargingTime: 0, dischargingTime: Infinity, level: 1
@@ -75,9 +67,9 @@ try {
   }
 } catch(e) { /* silently fail */ }
 
-// === ДОПОЛНИТЕЛЬНЫЕ ПАТЧИ (13-17) ===
+// === ДОПОЛНИТЕЛЬНЫЕ ПАТЧИ (12-15) ===
 try {
-  // 13. Canvas Fingerprint Randomization
+  // 12. Canvas Fingerprint Randomization
   const originalToDataURL = HTMLCanvasElement.prototype.toDataURL;
   const originalToBlob = HTMLCanvasElement.prototype.toBlob;
   const originalGetImageData = CanvasRenderingContext2D.prototype.getImageData;
@@ -107,7 +99,7 @@ try {
     return originalToBlob.call(this, callback, type, quality);
   };
 
-  // 14. AudioContext Fingerprint — нейтрализуем анализ частотной характеристики
+  // 13. AudioContext Fingerprint — нейтрализуем анализ частотной характеристики
   const OriginalAudioContext = window.AudioContext || window.webkitAudioContext;
   if (OriginalAudioContext) {
     const originalCreateAnalyser = OriginalAudioContext.prototype.createAnalyser;
@@ -124,7 +116,7 @@ try {
     };
   }
 
-  // 15. WebRTC Leak Prevention — подменяем локальные кандидаты
+  // 14. WebRTC Leak Prevention — подменяем локальные кандидаты
   if (window.RTCPeerConnection) {
     const OriginalRTC = window.RTCPeerConnection;
     window.RTCPeerConnection = function(...args) {
@@ -143,7 +135,7 @@ try {
     window.RTCPeerConnection.prototype = OriginalRTC.prototype;
   }
 
-  // 16. Font Enumeration Protection — ограничиваем доступный набор шрифтов
+  // 15. Font Enumeration Protection — ограничиваем доступный набор шрифтов
   const originalFontsCheck = document.fonts ? document.fonts.check.bind(document.fonts) : null;
   if (originalFontsCheck) {
     document.fonts.check = function(font, text) {
@@ -156,12 +148,4 @@ try {
       return originalFontsCheck(font, text);
     };
   }
-
-  // 17. WebGL Vendor/Renderer Masking
-  const glGetParameter = WebGLRenderingContext.prototype.getParameter;
-  WebGLRenderingContext.prototype.getParameter = function(parameter) {
-    if (parameter === 0x9245) return 'Google Inc. (Intel)';
-    if (parameter === 0x9246) return 'ANGLE (Intel, Intel(R) UHD Graphics 620 Direct3D11 vs_5_0 ps_5_0)';
-    return glGetParameter.call(this, parameter);
-  };
 } catch(e) { /* silently fail */ }

@@ -19,7 +19,6 @@ def _is_hash_ref(ref: str) -> bool:
 
 _STEALTH_JS = str(Path(__file__).resolve().parent.parent / "config" / "stealth.js")
 _MCP_CONFIG = str(Path(__file__).resolve().parent.parent / "config" / "playwright-mcp.json")
-_USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/134.0.0.0 Safari/537.36"
 
 
 class _ServerConnection:
@@ -54,7 +53,6 @@ class MCPBridge:
             pw_args.extend(["--init-script", _STEALTH_JS])
         if os.path.exists(_MCP_CONFIG):
             pw_args.extend(["--config", _MCP_CONFIG])
-        pw_args.extend(["--user-agent", _USER_AGENT])
         pw_args.extend(["--viewport-size", "1920x1080"])
         pw_args.extend(["--timeout-action", "10000"])
         pw_args.extend(["--timeout-navigation", "30000"])

@@ -1494,4 +1494,33 @@ C:\Projects\Pricer_Vision\
   без размера больше НЕ переиспользуется — 3x1.5 ≠ 3x2.5).
 - **525 passed, 0 failed**.
 
+## 2026-08-17 — Антидетект: фикс регрессоров (vseinstrumenti hcheck / lunda 401)
+
+**Симптом**: агент стал чаще детектиться на vseinstrumenti (Cloudflare hcheck-челлендж на каждом `page.goto`,
+403, таймауты — 31 детекция captcha за прогон) и lunda (мгновенный 401 «blocks automated access»).
+Код антидетекта не менялся с `45daa3b`, сайты раньше работали.
+
+**Причины**:
+1. **Устаревший User-Agent**: в `src/mcp_bridge.py` жёстко `_USER_AGENT Chrome/134.0.0.0`, а установленный
+   Chrome — 151.0.7922.138. Современный Chrome шлёт `Sec-CH-UA` + `navigator.userAgentData` с реальной
+   версией 151 → WAF видит несоответствие UA/фактической версии (классический маркер автоматизации).
+2. **`browser.headless: true`** в рабочем `config/settings.yaml` (незакоммичено; HEAD = `false`).
+3. **Конфликт WebGL-патчей** в `config/stealth.js`: патчи 7 и 17 переопределяли одни константы
+   (37445/37446 == 0x9245/0x9246) разными значениями; выигрывал 17-й — «Intel UHD Graphics 620
+   Direct3D11», а реальный GPU машины **NVIDIA RTX 5090** → репортируемый renderer не совпадает
+   с фактическим рендером WebGL. Плюс патч 7 отдавал Linux-строку «Mesa DRI» на Windows.
+
+**Фиксы**:
+- `src/mcp_bridge.py`: удалены `_USER_AGENT` и `--user-agent` оверрайд — браузер отдаёт реальный UA 151
+  + согласованные Client Hints.
+- `config/settings.yaml`: `browser.headless: false` (как при успешных прогонах).
+- `config/stealth.js`: удалены WebGL-патчи 7 и 17 (реальный GPU теперь виден напрямую — это консистентно
+  для реального браузера); патчи перенумерованы 1–15, node --check OK.
+
+**Проверка**: `node --check config/stealth.js` OK; `py_compile src/mcp_bridge.py` OK;
+`pytest -q` — **525 passed** (25.3s).
+
+**Замечание**: блок lunda по IP (request_ip=5.228.80.117) может сохраняться несколько часов даже после
+смены отпечатка; при первом прогоне после фикса стоит сверить runtime.log.
+
 

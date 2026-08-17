@@ -1,9 +1,15 @@
+antidetect:
+  rate_limit_max_requests_per_minute: 20
+  rate_limit_min_interval: 1.5
 browser:
   headless: false
   no_sandbox: true
 deps:
   playwright_mcp:
     version: null
+learning:
+  hint_ttl_days: 90
+  site_profiles_path: data/site_profiles.json
 limits:
   max_retries_per_site: 3
   save_interval: 5
@@ -26,37 +32,31 @@ paths:
   state: state.json
 pdf_parser:
   lang: east_slavic
-  method: auto
-  min_chars: 10
-  use_llm: false
   llm_max_chars: 3000
   llm_max_tokens: 1024
   llm_temperature: 0.0
+  method: auto
+  min_chars: 10
   ocr_min_text_length: 100
   review_threshold: 0.8
   timeout: 900
+  use_llm: false
 price:
   stale_days: 30
   vat_rate: 1.2
 run:
   fresh: false
+  group_by_site: false
   main_temperature: 0.3
   max_rounds: 50
   max_rounds_per_site: 15
   max_study_rounds: 50
   study_temperature: 0.5
   summarize_max_chars: 800
-  group_by_site: false
 ui:
   log_rotation_mb: 10
   telemetry_update_ms: 1000
   theme: dark
-antidetect:
-  rate_limit_min_interval: 1.5
-  rate_limit_max_requests_per_minute: 20
-learning:
-  hint_ttl_days: 90
-  site_profiles_path: data/site_profiles.json
 vision_search:
   enabled: true
   max_vision_attempts: 2
