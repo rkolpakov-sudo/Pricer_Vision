@@ -475,45 +475,47 @@ class MainWindow(QMainWindow):
         self.preview_table.setRowCount(0)
         self._skip_reconciling = True
         try:
+            preview_rows = []
             for excel_row in range(2, ws.max_row + 1):
                 name = self.excel_writer.build_item_name(excel_row, mapping)[0]
                 if not name or name.strip() in ("", "None", "none"):
                     continue
                 spec_item = self.excel_writer.spec_for_row(excel_row)
-                row = self.preview_table.rowCount()
-                self.preview_table.insertRow(row)
+                preview_rows.append((excel_row, spec_item, name))
 
+            self.preview_table.setRowCount(len(preview_rows))
+            for i, (excel_row, spec_item, name) in enumerate(preview_rows):
                 check = QTableWidgetItem()
                 check.setFlags(Qt.ItemIsUserCheckable | Qt.ItemIsEnabled)
                 check.setCheckState(Qt.Unchecked)
                 check.setData(Qt.UserRole, excel_row)
                 check.setData(Qt.UserRole + 1, spec_item.text if spec_item else name)
                 check.setData(Qt.UserRole + 2, spec_item.brand if spec_item else "")
-                self.preview_table.setItem(row, 0, check)
+                self.preview_table.setItem(i, 0, check)
 
-                self.preview_table.setItem(row, 1, QTableWidgetItem(str(excel_row - 1)))
+                self.preview_table.setItem(i, 1, QTableWidgetItem(str(excel_row - 1)))
 
-                self.preview_table.setItem(row, 2, QTableWidgetItem(name[:80]))
+                self.preview_table.setItem(i, 2, QTableWidgetItem(name[:80]))
 
                 brand = self._concat_display(ws, excel_row, brand_cols)
-                self.preview_table.setItem(row, 3, QTableWidgetItem(brand))
+                self.preview_table.setItem(i, 3, QTableWidgetItem(brand))
 
                 spec = self._concat_display(ws, excel_row, spec_cols)
-                self.preview_table.setItem(row, 4, QTableWidgetItem(spec[:80]))
+                self.preview_table.setItem(i, 4, QTableWidgetItem(spec[:80]))
 
                 article_parts = []
                 for idx in article_cols:
                     val = str(ws.cell(excel_row, idx + 1).value or "").strip()
                     if val and val not in ("None", ""):
                         article_parts.append(val)
-                self.preview_table.setItem(row, 5, QTableWidgetItem(", ".join(article_parts)))
+                self.preview_table.setItem(i, 5, QTableWidgetItem(", ".join(article_parts)))
 
                 qty_val = ""
                 if qty_col is not None:
                     v = ws.cell(excel_row, qty_col + 1).value
                     if v is not None:
                         qty_val = str(v)
-                self.preview_table.setItem(row, 6, QTableWidgetItem(qty_val))
+                self.preview_table.setItem(i, 6, QTableWidgetItem(qty_val))
         finally:
             self._skip_reconciling = False
         self._reconcile_skip_checks()

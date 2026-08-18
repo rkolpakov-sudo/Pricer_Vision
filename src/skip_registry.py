@@ -24,6 +24,7 @@ class SkipRegistry:
 
     def __init__(self):
         self._marked: list[dict] = []
+        self._tokens: dict[str, set] = {}
 
     @staticmethod
     def _normalize(text: str) -> str:
@@ -44,21 +45,30 @@ class SkipRegistry:
         key = self._key(text, brand)
         if any(m["key"] == key for m in self._marked):
             return
+        display = self._display(text, brand)
         self._marked.append({"key": key, "text": text, "brand": (brand or "").strip()})
+        self._tokens[key] = _product_tokens(display)
 
     def unmark(self, text: str, brand: str = "") -> None:
         key = self._key(text, brand)
         self._marked = [m for m in self._marked if m["key"] != key]
+        self._tokens.pop(key, None)
 
     def matches(self, text: str, brand: str = "") -> str | None:
         """Описание помеченного товара, аналогом которого является (text, brand)."""
         key = self._key(text, brand)
         if not key:
             return None
+        a_display = self._display(text, brand)
+        a_tokens = _product_tokens(a_display)
         for m in self._marked:
             if m["key"] == key:
                 return self._display(m["text"], m["brand"])
-            if _full_analog(self._display(text, brand), self._display(m["text"], m["brand"])):
+            m_tokens = self._tokens.get(m["key"])
+            if m_tokens and a_tokens and not (a_tokens & m_tokens):
+                # Полный аналог требует общих значимых слов — без пересечения пропускаем
+                continue
+            if _full_analog(a_display, self._display(m["text"], m["brand"])):
                 return self._display(m["text"], m["brand"])
         return None
 
@@ -70,6 +80,7 @@ class SkipRegistry:
 
     def reset(self) -> None:
         self._marked.clear()
+        self._tokens.clear()
 
     def __len__(self) -> int:
         return len(self._marked)

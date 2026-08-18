@@ -70,6 +70,7 @@ class ExcelWriter:
         self._save_counter = 0
         self._header_map: Optional[dict] = None
         self._headers: list[str] = []
+        self._columns_mapping: Optional[dict] = None
 
     # --- Loading ------------------------------------------------------------
 
@@ -89,6 +90,7 @@ class ExcelWriter:
 
         self._header_map = self._find_output_headers()
         mapping = self.detect_columns(raw_headers)
+        self._columns_mapping = mapping
         logger.info("Spec loaded: %d rows; columns: name=%s article=%s brand=%s spec=%s uom=%s qty=%s weight=%s position=%s",
                     data_rows, mapping.get("name"), mapping.get("article"),
                     mapping.get("brand"), mapping.get("spec"), mapping.get("uom"),
@@ -257,7 +259,10 @@ class ExcelWriter:
         """
         if self._ws is None or self._headers is None:
             return None
-        mapping = self.detect_columns(self._headers)
+        mapping = self._columns_mapping
+        if mapping is None:
+            mapping = self.detect_columns(self._headers)
+            self._columns_mapping = mapping
         name, uom, article = self.build_item_name(excel_row, mapping)
         if not name or name.strip() in ("", "None", "none"):
             return None
