@@ -112,6 +112,7 @@ class _FakeResult:
 
 class _FakeServer:
     def __init__(self):
+        self.name = "playwright"
         self.session = AsyncMock()
         self.session.call_tool = AsyncMock(return_value=_FakeResult("ok"))
 
@@ -142,3 +143,63 @@ async def test_evaluate_js_is_sanitized():
     fn = call.args[1]["function"]
     assert fn.count("{") == fn.count("}")
     assert fn.endswith("}")
+
+
+class TestMCPCallTimeout:
+    @staticmethod
+    def _hanging_server():
+        async def _hang(*a, **k):
+            await asyncio.sleep(100)
+            return _FakeResult("ok")
+
+        srv = _FakeServer()
+        srv.session.call_tool = AsyncMock(side_effect=_hang)
+        return srv
+
+    @pytest.mark.asyncio
+    async def test_call_tool_times_out_and_returns_error(self):
+        mcp_circuit.reset()
+        bridge = MCPBridge(call_timeout=0.05, restart_after_timeouts=5)
+        bridge._tool_map["browser_snapshot"] = self._hanging_server()
+        result = await bridge.call_tool("browser_snapshot", {})
+        assert result.startswith("error: tool call timed out")
+
+    @pytest.mark.asyncio
+    async def test_repeated_timeouts_trigger_restart(self):
+        mcp_circuit.reset()
+        bridge = MCPBridge(call_timeout=0.05, restart_after_timeouts=2)
+        bridge._tool_map["browser_snapshot"] = self._hanging_server()
+        restarted = AsyncMock()
+        bridge._restart_safe = restarted
+        await bridge.call_tool("browser_snapshot", {})
+        await bridge.call_tool("browser_snapshot", {})
+        restarted.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_success_resets_timeout_counter(self):
+        mcp_circuit.reset()
+        bridge = MCPBridge(call_timeout=0.05, restart_after_timeouts=2)
+        hanging = self._hanging_server()
+        bridge._tool_map["browser_snapshot"] = hanging
+        restarted = AsyncMock()
+        bridge._restart_safe = restarted
+        await bridge.call_tool("browser_snapshot", {})  # timeout #1
+        assert bridge._consecutive_timeouts == 1
+        bridge._tool_map["browser_snapshot"] = _FakeServer()
+        assert await bridge.call_tool("browser_snapshot", {}) == "ok"
+        assert bridge._consecutive_timeouts == 0
+        bridge._tool_map["browser_snapshot"] = hanging
+        await bridge.call_tool("browser_snapshot", {})  # timeout #1 again
+        assert bridge._consecutive_timeouts == 1
+        restarted.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_plain_failure_not_counted_as_timeout(self):
+        mcp_circuit.reset()
+        bridge = MCPBridge(call_timeout=0.05, restart_after_timeouts=2)
+        srv = _FakeServer()
+        srv.session.call_tool = AsyncMock(side_effect=RuntimeError("boom"))
+        bridge._tool_map["browser_snapshot"] = srv
+        result = await bridge.call_tool("browser_snapshot", {})
+        assert "error" in result
+        assert bridge._consecutive_timeouts == 0

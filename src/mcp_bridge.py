@@ -7,6 +7,7 @@ from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
 
 from src.resilience import mcp_circuit, CircuitState
+from src.config_loader import get_mcp_config
 
 logger = logging.getLogger("pricer.bridge")
 
@@ -104,12 +105,19 @@ class _ServerConnection:
 
 
 class MCPBridge:
-    def __init__(self, headless: bool = False):
+    def __init__(self, headless: bool = False, call_timeout: float | None = None,
+                 restart_after_timeouts: int | None = None):
         self._servers: list[_ServerConnection] = []
         self._tool_map: dict[str, _ServerConnection] = {}
         self._lock = asyncio.Lock()
         self._stopped = False
         self._headless = headless
+        self._call_timeout = call_timeout if call_timeout is not None else get_mcp_config("call_timeout", 60.0)
+        self._restart_after_timeouts = (
+            restart_after_timeouts if restart_after_timeouts is not None
+            else get_mcp_config("restart_after_timeouts", 2)
+        )
+        self._consecutive_timeouts = 0
 
     async def start(self) -> bool:
         self._stopped = False
@@ -213,7 +221,11 @@ class MCPBridge:
                     arguments["code"] = sanitized
         async with self._lock:
             try:
-                result = await srv.session.call_tool(tool_name, arguments)
+                result = await asyncio.wait_for(
+                    srv.session.call_tool(tool_name, arguments),
+                    timeout=self._call_timeout,
+                )
+                self._consecutive_timeouts = 0
                 parts = []
                 for content in result.content:
                     if hasattr(content, "text"):
@@ -224,6 +236,16 @@ class MCPBridge:
                         parts.append(f"[resource: {getattr(content, 'uri', '?')}]")
                 mcp_circuit.record_success()
                 return "\n".join(parts)
+            except asyncio.TimeoutError:
+                mcp_circuit.record_failure()
+                self._consecutive_timeouts += 1
+                logger.warning("MCP tool '%s' on '%s' timed out after %.0fs (consecutive: %d)",
+                               tool_name, srv.name, self._call_timeout, self._consecutive_timeouts)
+                if self._consecutive_timeouts >= self._restart_after_timeouts:
+                    self._consecutive_timeouts = 0
+                    logger.warning("MCP stuck (repeated timeouts) — restarting bridge")
+                    await self._restart_safe()
+                return f"error: tool call timed out after {self._call_timeout:.0f}s"
             except Exception as e:
                 mcp_circuit.record_failure()
                 logger.warning("MCP tool '%s' on '%s' failed: %s", tool_name, srv.name, e)
@@ -269,6 +291,13 @@ class MCPBridge:
         await self.stop()
         await asyncio.sleep(1.0)
         return await self.start()
+
+    async def _restart_safe(self) -> None:
+        """Рестарт с защитным таймаутом: очистка зависшей сессии не должна блокировать."""
+        try:
+            await asyncio.wait_for(self.restart(), timeout=20.0)
+        except Exception:
+            logger.warning("MCP bridge restart timed out — continuing")
 
     async def set_headless(self, headless: bool) -> bool:
         self._headless = headless

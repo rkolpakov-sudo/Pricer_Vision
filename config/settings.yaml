@@ -24,6 +24,9 @@ llm:
     rate_limit_seconds: 0.05
   temperature: 0.3
   timeout: 150
+mcp:
+  call_timeout: 60
+  restart_after_timeouts: 2
 paths:
   backup: data/backup
   data_input: data/input

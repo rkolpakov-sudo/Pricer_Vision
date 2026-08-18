@@ -239,6 +239,11 @@ class MCPAgentRunner(QThread):
                         result = {"spec_text": spec_text, "price": None, "confidence": 0.0,
                                   "reason": "Timeout after 300s", "requires_review": True, "error": "timeout",
                                   "elapsed": 300.0}
+                        if not self._stop_event.is_set():
+                            try:
+                                await asyncio.wait_for(bridge.restart(), timeout=20.0)
+                            except Exception:
+                                logger.warning("Bridge restart after row timeout failed")
                     except asyncio.CancelledError:
                         logger.warning(f"Row {i+1} cancelled by user")
                         result = {"spec_text": spec_text, "price": None, "confidence": 0.0,

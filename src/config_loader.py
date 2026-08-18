@@ -37,6 +37,10 @@ def get_antidetect_config(key: str, default):
     cfg = load_settings()
     return cfg.get("antidetect", {}).get(key, default)
 
+def get_mcp_config(key: str, default):
+    cfg = load_settings()
+    return cfg.get("mcp", {}).get(key, default)
+
 def get_learning_config(key: str, default):
     cfg = load_settings()
     return cfg.get("learning", {}).get(key, default)
