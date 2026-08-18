@@ -1,4 +1,5 @@
 import asyncio
+from types import SimpleNamespace
 from unittest.mock import patch, AsyncMock
 import pytest
 from src.mcp_bridge import MCPBridge, _sanitize_js, _is_url
@@ -203,3 +204,59 @@ class TestMCPCallTimeout:
         result = await bridge.call_tool("browser_snapshot", {})
         assert "error" in result
         assert bridge._consecutive_timeouts == 0
+
+
+class _FakeMCPTool:
+    def __init__(self, name):
+        self.name = name
+        self.description = ""
+        self.inputSchema = {"type": "object", "properties": {}}
+
+
+class _FakeMCPSession:
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *a):
+        return False
+
+    async def initialize(self):
+        pass
+
+    async def list_tools(self):
+        return SimpleNamespace(tools=[_FakeMCPTool("browser_navigate")])
+
+
+@pytest.mark.asyncio
+async def test_start_passes_headless_flag(monkeypatch):
+    captured = {}
+
+    class _FakeStdioCtx:
+        def __init__(self, args):
+            self._args = args
+
+        async def __aenter__(self):
+            captured["args"] = list(self._args)
+            return object(), object()
+
+        async def __aexit__(self, *a):
+            return False
+
+    def fake_stdio(params):
+        return _FakeStdioCtx(params.args)
+
+    def fake_client(read, write):
+        return _FakeMCPSession()
+
+    import src.mcp_bridge as mb
+    monkeypatch.setattr(mb, "stdio_client", fake_stdio)
+    monkeypatch.setattr(mb, "ClientSession", fake_client)
+
+    bridge = MCPBridge(headless=True)
+    assert await bridge.start() is True
+    assert "--headless" in captured["args"]
+
+    captured.clear()
+    bridge2 = MCPBridge(headless=False)
+    assert await bridge2.start() is True
+    assert "--headless" not in captured["args"]

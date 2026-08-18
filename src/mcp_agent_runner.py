@@ -144,6 +144,15 @@ class MCPAgentRunner(QThread):
             # Сессионный отрицательный кэш «не найденных» товаров (только в памяти)
             negative_cache = NegativeCache()
             for i, spec in enumerate(ordered):
+                if self._restart_bridge.is_set():
+                    new_headless = self._restart_bridge_value
+                    self._restart_bridge.clear()
+                    self._restart_bridge_value = None
+                    logger.info("Restarting bridge with headless=%s due to toggle", new_headless)
+                    try:
+                        await asyncio.wait_for(bridge.set_headless(new_headless), timeout=20.0)
+                    except Exception:
+                        logger.warning("Bridge restart for headless toggle failed")
                 if self._stop_event.is_set():
                     self.status_signal.emit("stop")
                     self.monitor_signal.emit({"type": "stop"})
@@ -272,13 +281,6 @@ class MCPAgentRunner(QThread):
                 self.metrics_signal.emit(self._current_metrics())
                 self.monitor_signal.emit({"type": "row_done", "idx": i + 1, "total": total})
                 self.row_done_signal.emit(row_idx, result)
-
-            if self._restart_bridge.is_set():
-                new_headless = self._restart_bridge_value
-                self._restart_bridge.clear()
-                self._restart_bridge_value = None
-                logger.info("Restarting bridge with headless=%s due to toggle", new_headless)
-                await bridge.set_headless(new_headless)
 
             # Phase 4: Learning Loop — обновляем граф по итогам прогона
             try:

@@ -1949,3 +1949,25 @@ SemCache — всего 18.
   слово, «Не ошибся ли ты», `confirm=true`); graph-tool возвращает пассивный статус; семейная страница
   по-прежнему отклоняется.
 - **639 passed**.
+
+## 2026-08-18 — Чекбокс Headless не применялся во время прогона
+
+### Причина
+- `MCPBridge.start()` корректно добавляет `--headless` при `_headless=True`; конфиг `browser.headless`
+  сохраняется/читается верно; playwright-core 1.63 поддерживает headless+`--browser chrome`.
+- Баг: в `mcp_agent_runner.py` проверка `self._restart_bridge` (установленная `trigger_bridge_restart`
+  при переключении чекбокса) стояла ПОСЛЕ цикла строк — переключение во время прогона не действовало,
+  а затем bridge сразу останавливался в `finally`. Чекбокс выглядел мёртвым.
+
+### Фикс
+- `src/mcp_agent_runner.py`: проверка `_restart_bridge` перенесена в начало каждой итерации цикла строк
+  (после stop-проверки) — переключение headless перезапускает bridge со СЛЕДУЮЩЕЙ строки
+  (`bridge.set_headless` с защитным таймаутом 20с). Мёртвый блок после цикла удалён.
+- `src/mcp_bridge.py`: лог запуска `MCP launch: ... (mode=headless|headed)` — видно в логе, какой режим
+  реально поднялся.
+- Study-чекбокс (graph_assistant) сохраняет конфиг; study_runner читает его при каждом старте — ок.
+
+### Тесты
+- `tests/test_mcp_bridge.py`: +1 (test_start_passes_headless_flag — мокает stdio/ClientSession, проверяет,
+  что `--headless` попадает в аргументы при headless=True и отсутствует при False).
+- **640 passed**.

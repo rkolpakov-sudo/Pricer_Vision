@@ -136,6 +136,8 @@ class MCPBridge:
         pw_args.extend(["--timeout-action", "10000"])
         pw_args.extend(["--timeout-navigation", "30000"])
         pw = _ServerConnection("playwright", "npx.cmd", pw_args)
+        logger.info("MCP launch: %s %s (mode=%s)", pw_pkg, "--browser chrome",
+                    "headless" if self._headless else "headed")
 
         for srv in (pw,):
             for attempt in range(2):
