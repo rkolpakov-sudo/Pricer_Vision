@@ -27,6 +27,12 @@ class TestConstants:
     def test_system_prompt_not_empty(self):
         assert len(SYSTEM_PROMPT) > 50
 
+    def test_system_prompt_pre_click_verification_rule(self):
+        assert "ПЕРЕД кликом на карточку товара" in SYSTEM_PROMPT
+        assert "фланцевый" in SYSTEM_PROMPT
+        assert "Совпадение по бренду и Ду НЕ достаточно" in SYSTEM_PROMPT
+        assert "НЕМЕДЛЕННО вернись к результатам поиска" in SYSTEM_PROMPT
+
     def test_tool_defs_have_descriptions(self):
         for td in GRAPH_TOOL_DEFS:
             assert len(td["function"]["description"]) > 5
