@@ -112,3 +112,30 @@ class TestProductNameMatches:
         """Общие «завод-изготовитель» не делают теплосчетчик похожим на кран."""
         assert product_name_matches("Теплосчетчик, завод-изготовитель Пульсар",
                                     "Кран шаровой Ду15, завод-изготовитель Ридан") is False
+
+    def test_static_vs_automatic_balancing_valve(self):
+        """Фатальный случай из лога: спецификация «статический», в кэше «авт.»
+        (автоматический APT-R). Различающее слово «статический» обязано отклонить."""
+        assert product_name_matches("клапан баланс. статический Ду15",
+                                    "Клапан балансировочный авт. Ду15") is False
+
+    def test_static_balancing_valve_matches_static(self):
+        assert product_name_matches("клапан баланс. статический Ду15",
+                                    "Клапан балансировочный статический Ду15") is True
+
+    def test_abbrev_aut_matches_automatic_both_ways(self):
+        """«авт.» и «автоматический» — один и тот же товар (префикс 3 символа)."""
+        assert product_name_matches("Клапан балансировочный авт. Ду15",
+                                    "Клапан балансировочный автоматический Ду15") is True
+        assert product_name_matches("Клапан балансировочный автоматический Ду15",
+                                    "Клапан балансировочный авт. Ду15") is True
+
+    def test_parametric_token_optional(self):
+        """Ру/Kvs в спецификации не обязаны быть в названии карточки."""
+        assert product_name_matches("Клапан балансировочный авт. Ду15, Ру16, Kvs=1,9",
+                                    "Клапан балансировочный автомат Ду15 Ридан") is True
+
+    def test_ball_valve_short_spec_full_coverage(self):
+        """Все значимые слова спецификации должны присутствовать в найденном."""
+        assert product_name_matches("Кран шаровой Ду15",
+                                    "Кран Ду15") is False

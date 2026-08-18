@@ -429,6 +429,25 @@ class GraphEngine:
     def save_confirmed_price(self, data: dict) -> int:
         self.build()
         with self._lock:
+            price_id = data.get("id")
+            if price_id:
+                self._conn.execute(
+                    """UPDATE confirmed_prices
+                    SET spec_text=?, product_type_id=?, site_id=?, price=?,
+                        currency=?, url=?, confidence=?, source=?, reason=?
+                    WHERE id=?""",
+                    (
+                        data["spec_text"], data.get("product_type_id"),
+                        data.get("site_id"), data["price"],
+                        data.get("currency", "RUB"), data.get("url", ""),
+                        data.get("confidence", 0.95), data.get("source", "agent"),
+                        data.get("reason", ""), price_id,
+                    )
+                )
+                self._conn.commit()
+                self._built = False
+                return int(price_id)
+
             cur = self._conn.execute(
                 """INSERT INTO confirmed_prices
                 (spec_text, product_type_id, site_id, price, currency, url, confidence, source, reason)
@@ -454,6 +473,7 @@ class GraphEngine:
             for token in tokens:
                 if len(token) > 2:
                     self._prices_by_token.setdefault(token, []).append(entry)
+            self._built = False
         return pid
 
     # ── Hint operations ──

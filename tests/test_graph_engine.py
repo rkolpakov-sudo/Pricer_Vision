@@ -98,6 +98,39 @@ class TestGraphEngine:
         })
         assert graph_engine.get_confirmed_prices("Кран шаровой Ду15, завод-изготовитель Пульсар") == []
 
+    def test_get_confirmed_prices_rejects_other_subtype(self, graph_engine):
+        """Клапан статический ≠ Клапан авт. (автомат): различающее слово подтипа
+        «статический» должно исключать переиспользование цены автоматического клапана."""
+        graph_engine.save_confirmed_price({
+            "spec_text": "Клапан балансировочный авт. Ду15",
+            "product_type_id": "valves",
+            "site_id": "santech.ru",
+            "price": 15676.8,
+            "url": "https://www.santech.ru/catalog/337/340/i1322/",
+        })
+        assert graph_engine.get_confirmed_prices("клапан баланс. статический Ду15") == []
+        assert len(graph_engine.get_confirmed_prices("Клапан балансировочный авт. Ду15")) >= 1
+
+    def test_save_confirmed_price_updates_existing(self, graph_engine):
+        """Повторная запись той же spec+site через MemoryManager ОБНОВЛЯЕТ строку,
+        а не плодит дубликаты (regression: 8 дублей «авт. Ду15» из rule8_reuse)."""
+        from src.memory_manager import MemoryManager
+        mm = MemoryManager(graph_engine)
+        mm.save_price(
+            spec_text="Кран шаровой Ду15", product_type="valves",
+            site="santech.ru", price=100.0, url="https://santech.ru/kran15",
+            confidence=0.95,
+        )
+        mm.save_price(
+            spec_text="Кран шаровой Ду15", product_type="valves",
+            site="santech.ru", price=120.0, url="https://santech.ru/kran15",
+            confidence=0.95, reason="rule8_reuse",
+        )
+        prices = graph_engine.get_confirmed_prices("Кран шаровой Ду15", max_results=20)
+        same = [p for p in prices if p.get("site_id") == "santech.ru"]
+        assert len(same) == 1
+        assert same[0]["price"] == 120.0
+
     def test_save_hint(self, graph_engine):
         hid = graph_engine.save_hint("cables", "tinko.ru", "Искать в разделе Кабель", 0.8)
         assert hid > 0

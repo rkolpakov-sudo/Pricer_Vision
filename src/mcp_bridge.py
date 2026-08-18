@@ -17,6 +17,77 @@ def _is_hash_ref(ref: str) -> bool:
     """Check if ref is an internal accessibility tree hash (e68, f5e17) vs a role locator."""
     return bool(_HASH_REF_RE.match(ref))
 
+
+def _is_url(text: str) -> bool:
+    return isinstance(text, str) and text.lower().startswith(("http://", "https://"))
+
+
+def _comment_start_outside_strings(line: str) -> int:
+    """Index of the first `//` that is NOT inside a string literal, else -1."""
+    i, n = 0, len(line)
+    while i < n:
+        ch = line[i]
+        if ch in "'\"`":
+            quote = ch
+            i += 1
+            while i < n:
+                if line[i] == "\\":
+                    i += 2
+                    continue
+                if line[i] == quote:
+                    break
+                i += 1
+        elif ch == "/" and i + 1 < n and line[i + 1] == "/":
+            return i
+        i += 1
+    return -1
+
+
+def _sanitize_js(js: str) -> str:
+    """Repairs LLM-generated JS that would otherwise throw `SyntaxError: Unexpected end of input`.
+
+    Small LLMs often emit `return x; // comment }` — the closing brace lands on the
+    same line AFTER a `//` comment and gets swallowed, leaving the arrow function open.
+    We strip a trailing single-line comment and append any missing closing braces."""
+    if not js:
+        return js
+    s = js.strip()
+    lines = s.split("\n")
+    ci = _comment_start_outside_strings(lines[-1])
+    if ci != -1:
+        before = lines[-1][:ci].rstrip()
+        if before.endswith(("{", "}", ";", ")")):
+            lines[-1] = before
+            s = "\n".join(lines).rstrip()
+    depth = 0
+    in_str = None
+    in_line_comment = False
+    i, n = 0, len(s)
+    while i < n:
+        ch = s[i]
+        if in_line_comment:
+            if ch == "\n":
+                in_line_comment = False
+        elif in_str:
+            if ch == "\\":
+                i += 2
+                continue
+            if ch == in_str:
+                in_str = None
+        elif ch in "'\"`":
+            in_str = ch
+        elif ch == "/" and i + 1 < n and s[i + 1] == "/":
+            in_line_comment = True
+            i += 1
+        elif ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+        i += 1
+    if depth > 0:
+        s += "}" * depth
+    return s
+
 _STEALTH_JS = str(Path(__file__).resolve().parent.parent / "config" / "stealth.js")
 _MCP_CONFIG = str(Path(__file__).resolve().parent.parent / "config" / "playwright-mcp.json")
 
@@ -121,6 +192,25 @@ class MCPBridge:
                 ref = arguments.get("ref") or arguments.get("element") or ""
                 if ref and not _is_hash_ref(ref):
                     arguments["target"] = ref
+        # LLM discovers links via browser_evaluate and then tries to click them by URL.
+        # Playwright MCP fails on a URL as a CSS selector — rewrite to navigation.
+        if tool_name == "browser_click":
+            url_target = arguments.get("target") or arguments.get("ref") or arguments.get("element") or ""
+            if _is_url(url_target):
+                logger.info("🔗 browser_click target is a URL (%s...) — rewriting to browser_navigate", url_target[:60])
+                tool_name = "browser_navigate"
+                arguments = {"url": url_target}
+        # Small LLMs emit broken JS (trailing `//` swallows closing braces) that
+        # Playwright rejects with "SyntaxError: Unexpected end of input" — repair it.
+        if tool_name in ("browser_evaluate", "browser_run_code_unsafe"):
+            fn = arguments.get("function") or arguments.get("code") or ""
+            sanitized = _sanitize_js(fn)
+            if sanitized != fn:
+                logger.info("🔧 browser_evaluate JS repaired (%d → %d chars)", len(fn), len(sanitized))
+                if tool_name == "browser_evaluate":
+                    arguments["function"] = sanitized
+                else:
+                    arguments["code"] = sanitized
         async with self._lock:
             try:
                 result = await srv.session.call_tool(tool_name, arguments)

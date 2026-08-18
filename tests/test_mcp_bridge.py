@@ -1,7 +1,48 @@
 import asyncio
 from unittest.mock import patch, AsyncMock
 import pytest
-from src.mcp_bridge import MCPBridge
+from src.mcp_bridge import MCPBridge, _sanitize_js, _is_url
+from src.resilience import mcp_circuit
+
+
+class TestSanitizeJs:
+    def test_trailing_comment_swallowing_brace(self):
+        js = "() => { const p = document.querySelector('.x'); return p.textContent.trim(); // done }"
+        out = _sanitize_js(js)
+        assert out.count("{") == out.count("}")
+        assert "// done" not in out
+        assert out.endswith("}")
+
+    def test_unclosed_arrow_function_gets_closed(self):
+        js = "() => { const priceBlock = document.querySelector('[class*=\"price\"], .product-price-block'); if (priceBlock) return priceBlock.textContent.trim();"
+        out = _sanitize_js(js)
+        assert out.count("{") == out.count("}")
+        assert out.endswith("}")
+
+    def test_url_inside_string_not_stripped(self):
+        js = "() => { const u = 'https://www.santech.ru/catalog/'; return u; }"
+        assert _sanitize_js(js) == js
+
+    def test_valid_js_untouched(self):
+        js = "() => { const a = 1; const b = 2; return a + b; }"
+        assert _sanitize_js(js) == js
+
+    def test_multi_line_with_inline_comment(self):
+        js = "() => {\n  // find the price block\n  const p = document.querySelector('.price');\n  if (p) return p.textContent;\n}"
+        assert _sanitize_js(js) == js
+
+    def test_empty(self):
+        assert _sanitize_js("") == ""
+        assert _sanitize_js(None) is None
+
+
+class TestIsUrl:
+    def test_urls(self):
+        assert _is_url("https://www.santech.ru/catalog/293/306/i46584/v155997/")
+        assert _is_url("http://example.com")
+        assert not _is_url("e83")
+        assert not _is_url("textbox 'Поиск'")
+        assert not _is_url("")
 
 
 class TestMCPBridge:
@@ -57,3 +98,47 @@ async def test_concurrent_call_tool_returns_error():
     )
     assert "error" in r1
     assert "error" in r2
+
+
+class _FakeContent:
+    def __init__(self, text):
+        self.text = text
+
+
+class _FakeResult:
+    def __init__(self, text="ok"):
+        self.content = [_FakeContent(text)]
+
+
+class _FakeServer:
+    def __init__(self):
+        self.session = AsyncMock()
+        self.session.call_tool = AsyncMock(return_value=_FakeResult("ok"))
+
+
+@pytest.mark.asyncio
+async def test_click_url_rewrites_to_navigate():
+    mcp_circuit.reset()
+    bridge = MCPBridge()
+    srv = _FakeServer()
+    bridge._tool_map["browser_click"] = srv
+    bridge._tool_map["browser_navigate"] = srv
+    url = "https://www.santech.ru/catalog/293/306/i46584/v155997/"
+    await bridge.call_tool("browser_click", {"target": url})
+    call = srv.session.call_tool.await_args
+    assert call.args[0] == "browser_navigate"
+    assert call.args[1] == {"url": url}
+
+
+@pytest.mark.asyncio
+async def test_evaluate_js_is_sanitized():
+    mcp_circuit.reset()
+    bridge = MCPBridge()
+    srv = _FakeServer()
+    bridge._tool_map["browser_evaluate"] = srv
+    broken = "() => { const p = document.querySelector('.x'); return p.textContent.trim(); // }"
+    await bridge.call_tool("browser_evaluate", {"function": broken})
+    call = srv.session.call_tool.await_args
+    fn = call.args[1]["function"]
+    assert fn.count("{") == fn.count("}")
+    assert fn.endswith("}")

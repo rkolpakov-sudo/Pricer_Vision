@@ -1,4 +1,5 @@
 import asyncio
+import hashlib
 import json
 import logging
 import re
@@ -27,6 +28,7 @@ logger = logging.getLogger("pricer.agent")
 
 MAX_ROUNDS = get_run_config("max_rounds", 60)
 MAX_ROUNDS_PER_SITE = get_run_config("max_rounds_per_site", 15)
+DIAGNOSTIC_PROMPT_CAP = get_run_config("diagnostic_prompt_cap", 2)
 SUMMARIZE_MAX_CHARS = get_run_config("summarize_max_chars", 8000)
 SUMMARIZE_MAX_LINES = get_run_config("summarize_max_lines", 200)
 CAPTCHA_KEYWORDS = get_run_config("captcha_keywords", ["ddos-guard", "hcheck", "js-check"])
@@ -185,6 +187,8 @@ SYSTEM_PROMPT = """Ты — опытный пользователь с дост�
 15. Если сайт использует SPA (результаты поиска не появляются после Enter) — попробуй browser_navigate напрямую на URL поиска: site.ru/search?q=ТОВАР. Не нажимай Enter на SPA-сайтах — используй прямые URL.
 16. Если в структуре файла указан завод-изготовитель, тип/обозначение или артикул/код — используй их для правильного выбора товара. Бренд/тип не обязательно вставлять в поисковый запрос: сначала найди товар по наименованию, затем среди результатов отдай предпочтение позиции того же производителя/модели/артикула. Если товар выпускается несколькими заводами — это критично для выбора правильного аналога. Если «производитель» — это страна (например «Россия») или ссылка на стандарт (ГОСТ/ТУ/СНиП) — НЕ используй их как бренд и не вставляй в поиск.
 17. При вызове save_confirmed_price ВСЕГДА передавай product_name — точное наименование товара, которое ты видишь на странице (заголовок карточки). Система проверит, что товар соответствует позиции спецификации. Сохраняй цену только если это действительно нужный товар (или аналог того же типа). Кран шаровой и клапан балансировочный — это РАЗНЫЕ товары, воздуховод и воздухоотводчик — РАЗНЫЕ товары.
+18. Извлечение цены из карточки: цена на сайте может отображаться с любым символом — «₽», «P», «р.», «руб» или без него. НЕ ищи только символ «₽» — это самая частая ошибка. Ищи по классам: querySelectorAll('[class*="price"], [class*="price"] span, .product-price, [data-price]') и бери textContent каждого элемента. Первый элемент с классом-содержащим "price" может оказаться НЕ ценой (например, иконка «Корзина» или «В корзину») — собери ВСЕ кандидаты в массив и выбери тот, где текст похож на число с символом валюты.
+19. JS в browser_evaluate: пиши КОРОТКИЙ код, который закрывается фигурной скобкой. НИКОГДА не ставь `//`-комментарий в конце строки перед закрывающей скобкой — скобка после `//` игнорируется и JS падает с SyntaxError. Если нужен комментарий — пиши его ОТДЕЛЬНОЙ строкой перед кодом.
 
 Ограничение — 60 шагов на один товар. У тебя полная свобода действий. Кратко поясняй свои намерения перед каждым действием."""
 
@@ -464,6 +468,10 @@ async def process_row(
     stuck_detector = StuckDetector()
     yandex_reminded = False
     yandex_price_saved = False
+    price_confirmed = False
+    price_candidate_seen = False
+    recent_errors: list[str] = []
+    diagnostic_prompts = 0
     rate_limiter = DomainRateLimiter(
         min_interval=get_antidetect_config("rate_limit_min_interval", 1.5),
         max_requests_per_minute=get_antidetect_config("rate_limit_max_requests_per_minute", 20),
@@ -505,6 +513,12 @@ async def process_row(
 
         if final_attempt.get("price") is not None:
             result = validate_result(final_attempt, spec_text)
+            if not price_confirmed:
+                # Цена не проходила через save_confirmed_price с product_name —
+                # проверку соответствия товара выполнить нельзя. Не допускаем её
+                # до доверенного кэша: требует ревью, confidence не выше 0.7.
+                result["confidence"] = min(result.get("confidence", 0), 0.7)
+                result["requires_review"] = True
             if result.get("confidence", 0) >= CONF_GOOD and result.get("price") is not None:
                 _save_price_and_approach(memory_manager, spec_text, product_type, result, steps, record_soldat=True)
             elapsed = (datetime.now() - start_time).total_seconds()
@@ -537,6 +551,9 @@ async def process_row(
                 if "yandex" in current_site and not yandex_price_saved and new_site and "yandex" not in new_site.lower():
                     logger.info("ℹ️ Leaving Yandex for %s (yandex_price_saved=%s)", new_site, yandex_price_saved)
                 if new_site and new_site != current_site:
+                    if _extract_domain(new_site) != _extract_domain(current_site):
+                        price_candidate_seen = False
+                        recent_errors = []
                     current_site = new_site
                     rounds_on_site = 0
                 if rate_limiter is not None:
@@ -573,14 +590,22 @@ async def process_row(
                     steps.append(step)
 
             # StuckDetector: после каждого MCP-шага (не дублирует captcha-логику)
-            target = tool_args.get("target") or tool_args.get("url") or ""
             stuck_detector.record_action(
                 action_type=tool_name,
-                target=str(target),
+                target=_stuck_target(tool_name, tool_args),
                 result="success" if not str(result).startswith("error:") else "no_change",
             )
 
             tool_content = str(result)
+            # Фиксируем причины сбоев для диагностики восстановления
+            if tool_content.startswith("error:"):
+                recent_errors.append(tool_content[:120])
+                if len(recent_errors) > 4:
+                    recent_errors.pop(0)
+            if tool_name == "browser_evaluate" and "SyntaxError" in tool_content:
+                tool_content += ("\n💡 JS-ошибка синтаксиса (SyntaxError). Перепиши код ПРОСТЫМ "
+                                 "однострочным выражением: без // комментариев в конце строки, "
+                                 "закрой все фигурные скобки, строки в кавычках.")
             if tool_name in ("browser_snapshot", "snapshot"):
                 tool_content = _clean_snapshot(tool_content)
                 # Sync current_site from snapshot URL (handles new tabs from browser_click)
@@ -588,6 +613,9 @@ async def process_row(
                     if "Page URL:" in line:
                         url = line.split("Page URL:")[-1].strip().split()[0] if line.split("Page URL:")[-1].strip() else ""
                         if url and url != current_site:
+                            if _extract_domain(url) != _extract_domain(current_site):
+                                price_candidate_seen = False
+                                recent_errors = []
                             current_site = url
                             rounds_on_site = 0
                         break
@@ -635,24 +663,44 @@ async def process_row(
                 logger.info("%s → %s", summary, result_text)
             if status_callback:
                 status_callback(f"[{rounds}/{MAX_ROUNDS}] {summary} — {result_text}")
+            # Подсветка найденной цены — агент не должен её потерять в большом ответе
+            price_hint = None
+            if tool_name not in GRAPH_TOOL_NAMES:
+                price_hint = _extract_price_candidate(tool_content)
+                if price_hint:
+                    price_candidate_seen = True
+            content_to_send = tool_content[:10000]
+            if price_hint:
+                content_to_send = f"💰 price_candidate: {price_hint}\n" + content_to_send
             messages.append({
                 "role": "tool",
                 "tool_call_id": tc.get("id", ""),
-                "content": tool_content[:10000],
+                "content": content_to_send,
             })
 
             if tool_name == "save_confirmed_price":
-                # Программная проверка соответствия товара спецификации
-                found_name = tool_args.get("product_name", "")
-                if found_name and not product_name_matches(spec_text, found_name):
+                # Программная проверка соответствия товара спецификации.
+                # product_name обязателен — без названия с карточки цена не сохраняется.
+                found_name = (tool_args.get("product_name") or "").strip()
+                if not found_name:
+                    logger.warning("⚠️ Product name missing: spec=%s", spec_text[:50])
+                    messages.append({
+                        "role": "tool",
+                        "tool_call_id": tc.get("id", ""),
+                        "content": ("error: передай product_name — точное наименование товара "
+                                    "с карточки (заголовок). НЕ сохраняю цену без него."),
+                    })
+                    continue
+                if not product_name_matches(spec_text, found_name):
                     logger.warning("⚠️ Product mismatch rejected: spec=%s vs found=%s",
                                    spec_text[:50], str(found_name)[:50])
                     messages.append({
                         "role": "tool",
                         "tool_call_id": tc.get("id", ""),
                         "content": ("error: найденный товар не соответствует спецификации "
-                                    "(например кран вместо клапана). НЕ сохраняй эту цену — "
-                                    "продолжи поиск правильного товара."),
+                                    "(например кран вместо клапана, статический клапан вместо "
+                                    "автоматического). НЕ сохраняй эту цену — продолжи поиск "
+                                    "правильного товара."),
                     })
                     continue
                 validated = validate_result({
@@ -665,6 +713,7 @@ async def process_row(
                 }, spec_text)
                 if validated.get("price") is not None:
                     yandex_price_saved = True
+                    price_confirmed = True
                     elapsed = (datetime.now() - start_time).total_seconds()
                     logger.info("Row: price=%s validated=%.2f in %.1fs", validated['price'], validated['confidence'], elapsed)
                     try:
@@ -688,12 +737,30 @@ async def process_row(
                 rounds_on_site += 1
                 break
 
-        # StuckDetector: принудительный уход с сайта при зацикливании
+        # StuckDetector: при зацикливании — сначала диагностика, уход только после капа
         stuck_level = stuck_detector.detect()
         if stuck_level == StuckLevel.CRITICAL and rounds_on_site > 5:
-            logger.warning("StuckDetector CRITICAL — forcing site switch")
             if monitor_callback:
                 monitor_callback("stuck", None)
+            if diagnostic_prompts < DIAGNOSTIC_PROMPT_CAP:
+                diagnostic_prompts += 1
+                logger.warning("StuckDetector CRITICAL — diagnostic recovery (%d/%d)", diagnostic_prompts, DIAGNOSTIC_PROMPT_CAP)
+                stuck_detector.reset()
+                messages.append({
+                    "role": "user",
+                    "content": _build_diagnostic_message(
+                        spec_text, current_site,
+                        card_open=_is_product_card_url(current_site),
+                        price_candidate_seen=price_candidate_seen,
+                        recent_errors=recent_errors,
+                    ),
+                })
+                _stop_check()
+                response = await _query_llm(llm_client, messages, all_tools, temperature=TEMP_RECOVERY, monitor_callback=monitor_callback)
+                if "error" in response:
+                    return _error_result(spec_text, f"LLM: {response['error']}")
+                continue
+            logger.warning("StuckDetector CRITICAL — diagnostic cap reached, forcing site switch")
             current_site = ""
             rounds_on_site = site_round_limits.get(_extract_domain(current_site), MAX_ROUNDS_PER_SITE) + 1
             stuck_detector.reset()
@@ -710,9 +777,15 @@ async def process_row(
                     _deprecate_site_approaches(memory_manager, product_type, failed_site, "📉 Force switch:")
                 except Exception as e:
                     logger.warning("Force switch deprecation failed: %s", e)
+            force_msg = f"Ты сделал {rounds_on_site} шагов на текущем сайте без результата — лимит исчерпан."
+            if price_candidate_seen and not price_confirmed:
+                force_msg += (" Но в результатах УЖЕ была цена (price_candidate). Немедленно сохрани её "
+                              "через save_confirmed_price с product_name, затем переключись на другой сайт.")
+            else:
+                force_msg += " Принудительно переключись на ДРУГОЙ сайт из списка."
             messages.append({
                 "role": "user",
-                "content": f"Ты сделал {rounds_on_site} шагов на текущем сайте без результата. Принудительно переключись на ДРУГОЙ сайт из списка."
+                "content": force_msg,
             })
             rounds_on_site = 0
             current_site = ""
@@ -935,12 +1008,16 @@ def _execute_graph_tool(name: str, args: dict, engine, mm, spec_text: str = "") 
             return "\n".join(lines)
 
         elif name == "save_confirmed_price":
-            found_name = args.get("product_name", "")
-            if found_name and not product_name_matches(args.get("spec_text", ""), found_name):
+            found_name = (args.get("product_name") or "").strip()
+            if not found_name:
+                return ("error: передай product_name — точное наименование товара с карточки "
+                        "(заголовок). НЕ сохраняю цену без него.")
+            if not product_name_matches(spec_text or args.get("spec_text", ""), found_name):
                 logger.warning("⚠️ Product mismatch rejected: spec=%s vs found=%s",
-                               str(args.get("spec_text", ""))[:50], str(found_name)[:50])
+                               str(spec_text or args.get("spec_text", ""))[:50], str(found_name)[:50])
                 return ("error: найденный товар не соответствует спецификации "
-                        "(например кран вместо клапана). НЕ сохраняй эту цену — продолжи поиск.")
+                        "(например кран вместо клапана, статический клапан вместо "
+                        "автоматического). НЕ сохраняй эту цену — продолжи поиск.")
             pid = mm.save_price(
                 spec_text=args.get("spec_text", ""),
                 product_type=args.get("product_type", ""),
@@ -1065,6 +1142,64 @@ def _extract_domain(url: str) -> str:
         return host.removeprefix("www.") if host else ""
     except Exception:
         return url.replace("https://", "").replace("http://", "").replace("www.", "").split("/")[0]
+
+
+def _is_product_card_url(url: str) -> bool:
+    """True, если URL похож на страницу карточки товара."""
+    if not url:
+        return False
+    return bool(
+        re.search(r"/catalog/.*/i\d+", url, re.IGNORECASE)
+        or re.search(r"/(?:product|item|p|products)/", url, re.IGNORECASE)
+        or re.search(r"[?&]id=\d+", url, re.IGNORECASE)
+    )
+
+
+_PRICE_RE = re.compile(r"\d(?:[\d\s.,]{0,11})\s*(?:руб|р\.|₽|Р|P)(?!\w)", re.IGNORECASE)
+
+
+def _extract_price_candidate(text: str) -> str | None:
+    """Первый похожий на цену фрагмент вида «7 201,30 Р» или None."""
+    if not text:
+        return None
+    m = _PRICE_RE.search(text)
+    return m.group(0)[:30] if m else None
+
+
+def _stuck_target(tool_name: str, tool_args: dict) -> str:
+    """Подпись действия для StuckDetector. Для browser_evaluate включает
+    отпечаток JS: разные скрипты ≠ зацикливание, одинаковые — сигнал цикла."""
+    target = tool_args.get("target") or tool_args.get("url") or ""
+    if tool_name == "browser_evaluate":
+        js = str(tool_args.get("function") or "")
+        target = f"js:{hashlib.md5(js.encode('utf-8', errors='replace')).hexdigest()[:10]}"
+    return str(target)
+
+
+def _build_diagnostic_message(spec_text: str, current_site: str, card_open: bool = False,
+                              price_candidate_seen: bool = False,
+                              recent_errors: list | None = None) -> str:
+    """Сообщение-диагноз при зацикливании: даёт LLM шанс исправить причину,
+    а не уходить вслепую с сайта."""
+    parts = [f"⚠️ Товар: {spec_text}. Ты зациклился — последние действия повторяются. "
+             "ПРОАНАЛИЗИРУЙ причину и исправь её, а не повторяй тот же код:"]
+    if card_open:
+        parts.append(f"- Карточка товара ОТКРЫТА ({current_site}). Если цена ещё не извлечена — "
+                     "извлеки её из ОТКРЫТОЙ карточки корректным селектором: "
+                     "querySelectorAll('[class*=\"price\"], [data-price], .product-price, .price'), "
+                     "выбери элемент с числом и символом валюты (₽/Р/р/руб). "
+                     "Затем сохрани цену через save_confirmed_price с product_name.")
+    else:
+        parts.append("- Карточка товара НЕ открыта. Вернись к поиску товара на текущем сайте "
+                     "или переключись на другой сайт.")
+    if price_candidate_seen:
+        parts.append("- В результатах УЖЕ была цена (price_candidate). Не теряй её: извлеки "
+                     "и сохрани через save_confirmed_price с product_name.")
+    if recent_errors:
+        parts.append(f"- Последние ошибки: {', '.join(recent_errors[-3:])}. "
+                     "Исправь код/селектор, а не повторяй ту же команду.")
+    parts.append("- Только если сайт действительно бесполезен — переключись на другой сайт из списка.")
+    return "\n".join(parts)
 
 
 def _error_result(spec_text: str, error: str, elapsed: float | None = None) -> dict:

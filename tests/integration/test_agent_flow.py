@@ -179,7 +179,8 @@ class TestAgentFlow:
             monitor_callback=lambda t, v: events.append((t, v)),
         )
         assert result.get("price") == 100.0
-        assert result.get("confidence", 0) > 0.8
+        assert result.get("confidence", 0) == 0.7
+        assert result.get("requires_review") is True
         assert result.get("url") == "https://site.ru/p"
         assert result.get("site") == "site.ru"
         assert not result.get("error")
@@ -319,6 +320,71 @@ class TestAgentFlow:
         assert any(t == "stuck" for t, _ in events)
         assert result.get("price") == 120.0
         assert result.get("site") == "other.ru"
+
+    async def test_stuck_diagnostic_recovery_on_card(self):
+        """Зацикливание на ОТКРЫТОЙ карточке товара → диагностическое сообщение
+        (а не слепой приказ уйти с сайта), и LLM может извлечь цену."""
+        card_url = "https://site.ru/catalog/293/306/i46584/v155997/"
+        script = "() => document.querySelector('.price')"
+        responses = [
+            llm_tool_call("browser_navigate", {"url": card_url}),
+            llm_tool_call("browser_evaluate", {"function": script}),  # round 2
+            llm_tool_call("browser_evaluate", {"function": script}),  # round 3
+            llm_tool_call("browser_evaluate", {"function": script}),  # round 4
+            llm_tool_call("browser_evaluate", {"function": script}),  # round 5
+            llm_tool_call("browser_evaluate", {"function": script}),  # round 6 → CRITICAL (rounds_on_site=6 > 5)
+            llm_final(7201.30, url=card_url, site="site.ru"),
+        ]
+        llm, bridge, engine, mm, cache = make_env(responses=responses)
+        events = []
+        result = await process_row(
+            spec_text="Компенсатор сильфонный Ду15",
+            llm_client=llm,
+            mcp_bridge=bridge,
+            graph_engine=engine,
+            memory_manager=mm,
+            fresh=True,
+            semantic_cache=cache,
+            monitor_callback=lambda t, v: events.append((t, v)),
+        )
+        assert any(t == "stuck" for t, _ in events)
+        diagnostic_call = llm.calls[-1]
+        last_content = diagnostic_call[-1].get("content", "")
+        assert "Карточка товара ОТКРЫТА" in last_content
+        assert "ПРОАНАЛИЗИРУЙ" in last_content
+        assert "Принудительно переключись" not in last_content
+        assert result.get("price") == 7201.30
+        assert result.get("site") == "site.ru"
+
+    async def test_stuck_diagnostic_cap_forces_switch(self):
+        """После капа диагностических подсказок (2) при повторном зацикливании —
+        принудительный уход с сайта."""
+        card_url = "https://site.ru/product/42"
+        script = "() => document.querySelector('.price')"
+        responses = []
+        # раунды: navigate + 5 одинаковых evaluate → CRITICAL, диагностика №1
+        responses += [llm_tool_call("browser_navigate", {"url": card_url})]
+        responses += [llm_tool_call("browser_evaluate", {"function": script})] * 5
+        # после диагностики №1 агент снова 6 одинаковых evaluate → CRITICAL, диагностика №2
+        responses += [llm_tool_call("browser_evaluate", {"function": script})] * 6
+        # после диагностики №2 снова 6 одинаковых → CRITICAL, cap исчерпан → принудительный уход
+        responses += [llm_tool_call("browser_evaluate", {"function": script})] * 6
+        responses += [llm_final(50.0, url="https://other.ru/p", site="other.ru")]
+        llm, bridge, engine, mm, cache = make_env(responses=responses)
+        result = await process_row(
+            spec_text="Товар с хроническим зацикливанием",
+            llm_client=llm,
+            mcp_bridge=bridge,
+            graph_engine=engine,
+            memory_manager=mm,
+            fresh=True,
+            semantic_cache=cache,
+        )
+        assert result.get("price") == 50.0
+        assert result.get("site") == "other.ru"
+        # принудительный уход был отражён в сообщении
+        assert any("Принудительно переключись" in m.get("content", "")
+                   for call in llm.calls for m in call if isinstance(m.get("content"), str))
 
     async def test_negative_cache_skips_search(self):
         """Товар из отрицательного кэша пропускается без вызова LLM/браузера."""

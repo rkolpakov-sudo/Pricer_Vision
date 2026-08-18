@@ -5,6 +5,8 @@ from src.agent_loop import (
     _error_result, _result_to_schema,
     _estimate_tokens, _trim_messages_for_budget,
     _apply_approach, _is_standard_reference,
+    _stuck_target, _is_product_card_url,
+    _extract_price_candidate, _build_diagnostic_message,
     CONTEXT_TOKEN_BUDGET,
     TEMP_EXPLORATION, TEMP_NAVIGATION, TEMP_EXTRACTION, TEMP_RECOVERY,
 )
@@ -172,6 +174,98 @@ class TestStandardReference:
 
     def test_empty_not_filtered(self):
         assert _is_standard_reference("") is False
+
+
+class TestStuckTarget:
+    def test_click_keeps_target(self):
+        assert _stuck_target("browser_click", {"target": "e123"}) == "e123"
+
+    def test_navigate_uses_url(self):
+        assert _stuck_target("browser_navigate", {"url": "https://x.ru"}) == "https://x.ru"
+
+    def test_evaluate_without_function(self):
+        assert _stuck_target("browser_evaluate", {}).startswith("js:")
+
+    def test_evaluate_distinguishes_scripts(self):
+        t1 = _stuck_target("browser_evaluate", {"function": "() => { return 1 }"})
+        t2 = _stuck_target("browser_evaluate", {"function": "() => { return 2 }"})
+        assert t1 != t2
+
+    def test_evaluate_identical_scripts_same_signature(self):
+        f = "() => document.title"
+        assert _stuck_target("browser_evaluate", {"function": f}) == _stuck_target("browser_evaluate", {"function": f})
+
+    def test_three_different_evaluates_not_stuck(self):
+        from src.stuck_detector import StuckDetector, StuckLevel
+        d = StuckDetector(repeat_threshold=3)
+        for script in ("() => 1", "() => 2", "() => 3"):
+            d.record_action("browser_evaluate", _stuck_target("browser_evaluate", {"function": script}), "success")
+        assert d.detect() == StuckLevel.OK
+
+    def test_three_identical_evaluates_critical(self):
+        from src.stuck_detector import StuckDetector, StuckLevel
+        d = StuckDetector(repeat_threshold=3)
+        for _ in range(3):
+            d.record_action("browser_evaluate", _stuck_target("browser_evaluate", {"function": "() => 1"}), "success")
+        assert d.detect() == StuckLevel.CRITICAL
+
+
+class TestProductCardUrl:
+    def test_santech_catalog(self):
+        assert _is_product_card_url("https://www.santech.ru/catalog/293/306/i46584/v155997/") is True
+
+    def test_home_page(self):
+        assert _is_product_card_url("https://www.santech.ru/") is False
+
+    def test_search_results(self):
+        assert _is_product_card_url("https://site.ru/search?text=клапан") is False
+
+    def test_query_id(self):
+        assert _is_product_card_url("https://site.ru/item.html?id=123") is True
+
+    def test_empty(self):
+        assert _is_product_card_url("") is False
+
+
+class TestPriceCandidate:
+    def test_cyrillic_ruble(self):
+        assert _extract_price_candidate("Цена: 7 201,30 Р") == "7 201,30 Р"
+
+    def test_latin_p(self):
+        assert _extract_price_candidate("2 570,50 P") == "2 570,50 P"
+
+    def test_rub_word(self):
+        assert _extract_price_candidate("1 200 руб за шт") == "1 200 руб"
+
+    def test_pressure_rating_not_price(self):
+        assert _extract_price_candidate("Клапан Ду15 Ру16") is None
+
+    def test_none(self):
+        assert _extract_price_candidate(None) is None
+
+    def test_no_currency(self):
+        assert _extract_price_candidate("артикул 46584") is None
+
+
+class TestDiagnosticMessage:
+    def test_mentions_card_and_candidate(self):
+        msg = _build_diagnostic_message(
+            "клапан Ду15", "https://x.ru/catalog/1/i2/",
+            card_open=True, price_candidate_seen=True,
+            recent_errors=["error: SyntaxError: Unexpected end of input"],
+        )
+        assert "Карточка товара ОТКРЫТА" in msg
+        assert "price_candidate" in msg
+        assert "SyntaxError" in msg
+        assert "ПРОАНАЛИЗИРУЙ" in msg
+
+    def test_switch_advice_when_no_card(self):
+        msg = _build_diagnostic_message("клапан", "", card_open=False, price_candidate_seen=False)
+        assert "Карточка товара НЕ открыта" in msg
+
+    def test_no_errors_omits_errors_section(self):
+        msg = _build_diagnostic_message("клапан", "", recent_errors=[])
+        assert "Последние ошибки" not in msg
 
 
 class TestExecuteGraphTool:

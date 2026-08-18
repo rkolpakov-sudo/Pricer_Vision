@@ -119,16 +119,41 @@ def _prefix_match(tok: str, found_tokens: set) -> bool:
         if tok == f:
             return True
         n = min(len(tok), len(f))
-        if n >= 4 and (tok.startswith(f) or f.startswith(tok)):
+        if n >= 3 and (tok.startswith(f) or f.startswith(tok)):
             return True
     return False
+
+
+# Параметрические слова: могут отсутствовать в названии карточки на сайте
+# (указаны в характеристиках/описании) — не обязательны при сравнении товаров.
+_PARAM_WORDS = {
+    "ру", "pn", "нр", "np", "kvs", "kv", "бар", "па", "атм",
+    "тмакс", "макс", "мин", "max", "min", "град",
+}
+
+
+def _is_optional_token(w: str) -> bool:
+    """Токен, наличие которого в названии найденного товара не обязательно.
+
+    Параметры («ру16», «kvs», «нр5-35») и значения с цифрами («220в», «1,9»,
+    «b69») указываются в спецификации, но часто отсутствуют в title карточки.
+    """
+    if w in _PARAM_WORDS:
+        return True
+    return bool(re.search(r"\d", w))
 
 
 def product_name_matches(spec_text: str, found_name: str) -> bool:
     """Проверка: найденный товар соответствует позиции спецификации.
 
     Три измерения совпадения:
-    - тип (значимые слова, словоформы «автоматический» ≈ «автомат»),
+    - тип: ВСЕ значимые слова спецификации должны присутствовать в названии
+      найденного товара («статический» обязан быть в названии, если он есть в
+      спецификации; «Клапан балансировочный статический» ≠ «Клапан
+      балансировочный авт.» — это разные подтипы). Исключение — параметрические
+      слова и значения (ру/kvs/220в), которые могут быть только в описании.
+      Словоформы и аббревиатуры сравниваются по префиксу
+      («автоматический» ≈ «авт», «баланс.» ≈ «балансировочный»).
     - размер (если есть в обоих — обязаны совпадать: «Ду15» ≠ «Ду20»),
     - бренд (если есть в обоих — обязан совпадать: «Ридан» ≠ «Пульсар»).
 
@@ -137,14 +162,19 @@ def product_name_matches(spec_text: str, found_name: str) -> bool:
     «Кран шаровой Ду15» vs «Клапан балансировочный Ду15» → False (разные товары).
     «Кран шаровой Ду15» vs «Кран шаровой Ду20 Ридан» → False (разный размер).
     «Кран Ду15 Ридан» vs «Кран Ду15 Пульсар» → False (разный бренд).
+    «Клапан баланс. статический Ду15» vs «Клапан балансировочный авт. Ду15» → False
+    (разные подтипы: статический ≠ автоматический).
     Недостаточно данных (нет названия) → True (не отклоняем).
     """
     spec_tokens = _product_tokens(spec_text)
     found_tokens = _product_tokens(found_name)
     if not spec_tokens or not found_tokens:
         return True
-    matched = sum(1 for s in spec_tokens if _prefix_match(s, found_tokens))
-    if not (matched >= 2 or (matched == 1 and len(spec_tokens) == 1)):
+
+    required = {t for t in spec_tokens if not _is_optional_token(t)}
+    if not required:
+        required = spec_tokens
+    if not all(_prefix_match(s, found_tokens) for s in required):
         return False
 
     spec_sizes = _size_key(spec_text)
