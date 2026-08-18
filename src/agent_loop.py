@@ -29,6 +29,7 @@ logger = logging.getLogger("pricer.agent")
 MAX_ROUNDS = get_run_config("max_rounds", 60)
 MAX_ROUNDS_PER_SITE = get_run_config("max_rounds_per_site", 15)
 DIAGNOSTIC_PROMPT_CAP = get_run_config("diagnostic_prompt_cap", 2)
+EMPTY_PROBE_LIMIT = get_run_config("empty_probe_limit", 3)
 SUMMARIZE_MAX_CHARS = get_run_config("summarize_max_chars", 8000)
 SUMMARIZE_MAX_LINES = get_run_config("summarize_max_lines", 200)
 CAPTCHA_KEYWORDS = get_run_config("captcha_keywords", ["ddos-guard", "hcheck", "js-check"])
@@ -472,6 +473,8 @@ async def process_row(
     price_candidate_seen = False
     recent_errors: list[str] = []
     diagnostic_prompts = 0
+    empty_probe_streak: dict[str, int] = {}
+    empty_probe_guidance_sent: set[str] = set()
     rate_limiter = DomainRateLimiter(
         min_interval=get_antidetect_config("rate_limit_min_interval", 1.5),
         max_requests_per_minute=get_antidetect_config("rate_limit_max_requests_per_minute", 20),
@@ -554,6 +557,7 @@ async def process_row(
                     if _extract_domain(new_site) != _extract_domain(current_site):
                         price_candidate_seen = False
                         recent_errors = []
+                        empty_probe_streak.clear()
                     current_site = new_site
                     rounds_on_site = 0
                 if rate_limiter is not None:
@@ -616,6 +620,7 @@ async def process_row(
                             if _extract_domain(url) != _extract_domain(current_site):
                                 price_candidate_seen = False
                                 recent_errors = []
+                                empty_probe_streak.clear()
                             current_site = url
                             rounds_on_site = 0
                         break
@@ -669,6 +674,7 @@ async def process_row(
                 price_hint = _extract_price_candidate(tool_content)
                 if price_hint:
                     price_candidate_seen = True
+                    empty_probe_streak.clear()
             content_to_send = tool_content[:10000]
             if price_hint:
                 content_to_send = f"💰 price_candidate: {price_hint}\n" + content_to_send
@@ -677,6 +683,25 @@ async def process_row(
                 "tool_call_id": tc.get("id", ""),
                 "content": content_to_send,
             })
+
+            # Ранний выход при серии пустых поисковых зондов на одном сайте:
+            # если товара нет, дальше искать на нём бесполезно
+            if tool_name in ("browser_evaluate", "evaluate", "browser_find", "find") and current_site:
+                probe_domain = _extract_domain(current_site)
+                if _is_empty_search_result(tool_name, tool_content):
+                    empty_probe_streak[probe_domain] = empty_probe_streak.get(probe_domain, 0) + 1
+                    if empty_probe_streak[probe_domain] >= EMPTY_PROBE_LIMIT and probe_domain not in empty_probe_guidance_sent:
+                        empty_probe_guidance_sent.add(probe_domain)
+                        empty_probe_streak[probe_domain] = 0
+                        logger.warning("⚠️ %d empty search probes on %s — early exit guidance",
+                                       EMPTY_PROBE_LIMIT, probe_domain)
+                        messages.append({
+                            "role": "user",
+                            "content": (f"⚠️ Поиск на {probe_domain} уже {EMPTY_PROBE_LIMIT} раз подряд вернул пустой "
+                                        "результат — товар на этом сайте отсутствует. НЕ продолжай искать на нём: "
+                                        "переключись на ДРУГОЙ сайт из списка (или сохрани уже найденную цену, "
+                                        "если она была в результатах)."),
+                        })
 
             if tool_name == "save_confirmed_price":
                 # Программная проверка соответствия товара спецификации.
@@ -689,6 +714,18 @@ async def process_row(
                         "tool_call_id": tc.get("id", ""),
                         "content": ("error: передай product_name — точное наименование товара "
                                     "с карточки (заголовок). НЕ сохраняю цену без него."),
+                    })
+                    continue
+                save_url = tool_args.get("url") or current_site or ""
+                if _is_family_page(save_url) or _is_family_page(current_site):
+                    logger.warning("⚠️ Family page save rejected: spec=%s url=%s", spec_text[:50], save_url)
+                    messages.append({
+                        "role": "tool",
+                        "tool_call_id": tc.get("id", ""),
+                        "content": ("error: URL — семейная страница каталога без конкретного варианта "
+                                    "(.../i<id>/ без /vN/), на ней несколько модификаций с разными ценами. "
+                                    "НЕ сохраняй цену с неё. Перейди на карточку конкретного варианта "
+                                    "(URL вида .../i<id>/v<N>/) и сохрани цену оттуда."),
                     })
                     continue
                 if not product_name_matches(spec_text, found_name):
@@ -714,6 +751,7 @@ async def process_row(
                 if validated.get("price") is not None:
                     yandex_price_saved = True
                     price_confirmed = True
+                    empty_probe_streak.clear()
                     elapsed = (datetime.now() - start_time).total_seconds()
                     logger.info("Row: price=%s validated=%.2f in %.1fs", validated['price'], validated['confidence'], elapsed)
                     try:
@@ -1012,6 +1050,12 @@ def _execute_graph_tool(name: str, args: dict, engine, mm, spec_text: str = "") 
             if not found_name:
                 return ("error: передай product_name — точное наименование товара с карточки "
                         "(заголовок). НЕ сохраняю цену без него.")
+            if _is_family_page(args.get("url", "")):
+                logger.warning("⚠️ Family page save rejected: url=%s", args.get("url", ""))
+                return ("error: URL — семейная страница каталога без конкретного варианта "
+                        "(.../i<id>/ без /vN/), на ней несколько модификаций с разными ценами. "
+                        "НЕ сохраняй цену с неё. Перейди на карточку конкретного варианта "
+                        "(URL вида .../i<id>/v<N>/) и сохрани цену оттуда.")
             if not product_name_matches(spec_text or args.get("spec_text", ""), found_name):
                 logger.warning("⚠️ Product mismatch rejected: spec=%s vs found=%s",
                                str(spec_text or args.get("spec_text", ""))[:50], str(found_name)[:50])
@@ -1095,6 +1139,9 @@ def _deprecate_site_approaches(memory_manager, product_type, domain, reason_pref
 def _store_semantic_cache(semantic_cache, spec_text, result):
     if semantic_cache is None or result.get("price") is None:
         return
+    if _is_family_page(result.get("url", "")):
+        logger.warning("⚠️ Not caching family-page price: url=%s spec=%s", result.get("url", ""), spec_text[:50])
+        return
     try:
         semantic_cache.store(spec_text, result)
     except Exception as e:
@@ -1102,6 +1149,10 @@ def _store_semantic_cache(semantic_cache, spec_text, result):
 
 
 def _save_price_and_approach(memory_manager, spec_text, product_type, price_data, steps, record_soldat=False):
+    if _is_family_page(price_data.get("url", "")):
+        logger.warning("⚠️ Skipping family-page price save: url=%s price=%.2f spec=%s",
+                       price_data.get("url", ""), price_data["price"], spec_text[:50])
+        return
     memory_manager.save_price(
         spec_text=spec_text, product_type=product_type,
         site=price_data.get("site", ""), price=price_data["price"],
@@ -1153,6 +1204,31 @@ def _is_product_card_url(url: str) -> bool:
         or re.search(r"/(?:product|item|p|products)/", url, re.IGNORECASE)
         or re.search(r"[?&]id=\d+", url, re.IGNORECASE)
     )
+
+
+def _is_family_page(url: str) -> bool:
+    """True для страницы-каталога без конкретного варианта (santech
+    /catalog/N/M/i<id>/), где цена неоднозначна — на ней несколько
+    модификаций товара с разными ценами."""
+    if not url:
+        return False
+    u = url.strip().rstrip("/")
+    return bool(re.search(r"/catalog/\d+/\d+/i\d+$", u, re.IGNORECASE))
+
+
+def _is_empty_search_result(tool_name: str, content: str) -> bool:
+    """True, если поисковый зонд (evaluate/find) вернул пустой результат —
+    товар на сайте не найден."""
+    if tool_name not in ("browser_evaluate", "evaluate", "browser_find", "find"):
+        return False
+    if content.startswith("error:"):
+        return False
+    if _extract_price_candidate(content):
+        return False
+    c = (content or "").strip().lower()
+    if "no matches found" in c:
+        return True
+    return c in ("", "[]", "{}", "null", "none", "undefined", "nan", "n/a", "ok", "empty")
 
 
 _PRICE_RE = re.compile(r"\d(?:[\d\s.,]{0,11})\s*(?:руб|р\.|₽|Р|P)(?!\w)", re.IGNORECASE)

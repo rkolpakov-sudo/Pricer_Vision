@@ -110,14 +110,17 @@ class FakeMemoryManager:
 
 
 class FakeBridge:
-    def __init__(self, snapshot_result="ok"):
+    def __init__(self, snapshot_result="ok", evaluate_result="ok"):
         self.tools = [
             {"type": "function", "function": {
                 "name": "browser_navigate", "parameters": {"type": "object", "properties": {}}}},
             {"type": "function", "function": {
                 "name": "browser_snapshot", "parameters": {"type": "object", "properties": {}}}},
+            {"type": "function", "function": {
+                "name": "browser_evaluate", "parameters": {"type": "object", "properties": {}}}},
         ]
         self.snapshot_result = snapshot_result
+        self.evaluate_result = evaluate_result
         self.calls = []
 
     async def list_tools(self):
@@ -127,6 +130,8 @@ class FakeBridge:
         self.calls.append((name, args))
         if name == "browser_snapshot":
             return self.snapshot_result
+        if name == "browser_evaluate":
+            return self.evaluate_result
         return "ok"
 
 
@@ -153,9 +158,9 @@ class FakeSemanticCache:
         pass
 
 
-def make_env(fresh=True, snapshot_result="ok", semantic=None, responses=None):
+def make_env(fresh=True, snapshot_result="ok", semantic=None, responses=None, evaluate_result="ok"):
     llm = FakeLLM(responses or [])
-    bridge = FakeBridge(snapshot_result=snapshot_result)
+    bridge = FakeBridge(snapshot_result=snapshot_result, evaluate_result=evaluate_result)
     engine = FakeEngine()
     mm = FakeMemoryManager()
     cache = semantic if semantic is not None else (FakeSemanticCache() if not fresh else None)
@@ -427,6 +432,89 @@ class TestAgentFlow:
         )
         assert result.get("price") == 100.0
         assert llm.calls  # поиск состоялся
+
+    async def test_empty_probe_guidance_injected(self):
+        """3 пустых поисковых зонда подряд на одном сайте → руководство
+        переключиться на другой сайт (ранний выход из бесплодного поиска)."""
+        empty_probe_script = "() => document.querySelectorAll('.price').length"
+        responses = [
+            llm_tool_call("browser_navigate", {"url": "https://site.ru"}),
+            llm_tool_call("browser_evaluate", {"function": empty_probe_script}),  # 1-й пустой
+            llm_tool_call("browser_evaluate", {"function": empty_probe_script}),  # 2-й пустой
+            llm_tool_call("browser_evaluate", {"function": empty_probe_script}),  # 3-й пустой → guidance
+            llm_final(500.0, url="https://other.ru/p", site="other.ru"),
+        ]
+        llm, bridge, engine, mm, cache = make_env(
+            responses=responses, evaluate_result="[]")
+        result = await process_row(
+            spec_text="Товар, которого нет на сайте",
+            llm_client=llm,
+            mcp_bridge=bridge,
+            graph_engine=engine,
+            memory_manager=mm,
+            fresh=True,
+            semantic_cache=cache,
+        )
+        assert result.get("price") == 500.0
+        guidance_seen = any(
+            "раз подряд вернул пустой" in m.get("content", "")
+            for call in llm.calls for m in call
+            if isinstance(m.get("content"), str)
+        )
+        assert guidance_seen
+
+    async def test_empty_probe_not_fired_on_real_price(self):
+        """Пустой зонд с ценой не считается пустым — guidance не инжектится."""
+        responses = [
+            llm_tool_call("browser_navigate", {"url": "https://site.ru"}),
+            llm_tool_call("browser_evaluate", {"function": "() => 1"}),  # результат с ценой
+            llm_tool_call("browser_evaluate", {"function": "() => 1"}),  # с ценой
+            llm_tool_call("browser_evaluate", {"function": "() => 1"}),  # с ценой
+            llm_final(700.0, url="https://site.ru/p", site="site.ru"),
+        ]
+        llm, bridge, engine, mm, cache = make_env(
+            responses=responses, evaluate_result="7 201,30 Р")
+        result = await process_row(
+            spec_text="Товар с ценой",
+            llm_client=llm,
+            mcp_bridge=bridge,
+            graph_engine=engine,
+            memory_manager=mm,
+            fresh=True,
+            semantic_cache=cache,
+        )
+        assert result.get("price") == 700.0
+        assert not any(
+            "раз подряд вернул пустой" in m.get("content", "")
+            for call in llm.calls for m in call
+            if isinstance(m.get("content"), str)
+        )
+
+    async def test_family_page_save_rejected(self):
+        """Сохранение цены с семейной страницы (/i<id>/ без /vN/) отклоняется
+        и не попадает в БД."""
+        responses = [
+            llm_tool_call("save_confirmed_price", {
+                "product_name": "Клапан балансировочный автомат латунь APT-R Ду15",
+                "price": 15676.8, "confidence": 0.95,
+                "url": "https://www.santech.ru/catalog/337/340/i1322/",
+                "site": "santech.ru",
+            }),
+            llm_final(15676.8, url="https://www.santech.ru/catalog/337/340/i1322/v6/", site="santech.ru"),
+        ]
+        llm, bridge, engine, mm, cache = make_env(responses=responses)
+        result = await process_row(
+            spec_text="Клапан балансировочный авт. Ду15",
+            llm_client=llm,
+            mcp_bridge=bridge,
+            graph_engine=engine,
+            memory_manager=mm,
+            fresh=True,
+            semantic_cache=cache,
+        )
+        assert not any("i1322/" in (p.get("url", "") or "") for p in mm.saved_prices)
+        assert result.get("price") == 15676.8
+        assert result.get("url", "").endswith("v6/")
 
 
 @pytest.mark.asyncio

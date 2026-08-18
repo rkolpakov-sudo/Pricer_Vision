@@ -7,7 +7,8 @@ from src.agent_loop import (
     _apply_approach, _is_standard_reference,
     _stuck_target, _is_product_card_url,
     _extract_price_candidate, _build_diagnostic_message,
-    CONTEXT_TOKEN_BUDGET,
+    _is_family_page, _is_empty_search_result,
+    CONTEXT_TOKEN_BUDGET, EMPTY_PROBE_LIMIT,
     TEMP_EXPLORATION, TEMP_NAVIGATION, TEMP_EXTRACTION, TEMP_RECOVERY,
 )
 
@@ -247,6 +248,59 @@ class TestPriceCandidate:
         assert _extract_price_candidate("артикул 46584") is None
 
 
+class TestFamilyPage:
+    def test_santech_family_without_variant(self):
+        assert _is_family_page("https://www.santech.ru/catalog/337/340/i1322/") is True
+
+    def test_variant_card_not_family(self):
+        assert _is_family_page("https://www.santech.ru/catalog/337/340/i1322/v6/") is False
+
+    def test_variant_long_slug_not_family(self):
+        assert _is_family_page("https://www.santech.ru/catalog/293/306/i46584/v155997/") is False
+
+    def test_ridan_product_not_family(self):
+        assert _is_family_page("https://ridan.ru/product/065N9548GR") is False
+
+    def test_dn_url_not_family(self):
+        assert _is_family_page("https://dn.ru/sharovyi-kran/teplosnabzhenie/flantcevyi-kran/") is False
+
+    def test_empty(self):
+        assert _is_family_page("") is False
+
+    def test_trailing_slash_variants(self):
+        assert _is_family_page("https://www.santech.ru/catalog/259/261/i1112/") is True
+        assert _is_family_page("https://www.santech.ru/catalog/259/261/i1112") is True
+
+
+class TestEmptySearchResult:
+    def test_empty_array(self):
+        assert _is_empty_search_result("browser_evaluate", "[]") is True
+
+    def test_empty_object(self):
+        assert _is_empty_search_result("browser_evaluate", "{}") is True
+
+    def test_null(self):
+        assert _is_empty_search_result("browser_evaluate", "null") is True
+
+    def test_no_matches_find(self):
+        assert _is_empty_search_result("browser_find", 'No matches found for "клапан".') is True
+
+    def test_empty_string(self):
+        assert _is_empty_search_result("browser_evaluate", "") is True
+
+    def test_price_not_empty(self):
+        assert _is_empty_search_result("browser_evaluate", "7 201,30 Р") is False
+
+    def test_snapshot_never_empty_probe(self):
+        assert _is_empty_search_result("browser_snapshot", "[]") is False
+
+    def test_error_not_empty(self):
+        assert _is_empty_search_result("browser_evaluate", "error: timeout") is False
+
+    def test_real_price_block(self):
+        assert _is_empty_search_result("browser_find", 'Found 118 matches for "клапан":') is False
+
+
 class TestDiagnosticMessage:
     def test_mentions_card_and_candidate(self):
         msg = _build_diagnostic_message(
@@ -296,6 +350,31 @@ class TestExecuteGraphTool:
         assert "сохранён" in result.lower()
         sites = mm.get_sites("cables")
         assert any(s["id"] == "new-site.ru" for s in sites)
+
+    def test_save_confirmed_price_family_page_rejected(self, graph_engine):
+        from src.memory_manager import MemoryManager
+        mm = MemoryManager(graph_engine)
+        result = _execute_graph_tool("save_confirmed_price", {
+            "product_name": "Клапан балансировочный автомат латунь APT-R Ду15",
+            "price": 15676.8, "confidence": 0.95,
+            "url": "https://www.santech.ru/catalog/337/340/i1322/",
+            "site": "santech.ru",
+        }, graph_engine, mm, spec_text="Клапан балансировочный авт. Ду15")
+        assert result.startswith("error:")
+        assert "семейная страница" in result
+        prices = mm.get_relevant_prices("Клапан балансировочный авт. Ду15", 10)
+        assert not any("i1322" in (p.get("url") or "") for p in prices)
+
+    def test_save_confirmed_price_variant_card_accepted(self, graph_engine):
+        from src.memory_manager import MemoryManager
+        mm = MemoryManager(graph_engine)
+        result = _execute_graph_tool("save_confirmed_price", {
+            "product_name": "Клапан балансировочный автомат латунь APT-R Ду15",
+            "price": 15676.8, "confidence": 0.95,
+            "url": "https://www.santech.ru/catalog/337/340/i1322/v6/",
+            "site": "santech.ru",
+        }, graph_engine, mm, spec_text="Клапан балансировочный авт. Ду15")
+        assert "Цена сохранена" in result
 
 
 class TestResultToSchema:
