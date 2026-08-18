@@ -882,6 +882,7 @@ async def process_row(
     if fallback_candidates:
         result = _fallback_result(spec_text, product_type, fallback_candidates, elapsed)
         if result:
+            _store_semantic_cache(semantic_cache, spec_text, result)
             logger.info("Row: brand-mismatch fallback price=%s (conf=%.2f) in %.1fs",
                         result.get("price"), result.get("confidence", 0), elapsed)
             return result

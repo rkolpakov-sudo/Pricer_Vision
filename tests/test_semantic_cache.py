@@ -103,3 +103,15 @@ def test_clear(cache):
     cache.store("ВВГнг", {"price": 1, "confidence": 0.9})
     cache.clear()
     assert cache.get_similar("ВВГнг") is None
+
+
+def test_brand_mismatch_entry_stored_but_not_auto_reusable(cache):
+    """Фолбэк «не совпадает бренд» пишется в кэш, но из-за капа confidence (<= 0.5)
+    не проходит порог auto-reuse process_row (confidence > 0.8)."""
+    cache.store("Клапан балансировочный авт. фланцевый Ду100", {
+        "price": 328106.6, "confidence": 0.5, "requires_review": True, "brand_mismatch": True,
+    })
+    hit = cache.get_similar("Клапан балансировочный авт. фланцевый Ду100")
+    assert hit is not None
+    assert hit["brand_mismatch"] is True
+    assert hit["confidence"] <= 0.8

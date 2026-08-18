@@ -1794,3 +1794,70 @@ DiagnosticMessage 3), `tests/integration/test_agent_flow.py` +2 (диагнос�
   выбор лучшего по confidence, пометка/кап confidence/reason, пустые кандидаты, product_type/site).
 - `tests/test_schemas.py`: +2 (default False, флаг True + model_dump).
 - **624 passed** (было 610, +14).
+
+## 2026-08-18 — MCP зависал навсегда: таймаут вызова + авто-рестарт при зависании браузера
+
+### Инцидент
+- Лог `C:\Users\Ruslan\Desktop\Текстовый документ.txt`: строка «Компенсатор сильфонный под приварку Ду40»
+  (ridan.ru) — после шага агента «Проверяю, есть ли на странице позиции с DN40/Ду40» вызов браузера
+  не вернулся, дальше `Row 16 timed out after 300s`, и строки 17–19 виснут так же. Помогло только ручное
+  обновление браузера пользователем.
+
+### Корневая причина
+1. `MCPBridge.call_tool` — `await srv.session.call_tool(...)` БЕЗ таймаута. Если Playwright-сервер застрял
+   на операции страницы (native-диалог alert/beforeunload, никогда не резолвящийся browser_evaluate) —
+   вызов блокируется навсегда, ретрая нет.
+2. 300-сек таймаут строки в runner'е отменяет только клиентский запрос; зависшая операция остаётся в
+   браузере. Сервер Playwright сериализует операции страницы → следующие строки встают в очередь за ней
+   и тоже висят по 300с (каскад). `list_tools`/health_check продолжают работать (не трогают страницу) —
+   поэтому мост выглядел живым.
+
+### Фикс
+- `src/config_loader.py`: `get_mcp_config(key, default)`.
+- `config/settings.yaml`: секция `mcp` — `call_timeout: 60`, `restart_after_timeouts: 2`.
+- `src/mcp_bridge.py`:
+  - `MCPBridge(headless, call_timeout=None, restart_after_timeouts=None)` — параметры из конфига, можно
+    переопределить для тестов.
+  - `call_tool`: `asyncio.wait_for(session.call_tool(...), timeout=call_timeout)`; при TimeoutError →
+    `mcp_circuit.record_failure()`, счётчик `_consecutive_timeouts`, возврат
+    `error: tool call timed out after Ns` (агент делает ретрай/смену сайта по своей recovery-логике).
+  - При `_consecutive_timeouts >= restart_after_timeouts` → `_restart_safe()` (перезапуск моста с защитным
+    таймаутом 20с) — свежий браузер снимает диалоги и зависшие операции. Счётчик сбрасывается при успехе.
+- `src/mcp_agent_runner.py`: при `TimeoutError` строки — `bridge.restart()` (таймаут 20с) перед следующей
+  строкой, разрыв каскада зависаний; не рестартует при Stop.
+
+### Тесты
+- `tests/test_mcp_bridge.py`: +4 (TestMCPCallTimeout — таймаут возвращает error; 2 подряд таймаута →
+  рестарт вызван; успех сбрасывает счётчик; обычная ошибка не считается таймаутом). `_FakeServer` получил
+  `name`.
+- **628 passed** (было 624, +4).
+
+## 2026-08-18 — Аудит кэша успешных результатов + закрытие двух «потерянных» классов
+
+### Аудит (два кэша)
+1. БД `confirmed_prices` (data/pricer.db) — основной; auto-reuse (rule 8) только при confidence ≥ 0.9;
+   виден агенту через `get_confirmed_prices`.
+2. SemanticCache (data/semantic_cache.json) — для похожих товаров; reuse только при confidence > 0.8.
+
+Фактические данные: БД — 287 записей, все ≥ 0.6 (0.9+ → 234, 0.8–0.9 → 20, 0.6–0.8 → 33);
+SemCache — всего 18.
+
+### Найденные «потерянные» успехи
+- **brand_mismatch фолбэки (правило 21)**: строка возвращала цену с пометкой, но результат НЕ писался
+  ни в один кэш → повторный прогон снова искал.
+- **Аналоги rule 5 (confidence 0.3–0.5)**: `memory_manager.save_price` отклонял < 0.6
+  (`if confidence < 0.6: return 0`) → такие находки полностью терялись (ни БД, ни SemCache).
+
+### Фикс
+- `src/agent_loop.py`: в конце `process_row` фолбэк-результат теперь пишется в SemCache через
+  `_store_semantic_cache` перед возвратом. Безопасно: confidence капается до ≤0.5 → auto-reuse
+  (порог >0.8) его не возьмёт; БД-реюз (rule 8, ≥0.9) для точного товара выполняется раньше.
+- `src/memory_manager.py`: порог сохранения цены в БД снижен 0.6 → 0.3 — аналоги rule 5 теперь
+  ложатся в confirmed_prices (видны агенту через get_confirmed_prices; auto-reuse 0.9 их не трогает).
+
+### Тесты
+- `tests/test_memory_manager.py`: порог в `test_save_price_below_threshold` 0.5→0.2; +1
+  (test_save_price_rule5_analog_band_accepted — confidence 0.4 сохраняется).
+- `tests/test_semantic_cache.py`: +1 (test_brand_mismatch_entry_stored_but_not_auto_reusable —
+  фолбэк пишется, но confidence ≤ 0.8 не проходит порог auto-reuse).
+- **630 passed** (было 628, +2).

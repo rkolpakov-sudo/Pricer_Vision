@@ -190,7 +190,7 @@ class MemoryManager:
     def save_price(self, spec_text: str, product_type: str, site: str,
                    price: float, url: str, confidence: float,
                    reason: str = "", source: str = "agent") -> int:
-        if confidence < 0.6:
+        if confidence < 0.3:
             return 0
         dupes = self.deduplicate_prices(spec_text, site)
         if dupes:

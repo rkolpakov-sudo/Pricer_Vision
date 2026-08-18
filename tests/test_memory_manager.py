@@ -127,8 +127,13 @@ class TestMemoryManager:
         assert best["consecutive_failures"] == 1
 
     def test_save_price_below_threshold(self, mm):
-        pid = mm.save_price("test", "cables", "tinko.ru", 100, "http://x.ru", 0.5)
+        pid = mm.save_price("test", "cables", "tinko.ru", 100, "http://x.ru", 0.2)
         assert pid == 0
+
+    def test_save_price_rule5_analog_band_accepted(self, mm):
+        """Rule 5 аналоги (confidence 0.3-0.5) должны попадать в БД (ранее отбрасывались < 0.6)."""
+        pid = mm.save_price("Клапан балансировочный Ду15", "valves", "tinko.ru", 1567, "http://x.ru", 0.4)
+        assert pid > 0
 
     def test_save_price_above_threshold(self, mm):
         pid = mm.save_price("test item", "cables", "tinko.ru", 1500, "http://x.ru", 0.95)
