@@ -143,7 +143,37 @@ def _is_optional_token(w: str) -> bool:
     return bool(re.search(r"\d", w))
 
 
+def _expand_conn_abbrev(text: str) -> str:
+    """Разворачивает сокращения типов соединения, отбрасываемые токенизатором.
+
+    «фл» — 2 символа, выпадает из _WORD_RE, из-за чего обязательный токен
+    «фланцевый» не находится в названиях карточек («Ду 100 Ру16 фл Kvs=...»).
+    """
+    if not text:
+        return text
+    return re.sub(r"\bфл\b", "фланцевый", text, flags=re.IGNORECASE)
+
+
 def product_name_matches(spec_text: str, found_name: str) -> bool:
+    """Проверка: найденный товар соответствует позиции спецификации (с брендом)."""
+    return _product_matches_core(spec_text, found_name, check_brand=True)
+
+
+def product_name_matches_ignore_brand(spec_text: str, found_name: str) -> bool:
+    """Совпадение по всем атрибутам, кроме бренда.
+
+    Для кандидатов-фолбэков: товар того же типа/размера/соединения, но другого
+    или неизвестного бренда. Бренд в сравнении игнорируется, «фл» расширяется
+    до «фланцевый» (частая аббревиатура соединения в названиях карточек).
+    """
+    return _product_matches_core(
+        _expand_conn_abbrev(spec_text),
+        _expand_conn_abbrev(found_name),
+        check_brand=False,
+    )
+
+
+def _product_matches_core(spec_text: str, found_name: str, check_brand: bool = True) -> bool:
     """Проверка: найденный товар соответствует позиции спецификации.
 
     Три измерения совпадения:
@@ -155,7 +185,8 @@ def product_name_matches(spec_text: str, found_name: str) -> bool:
       Словоформы и аббревиатуры сравниваются по префиксу
       («автоматический» ≈ «авт», «баланс.» ≈ «балансировочный»).
     - размер (если есть в обоих — обязаны совпадать: «Ду15» ≠ «Ду20»),
-    - бренд (если есть в обоих — обязан совпадать: «Ридан» ≠ «Пульсар»).
+    - бренд (если есть в обоих — обязан совпадать: «Ридан» ≠ «Пульсар»);
+      при check_brand=False бренд в сравнении не участвует.
 
     Структурные слова («завод», «изготовитель», «производитель») сходство НЕ доказывают.
 
@@ -171,6 +202,16 @@ def product_name_matches(spec_text: str, found_name: str) -> bool:
     if not spec_tokens or not found_tokens:
         return True
 
+    if not check_brand:
+        spec_brand = _brand_of(spec_text)
+        found_brand = _brand_of(found_name)
+        if spec_brand:
+            spec_tokens = {t for t in spec_tokens if not _prefix_match(spec_brand, {t})}
+        if found_brand:
+            found_tokens = {t for t in found_tokens if not _prefix_match(found_brand, {t})}
+        if not spec_tokens or not found_tokens:
+            return True
+
     required = {t for t in spec_tokens if not _is_optional_token(t)}
     if not required:
         required = spec_tokens
@@ -182,9 +223,10 @@ def product_name_matches(spec_text: str, found_name: str) -> bool:
     if spec_sizes and found_sizes and spec_sizes != found_sizes:
         return False
 
-    spec_brand = _brand_of(spec_text)
-    found_brand = _brand_of(found_name)
-    if spec_brand and found_brand and spec_brand != found_brand:
-        return False
+    if check_brand:
+        spec_brand = _brand_of(spec_text)
+        found_brand = _brand_of(found_name)
+        if spec_brand and found_brand and spec_brand != found_brand:
+            return False
 
     return True

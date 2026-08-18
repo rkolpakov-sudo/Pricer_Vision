@@ -59,6 +59,7 @@ class ExtractionResult(BaseModel):
     requires_review: bool = True
     error: Optional[str] = None
     elapsed: Optional[float] = None
+    brand_mismatch: bool = False
 
     @model_validator(mode="after")
     def validate_price(self):

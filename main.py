@@ -31,6 +31,7 @@ from gui.agent_monitor import AgentMonitorPanel
 from gui.metrics_panel import MetricsPanel
 from gui.spinner_widget import SpinnerWidget
 from src.graph_engine import GraphEngine
+from src.skip_registry import SkipRegistry
 
 
 class LogReceiver(QObject):
@@ -156,6 +157,8 @@ class MainWindow(QMainWindow):
         self._processing_active = False
         self._spec_path = None
         self._total_rows = 0
+        self._skip_registry = SkipRegistry()
+        self._skip_reconciling = False
         from src.config_loader import load_settings
         self._current_theme = load_settings().get("ui", {}).get("theme") or detect_system_theme()
         self._spinner_color = "#89b4fa"
@@ -219,6 +222,12 @@ class MainWindow(QMainWindow):
         self.study_btn = QPushButton("📖 Обучение")
         self.study_btn.clicked.connect(self._open_study_tool)
         top_bar.addWidget(self.study_btn)
+
+        self.clear_skip_btn = QPushButton("Снять отметки")
+        self.clear_skip_btn.setToolTip("Снять все отметки «пропустить» в предпросмотре")
+        self.clear_skip_btn.setEnabled(False)
+        self.clear_skip_btn.clicked.connect(self._clear_skip_marks)
+        top_bar.addWidget(self.clear_skip_btn)
 
         from src.config_loader import load_settings
         self.headless_cb = QCheckBox("🕶️ Headless")
@@ -298,16 +307,17 @@ class MainWindow(QMainWindow):
         self.results_table.itemDoubleClicked.connect(self._on_url_double_click)
         center_tabs.addTab(self.results_table, "Результаты")
 
-        self.preview_table = QTableWidget(0, 6)
+        self.preview_table = QTableWidget(0, 7)
         self.preview_table.setHorizontalHeaderLabels(
-            ["#", "Наименование", "Производитель", "Тип/обозначение", "Артикул", "Кол-во"]
+            ["Пропустить", "#", "Наименование", "Производитель", "Тип/обозначение", "Артикул", "Кол-во"]
         )
-        self.preview_table.setColumnWidth(0, 30)
-        self.preview_table.setColumnWidth(1, 260)
-        self.preview_table.setColumnWidth(2, 110)
-        self.preview_table.setColumnWidth(3, 140)
-        self.preview_table.setColumnWidth(4, 130)
-        self.preview_table.setColumnWidth(5, 60)
+        self.preview_table.setColumnWidth(0, 70)
+        self.preview_table.setColumnWidth(1, 30)
+        self.preview_table.setColumnWidth(2, 260)
+        self.preview_table.setColumnWidth(3, 110)
+        self.preview_table.setColumnWidth(4, 140)
+        self.preview_table.setColumnWidth(5, 130)
+        self.preview_table.setColumnWidth(6, 60)
         self.preview_table.setAlternatingRowColors(True)
         center_tabs.addTab(self.preview_table, "Предпросмотр")
 
@@ -353,6 +363,7 @@ class MainWindow(QMainWindow):
 
     def _connect_signals(self):
         _log_receiver.log_received.connect(self.add_log)
+        self.preview_table.itemChanged.connect(self._on_preview_item_changed)
 
     def _on_url_double_click(self, item):
         if item.column() == 6 and item.text().startswith("http"):
@@ -419,6 +430,7 @@ class MainWindow(QMainWindow):
             headers, data_rows = self.excel_writer.load_spec(path)
             self._spec_path = path
             self._total_rows = data_rows
+            self._skip_registry.reset()
             self.start_btn.setEnabled(True)
             self._show_preview()
             self._center_tabs.setCurrentIndex(1)  # switch to Предпросмотр
@@ -461,35 +473,99 @@ class MainWindow(QMainWindow):
         qty_col = mapping.get("qty")
 
         self.preview_table.setRowCount(0)
-        for excel_row in range(2, ws.max_row + 1):
-            name = self.excel_writer.build_item_name(excel_row, mapping)[0]
-            if not name or name.strip() in ("", "None", "none"):
-                continue
-            row = self.preview_table.rowCount()
-            self.preview_table.insertRow(row)
-            self.preview_table.setItem(row, 0, QTableWidgetItem(str(excel_row - 1)))
+        self._skip_reconciling = True
+        try:
+            for excel_row in range(2, ws.max_row + 1):
+                name = self.excel_writer.build_item_name(excel_row, mapping)[0]
+                if not name or name.strip() in ("", "None", "none"):
+                    continue
+                spec_item = self.excel_writer.spec_for_row(excel_row)
+                row = self.preview_table.rowCount()
+                self.preview_table.insertRow(row)
 
-            self.preview_table.setItem(row, 1, QTableWidgetItem(name[:80]))
+                check = QTableWidgetItem()
+                check.setFlags(Qt.ItemIsUserCheckable | Qt.ItemIsEnabled)
+                check.setCheckState(Qt.Unchecked)
+                check.setData(Qt.UserRole, excel_row)
+                check.setData(Qt.UserRole + 1, spec_item.text if spec_item else name)
+                check.setData(Qt.UserRole + 2, spec_item.brand if spec_item else "")
+                self.preview_table.setItem(row, 0, check)
 
-            brand = self._concat_display(ws, excel_row, brand_cols)
-            self.preview_table.setItem(row, 2, QTableWidgetItem(brand))
+                self.preview_table.setItem(row, 1, QTableWidgetItem(str(excel_row - 1)))
 
-            spec = self._concat_display(ws, excel_row, spec_cols)
-            self.preview_table.setItem(row, 3, QTableWidgetItem(spec[:80]))
+                self.preview_table.setItem(row, 2, QTableWidgetItem(name[:80]))
 
-            article_parts = []
-            for idx in article_cols:
-                val = str(ws.cell(excel_row, idx + 1).value or "").strip()
-                if val and val not in ("None", ""):
-                    article_parts.append(val)
-            self.preview_table.setItem(row, 4, QTableWidgetItem(", ".join(article_parts)))
+                brand = self._concat_display(ws, excel_row, brand_cols)
+                self.preview_table.setItem(row, 3, QTableWidgetItem(brand))
 
-            qty_val = ""
-            if qty_col is not None:
-                v = ws.cell(excel_row, qty_col + 1).value
-                if v is not None:
-                    qty_val = str(v)
-            self.preview_table.setItem(row, 5, QTableWidgetItem(qty_val))
+                spec = self._concat_display(ws, excel_row, spec_cols)
+                self.preview_table.setItem(row, 4, QTableWidgetItem(spec[:80]))
+
+                article_parts = []
+                for idx in article_cols:
+                    val = str(ws.cell(excel_row, idx + 1).value or "").strip()
+                    if val and val not in ("None", ""):
+                        article_parts.append(val)
+                self.preview_table.setItem(row, 5, QTableWidgetItem(", ".join(article_parts)))
+
+                qty_val = ""
+                if qty_col is not None:
+                    v = ws.cell(excel_row, qty_col + 1).value
+                    if v is not None:
+                        qty_val = str(v)
+                self.preview_table.setItem(row, 6, QTableWidgetItem(qty_val))
+        finally:
+            self._skip_reconciling = False
+        self._reconcile_skip_checks()
+
+    def _on_preview_item_changed(self, item):
+        if self._skip_reconciling or item.column() != 0:
+            return
+        text = item.data(Qt.UserRole + 1)
+        if not text:
+            return
+        brand = item.data(Qt.UserRole + 2) or ""
+        if item.checkState() == Qt.Checked:
+            self._skip_registry.mark(text, brand)
+        else:
+            self._skip_registry.unmark(text, brand)
+        self._reconcile_skip_checks()
+
+    def _reconcile_skip_checks(self):
+        """Синхронизирует чекбоксы предпросмотра с реестром пропуска (транзитивно)."""
+        self._skip_reconciling = True
+        try:
+            t = TOKENS.get(self._current_theme, TOKENS[Theme.DARK])
+            skipped_count = 0
+            for row in range(self.preview_table.rowCount()):
+                item = self.preview_table.item(row, 0)
+                if not item:
+                    continue
+                text = item.data(Qt.UserRole + 1)
+                brand = item.data(Qt.UserRole + 2) or ""
+                matched = self._skip_registry.matches(text, brand)
+                target = Qt.Checked if matched else Qt.Unchecked
+                if item.checkState() != target:
+                    item.setCheckState(target)
+                item.setToolTip(f"Пропускается: полный аналог «{matched}»" if matched else "")
+                if matched:
+                    skipped_count += 1
+                    fg = QColor(t["text-muted"])
+                else:
+                    fg = QColor(t["text-primary"])
+                for c in range(1, self.preview_table.columnCount()):
+                    cell = self.preview_table.item(row, c)
+                    if cell:
+                        cell.setForeground(fg)
+            if hasattr(self, "clear_skip_btn"):
+                self.clear_skip_btn.setEnabled(skipped_count > 0)
+        finally:
+            self._skip_reconciling = False
+
+    def _clear_skip_marks(self):
+        self._skip_registry.reset()
+        self._reconcile_skip_checks()
+        self.add_log("INFO", "init", "Отметки «пропустить» сняты")
 
     @staticmethod
     def _concat_display(ws, excel_row: int, indices: list[int]) -> str:
@@ -533,6 +609,7 @@ class MainWindow(QMainWindow):
             specs=self.excel_writer.get_specs(),
             llm_client=llm_client,
             fresh=self.fresh_cb.isChecked(),
+            skip_registry=self._skip_registry,
         )
         self.monitor_panel.reset()
         self.metrics_panel.reset()
@@ -595,6 +672,7 @@ class MainWindow(QMainWindow):
         spec = result.get("spec_text", "")[:60]
         pt = result.get("product_type", "")
         error = result.get("error", "")
+        brand_mismatch = result.get("brand_mismatch", False)
 
         items = [
             str(idx + 1), spec, pt, price_text, conf_text, elapsed_text,
@@ -605,6 +683,8 @@ class MainWindow(QMainWindow):
             item = QTableWidgetItem(text)
             if error:
                 item.setForeground(QColor(t["danger"]))
+            elif brand_mismatch:
+                item.setForeground(QColor(t["warning"]))
             elif price is not None:
                 item.setForeground(QColor(t["success"]))
             else:
@@ -639,6 +719,8 @@ class MainWindow(QMainWindow):
 
         if error:
             self.add_log("WARN", "agent", f"Row {idx+1}: {error}")
+        elif brand_mismatch:
+            self.add_log("WARN", "agent", f"Row {idx+1}: {price_text} ({conf_text}) on {site} — НЕ СОВПАДАЕТ БРЕНД")
         elif price:
             self.add_log("INFO", "agent", f"Row {idx+1}: {price_text} ({conf_text}) on {site}")
 
@@ -649,6 +731,8 @@ class MainWindow(QMainWindow):
             ws.cell(excel_row, hm["price"], price)
             ws.cell(excel_row, hm["url"], url or "")
             ws.cell(excel_row, hm["category"], pt or "")
+            if brand_mismatch and "note" in hm:
+                ws.cell(excel_row, hm["note"], "не совпадает бренд")
 
     def _switch_to_assistant(self):
         """Switch right panel to assistant tab and ensure it's visible."""

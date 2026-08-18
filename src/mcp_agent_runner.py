@@ -46,12 +46,14 @@ class MCPAgentRunner(QThread):
     monitor_signal = Signal(object)
     metrics_signal = Signal(object)
 
-    def __init__(self, specs: list, llm_client, db_path: str = DB_PATH, parent=None, fresh: bool = True):
+    def __init__(self, specs: list, llm_client, db_path: str = DB_PATH, parent=None, fresh: bool = True,
+                 skip_registry=None):
         super().__init__(parent)
         self.specs = specs
         self.llm_client = llm_client
         self.db_path = db_path
         self._fresh = fresh
+        self._skip_registry = skip_registry
         self._stop_event = threading.Event()
         self._restart_bridge = threading.Event()
         self._restart_bridge_value = None
@@ -149,6 +151,23 @@ class MCPAgentRunner(QThread):
                 result = None
                 retries = 0
                 spec_text = spec.text if hasattr(spec, 'text') else str(spec)
+                spec_brand = spec.brand if hasattr(spec, 'brand') else ""
+                # Пользователь отметил позицию (или её полный аналог) в предпросмотре
+                if self._skip_registry and self._skip_registry.is_skipped(spec_text, spec_brand):
+                    matched = self._skip_registry.matches(spec_text, spec_brand) or spec_text
+                    result = {"spec_text": spec_text, "price": None, "confidence": 0.0,
+                              "reason": f"пропуск пользователем (аналог: {matched})",
+                              "requires_review": True, "error": "skipped_by_user", "elapsed": 0.0}
+                    logger.info("Row %d: user skip — '%s' (аналог '%s')", i + 1, spec_text[:40], matched[:40])
+                    self.status_signal.emit(("progress", i + 1, total, f"Пропуск (пользователь): {spec_text[:60]}..."))
+                    results.append(result)
+                    audit.log_extraction(spec_text, False, None)
+                    row_idx = original_index.get(id(spec), i)
+                    self._processed += 1
+                    self.metrics_signal.emit(self._current_metrics())
+                    self.monitor_signal.emit({"type": "row_done", "idx": i + 1, "total": total})
+                    self.row_done_signal.emit(row_idx, result)
+                    continue
                 # Товар уже дважды не найден в этой сессии — пропускаем без поиска
                 if negative_cache.is_blocked(spec_text):
                     result = {"spec_text": spec_text, "price": None, "confidence": 0.0,

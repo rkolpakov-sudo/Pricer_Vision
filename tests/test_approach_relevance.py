@@ -2,7 +2,9 @@
 
 import pytest
 
-from src.approach_relevance import tokenize, approach_relevant, product_name_matches
+from src.approach_relevance import (
+    tokenize, approach_relevant, product_name_matches, product_name_matches_ignore_brand,
+)
 
 
 class TestTokenize:
@@ -139,3 +141,51 @@ class TestProductNameMatches:
         """Все значимые слова спецификации должны присутствовать в найденном."""
         assert product_name_matches("Кран шаровой Ду15",
                                     "Кран Ду15") is False
+
+
+class TestProductNameMatchesIgnoreBrand:
+    def test_brand_difference_accepted(self):
+        """«Ридан» vs «Пульсар» — при игнорировании бренда совпадение есть."""
+        assert product_name_matches_ignore_brand(
+            "Кран шаровой Ду15, завод-изготовитель Ридан",
+            "Кран шаровой Ду15, завод-изготовитель Пульсар",
+        ) is True
+
+    def test_brand_present_only_in_spec(self):
+        assert product_name_matches_ignore_brand(
+            "Кран шаровой Ду15, завод-изготовитель Ридан",
+            "Кран шаровой Ду15",
+        ) is True
+
+    def test_brand_present_only_in_found(self):
+        assert product_name_matches_ignore_brand(
+            "Кран шаровой Ду15",
+            "Кран шаровой Ду15 Ридан",
+        ) is True
+
+    def test_fl_abbrev_accepted(self):
+        """«фл» в названии карточки расширяется до «фланцевый»."""
+        assert product_name_matches_ignore_brand(
+            "Клапан балансировочный авт. фланцевый Ду100",
+            "Клапан балансировочный автомат чугун R206C Ду 100 Ру16 фл Kvs=104.6м3/ч Giacomini",
+        ) is True
+
+    def test_different_product_type_rejected(self):
+        """Разный тип товара игнорированием бренда не спасается."""
+        assert product_name_matches_ignore_brand(
+            "Кран шаровой Ду15",
+            "Клапан балансировочный Ду15",
+        ) is False
+
+    def test_static_vs_automatic_rejected(self):
+        """Разные подтипы (статический ≠ автоматический) — не совпадение."""
+        assert product_name_matches_ignore_brand(
+            "клапан баланс. статический Ду15",
+            "Клапан балансировочный авт. Ду15",
+        ) is False
+
+    def test_different_size_rejected(self):
+        assert product_name_matches_ignore_brand(
+            "Кран шаровой Ду15",
+            "Кран шаровой Ду 20 Ридан",
+        ) is False

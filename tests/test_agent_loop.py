@@ -8,6 +8,7 @@ from src.agent_loop import (
     _stuck_target, _is_product_card_url,
     _extract_price_candidate, _build_diagnostic_message,
     _is_family_page, _is_empty_search_result,
+    _pick_best_fallback, _fallback_result,
     CONTEXT_TOKEN_BUDGET, EMPTY_PROBE_LIMIT,
     TEMP_EXPLORATION, TEMP_NAVIGATION, TEMP_EXTRACTION, TEMP_RECOVERY,
 )
@@ -28,10 +29,14 @@ class TestConstants:
         assert len(SYSTEM_PROMPT) > 50
 
     def test_system_prompt_pre_click_verification_rule(self):
-        assert "ПЕРЕД кликом на карточку товара" in SYSTEM_PROMPT
+        assert "«для проверки полного названия»" in SYSTEM_PROMPT
         assert "фланцевый" in SYSTEM_PROMPT
-        assert "Совпадение по бренду и Ду НЕ достаточно" in SYSTEM_PROMPT
-        assert "НЕМЕДЛЕННО вернись к результатам поиска" in SYSTEM_PROMPT
+        assert "максимум 1 шаг на проверку заголовка" in SYSTEM_PROMPT
+
+    def test_system_prompt_brand_mismatch_fallback_rule(self):
+        assert "brand_mismatch=true" in SYSTEM_PROMPT
+        assert "не совпадает бренд" in SYSTEM_PROMPT
+        assert "Бренд — НЕ жёсткий атрибут" in SYSTEM_PROMPT
 
     def test_tool_defs_have_descriptions(self):
         for td in GRAPH_TOOL_DEFS:
@@ -397,6 +402,7 @@ class TestResultToSchema:
         assert out["price"] == 1500.5
         assert out["requires_review"] is False
         assert out["product_type"] == "cables"
+        assert out["brand_mismatch"] is False
 
     def test_no_price_result(self):
         result = {
@@ -412,3 +418,45 @@ class TestResultToSchema:
         result = {"spec_text": "", "price": -5, "requires_review": True}
         out = _result_to_schema(result)
         assert out is result
+
+
+class TestFallbackResult:
+    def test_pick_best_fallback_empty(self):
+        assert _pick_best_fallback([]) is None
+
+    def test_pick_best_fallback_confidence(self):
+        candidates = [
+            {"price": 100.0, "confidence": 0.4, "product_name": "A"},
+            {"price": 200.0, "confidence": 0.6, "product_name": "B"},
+        ]
+        assert _pick_best_fallback(candidates)["product_name"] == "B"
+
+    def test_fallback_result_marked(self):
+        result = _fallback_result(
+            "Клапан балансировочный авт. фланцевый Ду100",
+            "unknown",
+            [{
+                "price": 328106.6, "confidence": 0.7,
+                "url": "https://www.santech.ru/catalog/337/340/i867/v3/",
+                "site": "santech.ru",
+                "product_name": "Клапан балансировочный автомат чугун Giacomini R206CY310",
+            }],
+            elapsed=120.0,
+        )
+        assert result is not None
+        assert result["price"] == 328106.6
+        assert result["brand_mismatch"] is True
+        assert result["requires_review"] is True
+        assert result["confidence"] == 0.5
+        assert "не совпадает бренд" in result["reason"]
+        assert result["error"] is None
+
+    def test_fallback_result_empty_candidates(self):
+        assert _fallback_result("spec", "unknown", [], elapsed=1.0) is None
+
+    def test_fallback_result_keeps_product_type(self):
+        result = _fallback_result("spec", "cables", [
+            {"price": 50.0, "confidence": 0.3, "url": "http://x", "site": "x.ru", "product_name": "X"},
+        ], elapsed=5.0)
+        assert result["product_type"] == "cables"
+        assert result["site"] == "x.ru"

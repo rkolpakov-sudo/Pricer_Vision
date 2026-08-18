@@ -44,6 +44,13 @@ class TestExtractionResult:
         assert d["found"] is True
         assert d["price"] == 100.0
         assert d["elapsed"] == 1.5
+        assert d["brand_mismatch"] is False
+
+    def test_brand_mismatch_flag(self):
+        r = ExtractionResult(spec_text="Клапан", found=True, price=100.0,
+                             confidence=0.4, requires_review=True, brand_mismatch=True)
+        assert r.brand_mismatch is True
+        assert r.model_dump()["brand_mismatch"] is True
 
 
 class TestExtractedPrice:

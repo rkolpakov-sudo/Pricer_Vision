@@ -22,7 +22,7 @@ from src.resilience import llm_circuit
 from src.adaptive_limits import AdaptiveRoundManager
 from src.rate_limiter import DomainRateLimiter
 from src.captcha_detector import CaptchaDetector, CaptchaType
-from src.approach_relevance import approach_relevant, product_name_matches
+from src.approach_relevance import approach_relevant, product_name_matches, product_name_matches_ignore_brand
 
 logger = logging.getLogger("pricer.agent")
 
@@ -98,7 +98,7 @@ GRAPH_TOOL_DEFS = [
         "type": "function",
         "function": {
             "name": "save_confirmed_price",
-            "description": "Записать подтверждённую цену в граф. Обязательно передай product_name — точное название товара со страницы. Если товар на странице НЕ соответствует позиции спецификации (другой тип: кран вместо клапана, воздуховод вместо воздухоотводчика) — НЕ вызывай этот инструмент. Confidence < 0.6 — не записывай.",
+            "description": "Записать подтверждённую цену в граф. Обязательно передай product_name — точное название товара со страницы. Если товар на странице НЕ соответствует позиции спецификации (другой тип: кран вместо клапана, воздуховод вместо воздухоотводчика) — НЕ вызывай этот инструмент. Confidence < 0.6 — не записывай. Если товар совпадает со спецификацией по ВСЕМ атрибутам КРОМЕ бренда — передай brand_mismatch=true: цена сохранится как кандидат-фолбэк, продолжай поиск точного товара.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -109,7 +109,8 @@ GRAPH_TOOL_DEFS = [
                     "url": {"type": "string"},
                     "confidence": {"type": "number"},
                     "product_name": {"type": "string", "description": "Точное наименование товара со страницы (обязательно)"},
-                    "reason": {"type": "string"}
+                    "reason": {"type": "string"},
+                    "brand_mismatch": {"type": "boolean", "description": "true, если товар совпадает по всем атрибутам, кроме бренда"}
                 },
                 "required": ["spec_text", "product_type", "site", "price", "url", "confidence", "product_name"]
             }
@@ -190,7 +191,8 @@ SYSTEM_PROMPT = """Ты — опытный пользователь с дост�
 17. При вызове save_confirmed_price ВСЕГДА передавай product_name — точное наименование товара, которое ты видишь на странице (заголовок карточки). Система проверит, что товар соответствует позиции спецификации. Сохраняй цену только если это действительно нужный товар (или аналог того же типа). Кран шаровой и клапан балансировочный — это РАЗНЫЕ товары, воздуховод и воздухоотводчик — РАЗНЫЕ товары.
 18. Извлечение цены из карточки: цена на сайте может отображаться с любым символом — «₽», «P», «р.», «руб» или без него. НЕ ищи только символ «₽» — это самая частая ошибка. Ищи по классам: querySelectorAll('[class*="price"], [class*="price"] span, .product-price, [data-price]') и бери textContent каждого элемента. Первый элемент с классом-содержащим "price" может оказаться НЕ ценой (например, иконка «Корзина» или «В корзину») — собери ВСЕ кандидаты в массив и выбери тот, где текст похож на число с символом валюты.
 19. JS в browser_evaluate: пиши КОРОТКИЙ код, который закрывается фигурной скобкой. НИКОГДА не ставь `//`-комментарий в конце строки перед закрывающей скобкой — скобка после `//` игнорируется и JS падает с SyntaxError. Если нужен комментарий — пиши его ОТДЕЛЬНОЙ строкой перед кодом.
-20. ПЕРЕД кликом на карточку товара сверь название результата поиска со спецификацией ДОСЛОВНО по ВСЕМ обязательным атрибутам: тип товара (кран/клапан/воздуховод), тип соединения (фланцевый/резьбовой/муфтовый/Rp/под приварку), материал (чугун/латунь/сталь), Ду/размер, бренд/артикул. Если обязательного атрибута в названии результата НЕТ или он ПРОТИВОРЕЧИТ спецификации (например, латунный/резьбовой вместо фланцевого, ручной вместо автоматического) — НЕ открывай карточку, это не тот товар: ищи дальше в результатах или переключайся на другой сайт. Совпадение по бренду и Ду НЕ достаточно. Если открытая карточка НЕ соответствует спецификации — НЕ извлекай цену и НЕ ищи «варианты» на странице (их не будет), НЕМЕДЛЕННО вернись к результатам поиска или переключись на другой сайт — максимум 1 дополнительный шаг на проверку заголовка.
+20. Открывай карточку товара ТОЛЬКО если название результата поиска УЖЕ явно содержит тип товара, тип соединения и Ду/размер из спецификации (бренд в названии результата не обязателен — он может быть не указан). Если в названии результата нет типа соединения (фланцевый/резьбовой/муфтовый/Rp), нет Ду/размера или они ПРОТИВОРЕЧАТ спецификации (резьбовой вместо фланцевого, ручной вместо автоматического, латунь вместо чугуна) — НЕ открывай карточку «для проверки полного названия»: это потерянный раунд, ищи дальше в результатах или переключайся на другой сайт. Если открытая карточка оказалась неподходящей — НЕ извлекай цену и НЕ ищи «варианты» на странице, вернись к результатам или переключись на другой сайт (максимум 1 шаг на проверку заголовка).
+21. Бренд — НЕ жёсткий атрибут. Если найден товар, который совпадает со спецификацией по ВСЕМ атрибутам КРОМЕ бренда (тип, тип соединения, материал, Ду/размер, автоматический/ручной — совпадают; бренд другой или не указан) — извлеки его цену и сохрани через save_confirmed_price с параметром brand_mismatch=true. Это КАНДИДАТ-ФОЛБЭК: не выводи его как финальную цену и НЕ прекращай поиск — продолжай искать точный товар (с нужным брендом) на других сайтах. Если по итогам поиска по всей строке точный товар так и не найден — строка автоматически заполняется лучшим таким кандидатом и помечается «не совпадает бренд». Если в спецификации бренда нет (не указан завод-изготовитель) — совпадение по типу/соединению/Ду уже является полным совпадением, сохраняй обычным способом без brand_mismatch.
 
 Ограничение — 60 шагов на один товар. У тебя полная свобода действий. Кратко поясняй свои намерения перед каждым действием."""
 
@@ -476,6 +478,7 @@ async def process_row(
     diagnostic_prompts = 0
     empty_probe_streak: dict[str, int] = {}
     empty_probe_guidance_sent: set[str] = set()
+    fallback_candidates: list[dict] = []
     rate_limiter = DomainRateLimiter(
         min_interval=get_antidetect_config("rate_limit_min_interval", 1.5),
         max_requests_per_minute=get_antidetect_config("rate_limit_max_requests_per_minute", 20),
@@ -729,7 +732,10 @@ async def process_row(
                                     "(URL вида .../i<id>/v<N>/) и сохрани цену оттуда."),
                     })
                     continue
-                if not product_name_matches(spec_text, found_name):
+                brand_mismatch = bool(tool_args.get("brand_mismatch"))
+                match_ok = (product_name_matches_ignore_brand(spec_text, found_name)
+                            if brand_mismatch else product_name_matches(spec_text, found_name))
+                if not match_ok:
                     logger.warning("⚠️ Product mismatch rejected: spec=%s vs found=%s",
                                    spec_text[:50], str(found_name)[:50])
                     messages.append({
@@ -750,6 +756,25 @@ async def process_row(
                     "requires_review": True,
                 }, spec_text)
                 if validated.get("price") is not None:
+                    if brand_mismatch:
+                        fallback_candidates.append({
+                            "price": validated.get("price"),
+                            "confidence": validated.get("confidence", 0.0),
+                            "url": validated.get("url") or save_url,
+                            "site": validated.get("site") or _extract_domain(save_url),
+                            "product_name": found_name,
+                        })
+                        logger.info("Row: brand-mismatch fallback candidate: price=%s (%s)",
+                                    validated["price"], str(found_name)[:60])
+                        messages.append({
+                            "role": "tool",
+                            "tool_call_id": tc.get("id", ""),
+                            "content": ("Кандидат-фолбэк сохранён (не совпадает бренд). Продолжай искать "
+                                        "товар с нужным брендом на других сайтах. Если точный товар не "
+                                        "найдётся — строка будет заполнена этим кандидатом и помечена "
+                                        "«не совпадает бренд»."),
+                        })
+                        continue
                     yandex_price_saved = True
                     price_confirmed = True
                     empty_probe_streak.clear()
@@ -854,6 +879,12 @@ async def process_row(
             _deprecate_site_approaches(memory_manager, product_type, failed_domain, "📉 Max rounds:")
         except Exception as e:
             logger.warning("Max rounds deprecation failed: %s", e)
+    if fallback_candidates:
+        result = _fallback_result(spec_text, product_type, fallback_candidates, elapsed)
+        if result:
+            logger.info("Row: brand-mismatch fallback price=%s (conf=%.2f) in %.1fs",
+                        result.get("price"), result.get("confidence", 0), elapsed)
+            return result
     logger.info("Row: max rounds reached in %.1fs", elapsed)
     return _error_result(spec_text, f"Max rounds ({MAX_ROUNDS}) reached", elapsed=elapsed)
 
@@ -1057,6 +1088,10 @@ def _execute_graph_tool(name: str, args: dict, engine, mm, spec_text: str = "") 
                         "(.../i<id>/ без /vN/), на ней несколько модификаций с разными ценами. "
                         "НЕ сохраняй цену с неё. Перейди на карточку конкретного варианта "
                         "(URL вида .../i<id>/v<N>/) и сохрани цену оттуда.")
+            if args.get("brand_mismatch"):
+                return ("Кандидат-фолбэк принят (не совпадает бренд) — цена в БД не сохраняется; "
+                        "строка будет заполнена им автоматически и помечена, если точный товар с "
+                        "нужным брендом не найдётся. Продолжай поиск товара с нужным брендом.")
             if not product_name_matches(spec_text or args.get("spec_text", ""), found_name):
                 logger.warning("⚠️ Product mismatch rejected: spec=%s vs found=%s",
                                str(spec_text or args.get("spec_text", ""))[:50], str(found_name)[:50])
@@ -1288,6 +1323,40 @@ def _error_result(spec_text: str, error: str, elapsed: float | None = None) -> d
     }
 
 
+def _pick_best_fallback(candidates: list[dict]) -> dict | None:
+    """Лучший кандидат-фолбэк: максимальная confidence. None, если кандидатов нет."""
+    if not candidates:
+        return None
+    return max(candidates, key=lambda c: c.get("confidence", 0.0))
+
+
+def _fallback_result(spec_text: str, product_type: str, candidates: list[dict],
+                     elapsed: float | None = None) -> dict | None:
+    """Результат строки из кандидата-фолбэка (точный товар с нужным брендом не найден).
+
+    Возвращает schema-результат с brand_mismatch=True и пометкой в reason, либо
+    None, если кандидатов нет. В доверенный кэш не пишется — requires_review=True,
+    confidence ограничена 0.5.
+    """
+    best = _pick_best_fallback(candidates)
+    if best is None:
+        return None
+    result = {
+        "spec_text": spec_text,
+        "product_type": product_type,
+        "price": best.get("price"),
+        "confidence": round(min(best.get("confidence", 0.0), 0.5), 2),
+        "url": best.get("url", ""),
+        "site": best.get("site", ""),
+        "reason": (f"не совпадает бренд: найден аналог «{best.get('product_name', '')}» "
+                   f"({best.get('url', '')}); товар с нужным брендом на сайтах не найден"),
+        "requires_review": True,
+        "brand_mismatch": True,
+        "elapsed": elapsed,
+    }
+    return _result_to_schema(result)
+
+
 def _result_to_schema(result: dict) -> dict:
     """Переводит result-dict в ExtractionResult для строгой валидации.
     Наружу отдаём .model_dump() чтобы не ломать MCPAgentRunner/ExcelWriter."""
@@ -1304,6 +1373,7 @@ def _result_to_schema(result: dict) -> dict:
             requires_review=result.get("requires_review", True),
             error=result.get("error"),
             elapsed=result.get("elapsed"),
+            brand_mismatch=result.get("brand_mismatch", False),
         )
         return model.model_dump()
     except Exception as e:

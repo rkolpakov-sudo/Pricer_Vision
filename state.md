@@ -1697,3 +1697,100 @@ DiagnosticMessage 3), `tests/integration/test_agent_flow.py` +2 (диагнос�
   на неподходящей открытой карточке не извлекать цену и не искать «варианты» — немедленно уходить.
 - Тест: `tests/test_agent_loop.py` TestConstants.test_system_prompt_pre_click_verification_rule.
 - **586 passed**.
+
+
+## 2026-08-18 — Пропуск позиций в предпросмотре + транзитивные полные аналоги
+
+### Исследование
+- Предпросмотр (`main.py` `_show_preview`) — read-only таблица; `start_processing()` пересобирает specs из
+  Excel (`get_specs()`), предпросмотр на прогон не влиял.
+- Существующий сессионный `NegativeCache` (`src/session_cache.py`) — образец session-scoped кэша.
+- Матчер `product_name_matches` (`src/approach_relevance.py`) — «тот же товар» по трём измерениям:
+  тип (все значимые слова), размер (Ду/Ø, если есть в обоих), бренд (если есть в обоих). Для «полностью
+  аналогичных» используется симметрично: `product_name_matches(a,b) and product_name_matches(b,a)`.
+- Решение пользователя: транзитивность = точное совпадение ИЛИ полный аналог; бренд учитывать.
+
+### Новый `src/skip_registry.py` (Qt-free)
+- `SkipRegistry`: `mark(text, brand)`, `unmark`, `is_skipped`, `matches` (возвращает описание помеченного
+  аналога для причины), `blocked_count`, `reset`, `len`.
+- Ключ сравнения: `text + " " + brand` (нормализация: lowercase + схлопывание пробелов).
+- Пропуск, если: точное совпадение ключа ИЛИ `_full_analog` = симметричный `product_name_matches`
+  (защита от «нет токенов → True»: оба описания должны иметь значимые слова).
+- Бренд-специфичность: «Ридан» ≠ «Пульсар», отмеченный с брендом не пропускает строку без бренда.
+
+### ExcelWriter: `spec_for_row(excel_row)` (рефакторинг `get_specs`)
+- Строит `SpecItem` для одной строки с той же семантикой (пропуск пустых имён и строк без qty) —
+  spec_text в предпросмотре и в runner'е совпадают 1:1, отметки попадают точно.
+
+### Runner (`src/mcp_agent_runner.py`)
+- `MCPAgentRunner(..., skip_registry=None)`; в цикле до negative_cache: если `is_skipped(spec.text, spec.brand)`
+  → результат `error="skipped_by_user"`, `reason="пропуск пользователем (аналог: …)"`, audit +
+  `row_done_signal` + continue.
+
+### GUI (`main.py`)
+- Колонка «Пропустить» (чекбоксы) первой в предпросмотре; в данных ячейки: excel_row, полный spec.text,
+  brand (из `spec_for_row`).
+- Живая транзитивная синхронизация: `_on_preview_item_changed` → `mark/unmark` → `_reconcile_skip_checks()`
+  (с флагом `_skip_reconciling` против рекурсии); аналогичные строки авто-отмечаются, серые + tooltip с причиной.
+- Кнопка «Снять отметки» в тулбаре (`_clear_skip_marks`); реестр сбрасывается при загрузке нового файла
+  (сессия = текущая загрузка спецификации); реестр передаётся в `MCPAgentRunner`.
+
+### Тесты
+- Новый `tests/test_skip_registry.py` (18): mark/unmark/dedupe/reset/normalization, полные аналоги
+  (перефразировка, лишний параметр), НЕ-пропуски (другой размер/тип/бренд, бренд vs без бренда,
+  одиночное слово без каскада, «Отопление» vs «Вентиляция»), `matches`, интеграция с runner (storage).
+- `tests/test_excel_writer.py`: +4 (TestSpecForRow — совпадение с get_specs, заголовки разделов, пустые имена, no-ws).
+- **610 passed** (было 586, +24).
+
+## 2026-08-18 — Кандидаты-фолбэки «не совпадает бренд» + ужесточение правила 20
+
+### Инцидент
+- Row 11 «Клапан балансировочный авт. фланцевый Ду100» (завод-изготовитель «Ридан»): агент открыл подряд
+  7 карточек «для проверки полного названия» (BROEN/Benarmo/CIM ручные, Giacomini ручной, Ридан ручной),
+  затем i867/v3 (Giacomini R206CY310 автоматический фланцевый Ду100, цена 328 106,60 ₽ под заказ),
+  но не сохранил цену (бренд Giacomini ≠ Ридан) и ушёл на следующий домен.
+- Решение пользователя: бренд — НЕ жёсткий атрибут. Если бренда нет в запросе или он не важен — агент
+  должен ЗАПОМИНАТЬ товары, совпадающие по всем атрибутам кроме бренда, и вставлять лучшего в строку
+  с пометкой «не совпадает бренд», если точный товар так и не найден.
+
+### `src/approach_relevance.py`
+- `product_name_matches` → ядро `_product_matches_core(check_brand=True/False)`; новый
+  `product_name_matches_ignore_brand()` — при `check_brand=False` из токенов убираются токены бренда
+  (из `_brand_of`), т.к. иначе имя бренда остаётся обязательным словом спецификации.
+- `_expand_conn_abbrev()`: «фл» → «фланцевый» (2-символьное слово выпадает из `_WORD_RE`, из-за чего
+  кандидат Giacomini «Ду 100 Ру16 фл» не проходил по обязательному «фланцевый»). Применяется в
+  brand-ignore матчере для обеих сторон.
+
+### `src/agent_loop.py`
+- SYSTEM_PROMPT правило 20 переписано: карточку открывать только если в названии результата есть
+  тип + соединение + Ду; «для проверки полного названия» — потерянный раунд, не открывать.
+- Новое правило 21: бренд не жёсткий; товар, совпадающий по всем атрибутам кроме бренда, сохранять
+  через `save_confirmed_price(brand_mismatch=true)` как КАНДИДАТ-ФОЛБЭК и продолжать поиск точного;
+  строка заполняется лучшим кандидатом с пометкой, если точный не найден.
+- `GRAPH_TOOL_DEFS.save_confirmed_price`: новый параметр `brand_mismatch` (описание в tool-def).
+- `process_row`: локальный `fallback_candidates`; инлайн-обработчик `save_confirmed_price` при
+  `brand_mismatch=true` проверяет `product_name_matches_ignore_brand`, кладёт кандидата в список
+  (НЕ в БД, НЕ финал), отвечает агенту «продолжай поиск» и продолжает цикл.
+- `_execute_graph_tool.save_confirmed_price`: при `brand_mismatch` цена в БД не пишется, возвращается
+  сообщение агенту.
+- Конец `process_row` (исчерпаны раунды, точной цены нет): `_fallback_result()` — лучший кандидат с
+  `brand_mismatch=True`, confidence кап 0.5, `requires_review=True`, reason «не совпадает бренд: …».
+- Хелперы: `_pick_best_fallback()`, `_fallback_result()` (чистые, покрыты тестами).
+- `_result_to_schema`: пробрасывает `brand_mismatch`.
+
+### Схема (`src/models/schemas.py`)
+- `ExtractionResult.brand_mismatch: bool = False`.
+
+### GUI и XLSX (`main.py`, `src/excel_writer.py`)
+- `_on_row_done`: при `brand_mismatch` строка — предупреждающий цвет, лог WARN «НЕ СОВПАДАЕТ БРЕНД»,
+  в выходной файл пишется пометка «не совпадает бренд».
+- `excel_writer._find_output_headers`: новая выходная колонка «Пометка» (детект «помет»/«примечан»);
+  `write_result` пишет пометку при `state.brand_mismatch`.
+
+### Тесты
+- `tests/test_approach_relevance.py`: +7 (TestProductNameMatchesIgnoreBrand — разный бренд принят,
+  «фл»→фланцевый для Giacomini, разный тип/подтип/размер отклонён).
+- `tests/test_agent_loop.py`: правило 20/21 переписаны под новую формулировку, +5 (TestFallbackResult —
+  выбор лучшего по confidence, пометка/кап confidence/reason, пустые кандидаты, product_type/site).
+- `tests/test_schemas.py`: +2 (default False, флаг True + model_dump).
+- **624 passed** (было 610, +14).

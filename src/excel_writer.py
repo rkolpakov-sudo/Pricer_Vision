@@ -145,6 +145,8 @@ class ExcelWriter:
                 header_map["url"] = col
             elif "категор" in val:
                 header_map["category"] = col
+            elif "помет" in val or "примечан" in val:
+                header_map["note"] = col
 
         last_col = ws.max_column
         if "price" not in header_map:
@@ -158,6 +160,10 @@ class ExcelWriter:
         if "category" not in header_map:
             header_map["category"] = last_col + 1
             ws.cell(1, header_map["category"], "Категория")
+            last_col += 1
+        if "note" not in header_map:
+            header_map["note"] = last_col + 1
+            ws.cell(1, header_map["note"], "Пометка")
 
         return header_map
 
@@ -214,6 +220,8 @@ class ExcelWriter:
         ws.cell(row_idx, hm["price"], price_val)
         ws.cell(row_idx, hm["url"], url_val)
         ws.cell(row_idx, hm["category"], cat_val)
+        if state.get("brand_mismatch") and "note" in hm:
+            ws.cell(row_idx, hm["note"], "не совпадает бренд")
         self._save_counter += 1
 
     def flush(self):
@@ -241,35 +249,42 @@ class ExcelWriter:
 
         return out_path
 
+    def spec_for_row(self, excel_row: int) -> SpecItem | None:
+        """Строит SpecItem для одной строки листа (семантика — как в get_specs).
+
+        Используется и предпросмотром (для отметки «пропустить»), и прогоном —
+        чтобы spec_text совпадали 1:1.
+        """
+        if self._ws is None or self._headers is None:
+            return None
+        mapping = self.detect_columns(self._headers)
+        name, uom, article = self.build_item_name(excel_row, mapping)
+        if not name or name.strip() in ("", "None", "none"):
+            return None
+        # строки-заголовки разделов («Отопление», «Вентиляция» и т.п.) —
+        # без количества — не являются товарами
+        qty_col = mapping.get("qty")
+        if qty_col is not None:
+            qty_val = self._ws.cell(excel_row, qty_col + 1).value
+            if qty_val is None or str(qty_val).strip() == "":
+                return None
+        brand_raw = _clean_brand(self._concat_cells(excel_row, mapping.get("brand", [])))
+        name_raw = self._concat_cells(excel_row, mapping.get("name", []))
+        spec_raw = self._concat_cells(excel_row, mapping.get("spec", []))
+        return SpecItem(
+            text=name,
+            article=article or "",
+            brand=brand_raw,
+            name_raw=name_raw,
+            uom=uom,
+            spec=spec_raw,
+            headers=self._headers,
+        )
+
     def get_specs(self) -> list[SpecItem]:
         if self._ws is None or self._headers is None:
             return []
-        mapping = self.detect_columns(self._headers)
-        qty_col = mapping.get("qty")
-        specs = []
-        for excel_row in range(2, self._ws.max_row + 1):
-            name, uom, article = self.build_item_name(excel_row, mapping)
-            if not name or name.strip() in ("", "None", "none"):
-                continue
-            # строки-заголовки разделов («Отопление», «Вентиляция» и т.п.) —
-            # без количества — не являются товарами
-            if qty_col is not None:
-                qty_val = self._ws.cell(excel_row, qty_col + 1).value
-                if qty_val is None or str(qty_val).strip() == "":
-                    continue
-            brand_raw = _clean_brand(self._concat_cells(excel_row, mapping.get("brand", [])))
-            name_raw = self._concat_cells(excel_row, mapping.get("name", []))
-            spec_raw = self._concat_cells(excel_row, mapping.get("spec", []))
-            specs.append(SpecItem(
-                text=name,
-                article=article or "",
-                brand=brand_raw,
-                name_raw=name_raw,
-                uom=uom,
-                spec=spec_raw,
-                headers=self._headers,
-            ))
-        return specs
+        return [s for s in (self.spec_for_row(r) for r in range(2, self._ws.max_row + 1)) if s is not None]
 
     def _concat_cells(self, row: int, indices: list[int]) -> str:
         ws = self._ws

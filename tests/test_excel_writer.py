@@ -151,6 +151,52 @@ class TestGetSpecs:
         assert len(specs) == 2
 
 
+class TestSpecForRow:
+    def test_matches_get_specs(self, tmp_path):
+        """spec_for_row для строки равен SpecItem из get_specs — отметки совпадут 1:1."""
+        path = make_spec_xlsx(
+            tmp_path,
+            ["Наименование", "Марка", "Артикул", "Кол-во", "Ед."],
+            [
+                ["Кабель ВВГ", "Спецкабель", "ВВГ-3x2.5", 100, "м"],
+                ["Труба ПНД", "ОАО", "", 50, "шт"],
+            ],
+        )
+        w = ExcelWriter({})
+        w.load_spec(path)
+        specs = w.get_specs()
+        assert len(specs) == 2
+        row2 = w.spec_for_row(2)
+        row3 = w.spec_for_row(3)
+        assert row2 is not None and row3 is not None
+        assert row2.text == specs[0].text == "Кабель ВВГ"
+        assert row2.brand == specs[0].brand == "Спецкабель"
+        assert row3.text == specs[1].text == "Труба ПНД"
+        assert row3.article == specs[1].article == ""
+
+    def test_skips_section_header(self, tmp_path):
+        path = make_spec_xlsx(
+            tmp_path,
+            ["Наименование", "Кол-во"],
+            [["Отопление", ""], ["Воздухоотводчик", "48"]],
+        )
+        w = ExcelWriter({})
+        w.load_spec(path)
+        assert w.spec_for_row(2) is None
+        assert w.spec_for_row(3) is not None
+
+    def test_skips_empty_name(self, tmp_path):
+        path = make_spec_xlsx(tmp_path, ["Наименование"], [[""], ["Кран"]])
+        w = ExcelWriter({})
+        w.load_spec(path)
+        assert w.spec_for_row(2) is None
+        assert w.spec_for_row(3) is not None
+
+    def test_no_ws(self):
+        w = ExcelWriter({})
+        assert w.spec_for_row(2) is None
+
+
 class TestCleanBrand:
     def test_strips_quotes(self):
         assert _clean_brand('"Ридан"') == "Ридан"
