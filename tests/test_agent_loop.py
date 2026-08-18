@@ -9,6 +9,7 @@ from src.agent_loop import (
     _extract_price_candidate, _build_diagnostic_message,
     _is_family_page, _is_empty_search_result,
     _pick_best_fallback, _fallback_result,
+    _mismatch_warning_content,
     CONTEXT_TOKEN_BUDGET, EMPTY_PROBE_LIMIT,
     TEMP_EXPLORATION, TEMP_NAVIGATION, TEMP_EXTRACTION, TEMP_RECOVERY,
 )
@@ -385,7 +386,52 @@ class TestExecuteGraphTool:
             "url": "https://www.santech.ru/catalog/337/340/i1322/v6/",
             "site": "santech.ru",
         }, graph_engine, mm, spec_text="Клапан балансировочный авт. Ду15")
-        assert "Цена сохранена" in result
+        assert "обрабатываются системой" in result
+
+
+class TestMismatchWarningContent:
+    def test_reports_missing_word(self):
+        msg = _mismatch_warning_content(
+            "Компенсатор сильфонный под приварку Ду40",
+            "Компенсатор сильфонный осевой многослойный б/кожух",
+        )
+        assert "приварку" in msg
+        assert "Не ошибся ли ты" in msg
+        assert "confirm=true" in msg
+        assert not msg.startswith("error:")
+
+    def test_full_title_no_missing_but_still_warns(self):
+        msg = _mismatch_warning_content(
+            "Компенсатор сильфонный под приварку Ду40",
+            "Компенсатор сильфонный осевой многослойный с кожухом под приварку Ду 40",
+        )
+        assert "КРИТИЧЕСКОЕ ЗАМЕЧАНИЕ" in msg
+        assert "h1" in msg
+
+    def test_graph_tool_save_confirmed_price_is_passthrough(self, graph_engine):
+        """Решение по save_confirmed_price принимает инлайн-обработчик, graph-tool — пассивный статус."""
+        from src.memory_manager import MemoryManager
+        mm = MemoryManager(graph_engine)
+        result = _execute_graph_tool("save_confirmed_price", {
+            "product_name": "Компенсатор сильфонный осевой б/кожух",
+            "price": 5088.5, "confidence": 0.6,
+            "url": "https://www.santech.ru/catalog/293/306/i256/v1/",
+            "site": "santech.ru",
+            "brand_mismatch": True,
+        }, graph_engine, mm, spec_text="Компенсатор сильфонный под приварку Ду20")
+        assert "обрабатываются системой" in result
+        assert "принят" not in result
+
+    def test_graph_tool_family_page_still_rejected(self, graph_engine):
+        from src.memory_manager import MemoryManager
+        mm = MemoryManager(graph_engine)
+        result = _execute_graph_tool("save_confirmed_price", {
+            "product_name": "Клапан балансировочный Ду15",
+            "price": 100.0, "confidence": 0.9,
+            "url": "https://www.santech.ru/catalog/337/340/i1322/",
+            "site": "santech.ru",
+        }, graph_engine, mm, spec_text="Клапан балансировочный авт. Ду15")
+        assert "семейная страница" in result
 
 
 class TestResultToSchema:

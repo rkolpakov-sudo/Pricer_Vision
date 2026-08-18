@@ -19,7 +19,7 @@ _WORD_RE = re.compile(r"[a-zа-яё0-9]{3,}")
 _STOPWORDS = {
     "для", "из", "с", "со", "на", "по", "в", "во", "и", "не", "или", "к",
     "у", "от", "при", "за", "что", "это", "как", "так", "об", "про",
-    "мм", "ду", "типа", "тип", "размер", "новый", "отечественный",
+    "под", "мм", "ду", "типа", "тип", "размер", "новый", "отечественный",
 }
 
 
@@ -141,6 +141,22 @@ def _is_optional_token(w: str) -> bool:
     if w in _PARAM_WORDS:
         return True
     return bool(re.search(r"\d", w))
+
+
+def missing_required_tokens(spec_text: str, found_name: str) -> list[str]:
+    """Обязательные значимые слова спецификации, отсутствующие в названии карточки.
+
+    Используется для точной обратной связи агенту: «в переданном названии не хватает
+    «приварку»» — вместо абстрактного «товар не соответствует спецификации».
+    """
+    spec_tokens = _product_tokens(spec_text)
+    found_tokens = _product_tokens(found_name)
+    if not spec_tokens or not found_tokens:
+        return []
+    required = {t for t in spec_tokens if not _is_optional_token(t)}
+    if not required:
+        required = spec_tokens
+    return sorted(t for t in required if not _prefix_match(t, found_tokens))
 
 
 def _expand_conn_abbrev(text: str) -> str:

@@ -22,7 +22,10 @@ from src.resilience import llm_circuit
 from src.adaptive_limits import AdaptiveRoundManager
 from src.rate_limiter import DomainRateLimiter
 from src.captcha_detector import CaptchaDetector, CaptchaType
-from src.approach_relevance import approach_relevant, product_name_matches, product_name_matches_ignore_brand
+from src.approach_relevance import (
+    approach_relevant, product_name_matches, product_name_matches_ignore_brand,
+    missing_required_tokens,
+)
 
 logger = logging.getLogger("pricer.agent")
 
@@ -98,7 +101,7 @@ GRAPH_TOOL_DEFS = [
         "type": "function",
         "function": {
             "name": "save_confirmed_price",
-            "description": "Записать подтверждённую цену в граф. Обязательно передай product_name — точное название товара со страницы. Если товар на странице НЕ соответствует позиции спецификации (другой тип: кран вместо клапана, воздуховод вместо воздухоотводчика) — НЕ вызывай этот инструмент. Confidence < 0.6 — не записывай. Если товар совпадает со спецификацией по ВСЕМ атрибутам КРОМЕ бренда — передай brand_mismatch=true: цена сохранится как кандидат-фолбэк, продолжай поиск точного товара.",
+            "description": "Записать подтверждённую цену в граф. Обязательно передай product_name — точное название товара со страницы. Система проверит наименование и, если оно не соответствует спецификации, вернёт критическое замечание — тогда исправь product_name или, если уверен в товаре, вызови повторно с confirm=true. Если товар совпадает по всем атрибутам КРОМЕ бренда — передай brand_mismatch=true.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -108,9 +111,10 @@ GRAPH_TOOL_DEFS = [
                     "price": {"type": "number"},
                     "url": {"type": "string"},
                     "confidence": {"type": "number"},
-                    "product_name": {"type": "string", "description": "Точное наименование товара со страницы (обязательно)"},
+                    "product_name": {"type": "string", "description": "Полное наименование товара с заголовка карточки (h1)"},
                     "reason": {"type": "string"},
-                    "brand_mismatch": {"type": "boolean", "description": "true, если товар совпадает по всем атрибутам, кроме бренда"}
+                    "brand_mismatch": {"type": "boolean", "description": "true, если товар совпадает по всем атрибутам, кроме бренда"},
+                    "confirm": {"type": "boolean", "description": "true, если подтверждаешь товар несмотря на критическое замечание системы (цена будет помечена как требующая ревью)"}
                 },
                 "required": ["spec_text", "product_type", "site", "price", "url", "confidence", "product_name"]
             }
@@ -188,7 +192,7 @@ SYSTEM_PROMPT = """Ты — опытный пользователь с дост�
 14. Если сайт явно НЕ ПОДХОДИТ для товара (например, сантехнический сайт для кабеля, или производитель труб для электроники) — НЕМЕДЛЕННО переключайся на следующий сайт. Не трать больше 2 раундов на заведомо неподходящий сайт.
 15. Если сайт использует SPA (результаты поиска не появляются после Enter) — попробуй browser_navigate напрямую на URL поиска: site.ru/search?q=ТОВАР. Не нажимай Enter на SPA-сайтах — используй прямые URL.
 16. Если в структуре файла указан завод-изготовитель, тип/обозначение или артикул/код — используй их для правильного выбора товара. Бренд/тип не обязательно вставлять в поисковый запрос: сначала найди товар по наименованию, затем среди результатов отдай предпочтение позиции того же производителя/модели/артикула. Если товар выпускается несколькими заводами — это критично для выбора правильного аналога. Если «производитель» — это страна (например «Россия») или ссылка на стандарт (ГОСТ/ТУ/СНиП) — НЕ используй их как бренд и не вставляй в поиск.
-17. При вызове save_confirmed_price ВСЕГДА передавай product_name — точное наименование товара, которое ты видишь на странице (заголовок карточки). Система проверит, что товар соответствует позиции спецификации. Сохраняй цену только если это действительно нужный товар (или аналог того же типа). Кран шаровой и клапан балансировочный — это РАЗНЫЕ товары, воздуховод и воздухоотводчик — РАЗНЫЕ товары.
+17. При вызове save_confirmed_price ВСЕГДА передавай product_name — полное наименование товара с ЗАГОЛОВКА карточки (h1), НЕ сокращай и НЕ перефразируй. Система проверит соответствие спецификации. Если она вернёт КРИТИЧЕСКОЕ ЗАМЕЧАНИЕ («Не ошибся ли ты…») — это НЕ отказ, а приглашение к проверке: перепроверь заголовок h1 и соответствие товара (тип, соединение, Ду, материал). Если наименование было неполным — исправь product_name и сохрани снова. Если уверен, что товар верен — сохрани повторно с confirm=true (цена будет помечена как требующая ревью). Кран шаровой и клапан балансировочный — это РАЗНЫЕ товары, воздуховод и воздухоотводчик — РАЗНЫЕ товары.
 18. Извлечение цены из карточки: цена на сайте может отображаться с любым символом — «₽», «P», «р.», «руб» или без него. НЕ ищи только символ «₽» — это самая частая ошибка. Ищи по классам: querySelectorAll('[class*="price"], [class*="price"] span, .product-price, [data-price]') и бери textContent каждого элемента. Первый элемент с классом-содержащим "price" может оказаться НЕ ценой (например, иконка «Корзина» или «В корзину») — собери ВСЕ кандидаты в массив и выбери тот, где текст похож на число с символом валюты.
 19. JS в browser_evaluate: пиши КОРОТКИЙ код, который закрывается фигурной скобкой. НИКОГДА не ставь `//`-комментарий в конце строки перед закрывающей скобкой — скобка после `//` игнорируется и JS падает с SyntaxError. Если нужен комментарий — пиши его ОТДЕЛЬНОЙ строкой перед кодом.
 20. Открывай карточку товара ТОЛЬКО если название результата поиска УЖЕ явно содержит тип товара, тип соединения и Ду/размер из спецификации (бренд в названии результата не обязателен — он может быть не указан). Если в названии результата нет типа соединения (фланцевый/резьбовой/муфтовый/Rp), нет Ду/размера или они ПРОТИВОРЕЧАТ спецификации (резьбовой вместо фланцевого, ручной вместо автоматического, латунь вместо чугуна) — НЕ открывай карточку «для проверки полного названия»: это потерянный раунд, ищи дальше в результатах или переключайся на другой сайт. Если открытая карточка оказалась неподходящей — НЕ извлекай цену и НЕ ищи «варианты» на странице, вернись к результатам или переключись на другой сайт (максимум 1 шаг на проверку заголовка).
@@ -733,20 +737,22 @@ async def process_row(
                     })
                     continue
                 brand_mismatch = bool(tool_args.get("brand_mismatch"))
+                confirm = bool(tool_args.get("confirm"))
                 match_ok = (product_name_matches_ignore_brand(spec_text, found_name)
                             if brand_mismatch else product_name_matches(spec_text, found_name))
                 if not match_ok:
-                    logger.warning("⚠️ Product mismatch rejected: spec=%s vs found=%s",
-                                   spec_text[:50], str(found_name)[:50])
-                    messages.append({
-                        "role": "tool",
-                        "tool_call_id": tc.get("id", ""),
-                        "content": ("error: найденный товар не соответствует спецификации "
-                                    "(например кран вместо клапана, статический клапан вместо "
-                                    "автоматического). НЕ сохраняй эту цену — продолжи поиск "
-                                    "правильного товара."),
-                    })
-                    continue
+                    if confirm:
+                        logger.warning("LLM confirm override for mismatched product: spec=%s found=%s",
+                                       spec_text[:50], str(found_name)[:50])
+                    else:
+                        logger.warning("⚠️ Product mismatch — advisory: spec=%s vs found=%s",
+                                       spec_text[:50], str(found_name)[:50])
+                        messages.append({
+                            "role": "tool",
+                            "tool_call_id": tc.get("id", ""),
+                            "content": _mismatch_warning_content(spec_text, found_name),
+                        })
+                        continue
                 validated = validate_result({
                     "price": tool_args.get("price"),
                     "confidence": tool_args.get("confidence", 0.5),
@@ -756,6 +762,13 @@ async def process_row(
                     "requires_review": True,
                 }, spec_text)
                 if validated.get("price") is not None:
+                    if not match_ok:
+                        # LLM подтвердил несоответствующее наименование — принимаем, но помечаем на ревью
+                        # и не допускаем до доверенного кэша/auto-reuse.
+                        validated["requires_review"] = True
+                        validated["confidence"] = round(min(validated.get("confidence", 0), 0.5), 2)
+                        validated["reason"] = (validated.get("reason", "")
+                                               + " (подтверждено LLM при несоответствии наименования)").strip()
                     if brand_mismatch:
                         fallback_candidates.append({
                             "price": validated.get("price"),
@@ -784,8 +797,15 @@ async def process_row(
                         _save_price_and_approach(memory_manager, spec_text, product_type, validated, steps, record_soldat=False)
                     except Exception as e:
                         logger.warning("Failed to save price/approach in save_confirmed_price: %s", e)
-                    # Low confidence → save price but keep searching (rule 5)
-                    if validated.get("confidence", 0) >= CONF_MIN:
+                    try:
+                        memory_manager.record_soldat(
+                            product_type, validated.get("site") or _extract_domain(save_url) or ""
+                        )
+                    except Exception as e:
+                        logger.warning("Failed to record soldat: %s", e)
+                    # LLM-подтверждение несоответствия — решение LLM, возвращаем сразу (requires_review).
+                    # Иначе: низкий confidence → сохраняем и продолжаем поиск (rule 5).
+                    if not match_ok or validated.get("confidence", 0) >= CONF_MIN:
                         final = {
                             "spec_text": spec_text, "product_type": product_type,
                             **validated, "elapsed": elapsed,
@@ -793,6 +813,13 @@ async def process_row(
                         _store_semantic_cache(semantic_cache, spec_text, final)
                         return _result_to_schema(final)
                     logger.info("Low confidence (%.2f) — saved, continuing search", validated['confidence'])
+                    messages.append({
+                        "role": "tool",
+                        "tool_call_id": tc.get("id", ""),
+                        "content": (f"Цена {validated['price']} ₽ сохранена (confidence "
+                                    f"{validated['confidence']:.2f}, требует ревью). Продолжай поиск лучшей "
+                                    f"цены или точного товара."),
+                    })
 
         for tc_last in tool_calls:
             tn = tc_last.get("name", "")
@@ -1089,27 +1116,12 @@ def _execute_graph_tool(name: str, args: dict, engine, mm, spec_text: str = "") 
                         "(.../i<id>/ без /vN/), на ней несколько модификаций с разными ценами. "
                         "НЕ сохраняй цену с неё. Перейди на карточку конкретного варианта "
                         "(URL вида .../i<id>/v<N>/) и сохрани цену оттуда.")
-            if args.get("brand_mismatch"):
-                return ("Кандидат-фолбэк принят (не совпадает бренд) — цена в БД не сохраняется; "
-                        "строка будет заполнена им автоматически и помечена, если точный товар с "
-                        "нужным брендом не найдётся. Продолжай поиск товара с нужным брендом.")
-            if not product_name_matches(spec_text or args.get("spec_text", ""), found_name):
-                logger.warning("⚠️ Product mismatch rejected: spec=%s vs found=%s",
-                               str(spec_text or args.get("spec_text", ""))[:50], str(found_name)[:50])
-                return ("error: найденный товар не соответствует спецификации "
-                        "(например кран вместо клапана, статический клапан вместо "
-                        "автоматического). НЕ сохраняй эту цену — продолжи поиск.")
-            pid = mm.save_price(
-                spec_text=args.get("spec_text", ""),
-                product_type=args.get("product_type", ""),
-                site=args.get("site", ""),
-                price=args.get("price", 0),
-                url=args.get("url", ""),
-                confidence=args.get("confidence", 0.95),
-                reason=args.get("reason", ""),
-            )
-            mm.record_soldat(args.get("product_type", ""), args.get("site", ""))
-            return f"Цена сохранена (ID: {pid})" if pid else "Цена не сохранена (confidence < 0.6)"
+            # Решение по save_confirmed_price принимает инлайн-обработчик process_row:
+            # проверка наименования (совпадение/критическое замечание/confirm), запись в БД/кэш.
+            # Здесь — только пассивный статус, чтобы не было двух противоречивых сообщений.
+            return ("(save_confirmed_price: проверка наименования и запись цены обрабатываются "
+                    "системой. Следующий результат — решение: сохранено / кандидат-фолбэк / "
+                    "критическое замечание.)")
 
         elif name == "search_sites":
             pt = args.get("product_type", "")
@@ -1313,6 +1325,28 @@ def _build_diagnostic_message(spec_text: str, current_site: str, card_open: bool
                      "Исправь код/селектор, а не повторяй ту же команду.")
     parts.append("- Только если сайт действительно бесполезен — переключись на другой сайт из списка.")
     return "\n".join(parts)
+
+
+def _mismatch_warning_content(spec_text: str, found_name: str) -> str:
+    """Критическое замечание агенту при несоответствии наименования (скрипт советует, решает LLM).
+
+    Не блокирует: сообщает, каких слов не хватает, и предлагает либо исправить
+    product_name, либо сохранить повторно с confirm=true (цена станет требующей ревью).
+    """
+    missing = missing_required_tokens(spec_text, found_name)
+    hint = ""
+    if missing:
+        hint = f" В нём отсутствуют ключевые слова спецификации: «{'», «'.join(missing)}»."
+    return (
+        "⚠️ КРИТИЧЕСКОЕ ЗАМЕЧАНИЕ: переданное наименование «" + (found_name or "")[:80] +
+        "» не соответствует спецификации «" + (spec_text or "")[:80] + "»." + hint +
+        " Не ошибся ли ты, когда выбрал это наименование? Перепроверь на карточке: "
+        "1) полный заголовок товара (h1) — не сокращай и не перефразируй; "
+        "2) что товар на странице соответствует спецификации (тип, соединение, Ду, материал). "
+        "Если ошибся — исправь product_name и вызови save_confirmed_price снова. "
+        "Если УВЕРЕН, что товар верен — вызови save_confirmed_price повторно с confirm=true "
+        "(цена будет помечена как требующая ревью)."
+    )
 
 
 def _error_result(spec_text: str, error: str, elapsed: float | None = None) -> dict:

@@ -4,6 +4,7 @@ import pytest
 
 from src.approach_relevance import (
     tokenize, approach_relevant, product_name_matches, product_name_matches_ignore_brand,
+    missing_required_tokens,
 )
 
 
@@ -189,3 +190,30 @@ class TestProductNameMatchesIgnoreBrand:
             "Кран шаровой Ду15",
             "Кран шаровой Ду 20 Ридан",
         ) is False
+
+
+class TestMissingRequiredTokens:
+    def test_full_title_no_missing(self):
+        assert missing_required_tokens(
+            "Компенсатор сильфонный под приварку Ду40",
+            "Компенсатор сильфонный осевой многослойный с кожухом сталь нерж Ду 40 Ру16 под приварку Hortum",
+        ) == []
+
+    def test_truncated_name_reports_missing_word(self):
+        """Кейс из лога: LLM передал сокращённое название без «приварку» → сообщить об этом."""
+        assert missing_required_tokens(
+            "Компенсатор сильфонный под приварку Ду40",
+            "Компенсатор сильфонный осевой многослойный б/кожух",
+        ) == ["приварку"]
+
+    def test_exact_same(self):
+        assert missing_required_tokens("Кран шаровой Ду15", "Кран шаровой Ду15") == []
+
+    def test_different_product(self):
+        missing = missing_required_tokens("Кран шаровой Ду15", "Клапан балансировочный Ду15")
+        assert "кран" in missing
+        assert "шаровой" in missing
+
+    def test_empty_input(self):
+        assert missing_required_tokens("", "Кран") == []
+        assert missing_required_tokens("Кран", "") == []
