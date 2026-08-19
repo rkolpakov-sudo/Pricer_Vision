@@ -741,9 +741,22 @@ async def process_row(
                 match_ok = (product_name_matches_ignore_brand(spec_text, found_name)
                             if brand_mismatch else product_name_matches(spec_text, found_name))
                 if not match_ok:
-                    if confirm:
+                    previously_confirmed = memory_manager.has_matching_equivalence(spec_text, found_name)
+                    if previously_confirmed:
+                        # Пара уже подтверждена ранее — принимаем без предупреждения.
+                        logger.info("Row: known equivalent pair, accept: spec=%s found=%s",
+                                    spec_text[:50], str(found_name)[:50])
+                        match_ok = True
+                    elif confirm:
                         logger.warning("LLM confirm override for mismatched product: spec=%s found=%s",
                                        spec_text[:50], str(found_name)[:50])
+                        if not brand_mismatch:
+                            # Запоминаем соответствие, чтобы впредь не предупреждать
+                            # (только для совпадений по типу/размеру, не по бренду).
+                            try:
+                                memory_manager.record_matching_equivalence(spec_text, found_name)
+                            except Exception as e:
+                                logger.warning("Failed to record matching equivalence: %s", e)
                     else:
                         logger.warning("⚠️ Product mismatch — advisory: spec=%s vs found=%s",
                                        spec_text[:50], str(found_name)[:50])

@@ -429,6 +429,23 @@ pdf_parser:
 - `pytest-asyncio` установлен в venv — async-тесты (mcp_bridge, pdf_parser, agent_flow) проходят.
 - В ходе Фазы 7 исправлены: `SmartReview._calculate_confidence` падал на строковом `qty` (TypeError); `ExcelWriter.detect_columns` fallback добавлял `None`-заголовки в name-колонки.
 
+## Правила сопоставления наименований (Фаза 8)
+
+Три уровня настройки матчинга товара (спецификация vs найденный на сайте) без правки кода:
+
+1. **Конфиг** — `config/matching_rules.yaml`: стоп-слова, структурные, параметрические слова,
+   сокращения, контекстные правила (напр. «на грувлоках» незначимо для ВГП-трубы).
+   Загружается при старте (`load_rules()` в `main.py`).
+2. **GUI-редактор** — кнопка «🧠 Правила сопоставления» в `main.py` → `gui/rules_editor.py`
+   (вкладки-таблицы + живая проверка через `product_name_matches`).
+3. **Обучение** — подтверждённые LLM-пользователем пары `spec ↔ найденное наименование`
+   запоминаются в таблицу `matching_equivalences` графа (`src/graph_engine.py`,
+   `src/memory_manager.py`, инлайн-обработчик `save_confirmed_price` в `src/agent_loop.py`).
+   Для уже подтверждённой пары предупреждение о несовпадении не показывается.
+
+Правила применяются в `src/approach_relevance.py` (Qt-free, тестируемо); потребители —
+`agent_loop.py` (детект несовпадения) и `task_scheduler.py` (фильтр подходов).
+
 
 
 

@@ -108,6 +108,12 @@ class FakeMemoryManager:
     def increment_consecutive_failures(self, pt, site):
         pass
 
+    def has_matching_equivalence(self, spec_text, found_name):
+        return False
+
+    def record_matching_equivalence(self, spec_text, found_name):
+        pass
+
 
 class FakeBridge:
     def __init__(self, snapshot_result="ok", evaluate_result="ok"):
@@ -515,6 +521,92 @@ class TestAgentFlow:
         assert not any("i1322/" in (p.get("url", "") or "") for p in mm.saved_prices)
         assert result.get("price") == 15676.8
         assert result.get("url", "").endswith("v6/")
+
+
+@pytest.mark.asyncio
+class TestEquivalenceLearning:
+    async def test_confirm_mismatch_records_equivalence(self, graph_engine):
+        """Подтверждённое LLM несоответствие запоминается как эквивалентная пара."""
+        from src.memory_manager import MemoryManager
+
+        mm = MemoryManager(graph_engine)
+        spec = "Компенсатор сильфонный под приварку Ду40"
+        found = "Компенсатор сильфонный осевой многослойный б/кожух"
+        llm = FakeLLM([llm_tool_call("save_confirmed_price", {
+            "product_name": found,
+            "price": 5088.5, "confidence": 0.8,
+            "url": "https://site.ru/i1/v2/", "site": "site.ru",
+            "confirm": True,
+        })])
+        bridge = FakeBridge()
+        cache = FakeSemanticCache()
+        result = await process_row(
+            spec_text=spec,
+            llm_client=llm,
+            mcp_bridge=bridge,
+            graph_engine=graph_engine,
+            memory_manager=mm,
+            fresh=True,
+            semantic_cache=cache,
+        )
+        assert result.get("price") == 5088.5
+        assert result.get("requires_review") is True
+        assert mm.has_matching_equivalence(spec, found) is True
+        assert mm.get_matching_equivalences()[0]["spec_text"] == spec.lower()
+
+    async def test_no_equivalence_without_confirm(self, graph_engine):
+        """Без confirm несоответствие не запоминается и возвращается предупреждение."""
+        from src.memory_manager import MemoryManager
+
+        mm = MemoryManager(graph_engine)
+        spec = "Компенсатор сильфонный под приварку Ду40"
+        found = "Компенсатор сильфонный осевой многослойный б/кожух"
+        llm = FakeLLM([llm_tool_call("save_confirmed_price", {
+            "product_name": found,
+            "price": 5088.5, "confidence": 0.8,
+            "url": "https://site.ru/i1/v2/", "site": "site.ru",
+        })])
+        bridge = FakeBridge()
+        cache = FakeSemanticCache()
+        result = await process_row(
+            spec_text=spec,
+            llm_client=llm,
+            mcp_bridge=bridge,
+            graph_engine=graph_engine,
+            memory_manager=mm,
+            fresh=True,
+            semantic_cache=cache,
+        )
+        assert mm.has_matching_equivalence(spec, found) is False
+        assert result.get("price") is None
+
+    async def test_previously_confirmed_pair_accepted_without_review(self, graph_engine):
+        """Ранее подтверждённая пара принимается без requires_review/капа confidence."""
+        from src.memory_manager import MemoryManager
+
+        mm = MemoryManager(graph_engine)
+        spec = "Компенсатор сильфонный под приварку Ду40"
+        found = "Компенсатор сильфонный осевой многослойный б/кожух"
+        mm.record_matching_equivalence(spec, found)
+        llm = FakeLLM([llm_tool_call("save_confirmed_price", {
+            "product_name": found,
+            "price": 5088.5, "confidence": 0.95,
+            "url": "https://site.ru/i1/v2/", "site": "site.ru",
+        })])
+        bridge = FakeBridge()
+        cache = FakeSemanticCache()
+        result = await process_row(
+            spec_text=spec,
+            llm_client=llm,
+            mcp_bridge=bridge,
+            graph_engine=graph_engine,
+            memory_manager=mm,
+            fresh=True,
+            semantic_cache=cache,
+        )
+        assert result.get("price") == 5088.5
+        assert result.get("requires_review") is False
+        assert result.get("confidence", 0) == 0.95
 
 
 @pytest.mark.asyncio

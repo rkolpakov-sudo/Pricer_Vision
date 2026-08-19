@@ -86,6 +86,15 @@ CREATE TABLE IF NOT EXISTS hints (
     created_at TEXT DEFAULT (datetime('now'))
 );
 
+CREATE TABLE IF NOT EXISTS matching_equivalences (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    spec_text TEXT NOT NULL,
+    found_name TEXT NOT NULL,
+    source TEXT DEFAULT 'user_confirm',
+    created_at TEXT DEFAULT (datetime('now'))
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_matching_equiv ON matching_equivalences(spec_text, found_name);
+
 CREATE INDEX IF NOT EXISTS idx_approaches_product_site ON approaches(product_type_id, site_id);
 CREATE INDEX IF NOT EXISTS idx_approaches_site ON approaches(site_id);
 CREATE INDEX IF NOT EXISTS idx_confirmed_spec ON confirmed_prices(spec_text);
@@ -123,6 +132,7 @@ class GraphEngine:
         self._hints_by_product: dict[str, list[dict]] = {}
         self._all_sites: dict[str, dict] = {}
         self._all_products: dict[str, dict] = {}
+        self._equivalences: set[tuple[str, str]] = set()
         self._built = False
 
     def build(self):
@@ -216,6 +226,10 @@ class GraphEngine:
         self._all_products.clear()
         for row in self._conn.execute("SELECT * FROM product_types WHERE id != 'unknown'"):
             self._all_products[row["id"]] = dict(row)
+
+        self._equivalences.clear()
+        for row in self._conn.execute("SELECT spec_text, found_name FROM matching_equivalences"):
+            self._equivalences.add((row["spec_text"], row["found_name"]))
 
         logger.info(f"Graph loaded: {len(self._all_products)} products, "
                     f"{len(self._all_sites)} sites, "
@@ -743,6 +757,40 @@ class GraphEngine:
         for hints in self._hints_by_product.values():
             all_hints.extend(hints)
         return all_hints
+
+    # ── Matching equivalences (learned from user/LLM confirmations) ──
+
+    @staticmethod
+    def _equiv_key(text: str) -> str:
+        return " ".join((text or "").lower().split())
+
+    def record_matching_equivalence(self, spec_text: str, found_name: str) -> None:
+        """Запоминает подтверждённую пару «спецификация → найденное наименование»."""
+        spec = self._equiv_key(spec_text)
+        found = self._equiv_key(found_name)
+        if not spec or not found:
+            return
+        with self._lock:
+            self._conn.execute(
+                "INSERT OR IGNORE INTO matching_equivalences (spec_text, found_name) "
+                "VALUES (?, ?)",
+                (spec, found),
+            )
+            self._conn.commit()
+            self._equivalences.add((spec, found))
+
+    def has_matching_equivalence(self, spec_text: str, found_name: str) -> bool:
+        """True, если пара уже подтверждена пользователем/LLM ранее."""
+        return (self._equiv_key(spec_text), self._equiv_key(found_name)) in self._equivalences
+
+    def get_matching_equivalences(self) -> list[dict]:
+        self.build()
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT spec_text, found_name, source, created_at "
+                "FROM matching_equivalences ORDER BY created_at DESC"
+            ).fetchall()
+            return [dict(r) for r in rows]
 
     # ── Memory CRUD (for assistant) ──
 

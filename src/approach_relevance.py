@@ -9,25 +9,159 @@
 со значимыми словами текущего товара (наименование + артикул). Без пересечения —
 подход скрывается. Если данных недостаточно — показываем (безопасный fallback).
 
+Правила сопоставления (стоп-слова, параметры, сокращения, контекстные правила)
+настраиваются из GUI «Правила сопоставления» и хранятся в config/matching_rules.yaml.
+Дефолты зашиты в _RULES_DEFAULTS; YAML-секция полностью заменяет дефолтную.
+
 Чистый модуль (без Qt/сети) — покрыт тестами.
 """
 
+import copy
+import logging
 import re
+import threading
+from pathlib import Path
+
+logger = logging.getLogger("pricer.approach_relevance")
 
 _WORD_RE = re.compile(r"[a-zа-яё0-9]{3,}")
 
-_STOPWORDS = {
-    "для", "из", "с", "со", "на", "по", "в", "во", "и", "не", "или", "к",
-    "у", "от", "при", "за", "что", "это", "как", "так", "об", "про",
-    "под", "мм", "ду", "типа", "тип", "размер", "новый", "отечественный",
+_DEFAULT_RULES_PATH = Path(__file__).resolve().parent.parent / "config" / "matching_rules.yaml"
+
+_RULES_DEFAULTS = {
+    "stopwords": [
+        "для", "из", "с", "со", "на", "по", "в", "во", "и", "не", "или", "к",
+        "у", "от", "при", "за", "что", "это", "как", "так", "об", "про",
+        "под", "мм", "ду", "типа", "тип", "размер", "новый", "отечественный",
+    ],
+    "structural_words": ["завод", "изготовитель", "производитель", "марка", "бренд", "гост", "ту"],
+    "param_words": [
+        "ру", "pn", "нр", "np", "kvs", "kv", "бар", "па", "атм",
+        "тмакс", "макс", "мин", "max", "min", "град",
+    ],
+    "abbreviations": {"фл": "фланцевый"},
+    "context_insignificant": [
+        {"base": "Труба стальная водогазопроводная оцинкованная", "drop": "на грувлоках"},
+    ],
 }
+
+_rules_lock = threading.RLock()
+_rules = dict(_RULES_DEFAULTS)
+_STOPWORDS_SET = frozenset(_RULES_DEFAULTS["stopwords"])
+_STRUCTURAL_SET = frozenset(_RULES_DEFAULTS["structural_words"])
+_PARAM_SET = frozenset(_RULES_DEFAULTS["param_words"])
+_CONTEXT_RULES = []  # [(base_re, drop_re)]
+_ABBR_PATTERNS = []  # [(compiled_re, full_form)]
+
+
+def _phrase_to_regex(phrase: str) -> re.Pattern | None:
+    """Фраза пользователя → regex: слова подряд, гибкие пробелы, без учёта регистра."""
+    words = (phrase or "").strip().split()
+    if not words:
+        return None
+    return re.compile(r"\s+".join(re.escape(w) for w in words), re.IGNORECASE)
+
+
+def _compile_rules():
+    global _STOPWORDS_SET, _STRUCTURAL_SET, _PARAM_SET, _CONTEXT_RULES, _ABBR_PATTERNS
+    _STOPWORDS_SET = frozenset(_rules.get("stopwords") or [])
+    _STRUCTURAL_SET = frozenset(_rules.get("structural_words") or [])
+    _PARAM_SET = frozenset(_rules.get("param_words") or [])
+    ctx = _rules.get("context_insignificant") or []
+    rules = []
+    for item in ctx:
+        if not isinstance(item, dict):
+            continue
+        base_re = _phrase_to_regex(item.get("base", ""))
+        drop_re = _phrase_to_regex(item.get("drop", ""))
+        if base_re is not None and drop_re is not None:
+            rules.append((base_re, drop_re))
+    _CONTEXT_RULES = rules
+    abbr = _rules.get("abbreviations") or {}
+    patterns = []
+    for abbrev, full in abbr.items():
+        if abbrev and full:
+            patterns.append((re.compile(rf"\b{re.escape(str(abbrev))}\b", re.IGNORECASE), str(full)))
+    _ABBR_PATTERNS = patterns
+
+
+_compile_rules()
+
+
+def load_rules(path=None, reload=True) -> dict:
+    """Загружает правила сопоставления из YAML (секция заменяет дефолтную).
+
+    Файла нет или он повреждён — остаются дефолты. Правила применяются к текущей
+    сессии сразу (перекомпиляция regex). Qt-free.
+    """
+    global _rules
+    path = Path(path) if path else _DEFAULT_RULES_PATH
+    data = {}
+    if path.exists():
+        try:
+            import yaml
+
+            with open(path, "r", encoding="utf-8") as f:
+                data = yaml.safe_load(f) or {}
+        except Exception as e:
+            logger.warning("Failed to load matching rules from %s: %s", path, e)
+    with _rules_lock:
+        _rules = _merge_rules(data)
+        _compile_rules()
+    return _rules
+
+
+def _merge_rules(data: dict) -> dict:
+    """Собирает правила: секция из data (кроме None) заменяет дефолт целиком."""
+    merged = dict(_RULES_DEFAULTS)
+    for key in _RULES_DEFAULTS:
+        if key in data and data[key] is not None:
+            merged[key] = data[key]
+    return merged
+
+
+def set_rules(new_rules: dict) -> dict:
+    """Заменяет правила целиком (merge с дефолтами) и применяет к сессии."""
+    global _rules
+    with _rules_lock:
+        _rules = _merge_rules(new_rules or {})
+        _compile_rules()
+    return _rules
+
+
+def get_rules() -> dict:
+    """Текущие правила (копия для чтения)."""
+    with _rules_lock:
+        return copy.deepcopy(_rules)
+
+
+def save_rules(path=None) -> str:
+    """Сохраняет текущие правила в YAML (используется GUI-редактором)."""
+    path = Path(path) if path else _DEFAULT_RULES_PATH
+    with _rules_lock:
+        payload = dict(_rules)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    import yaml
+
+    with open(path, "w", encoding="utf-8") as f:
+        yaml.dump(payload, f, default_flow_style=False, allow_unicode=True)
+    return str(path)
+
+
+def reset_rules() -> dict:
+    """Возвращает правила к встроенным дефолтам."""
+    global _rules
+    with _rules_lock:
+        _rules = dict(_RULES_DEFAULTS)
+        _compile_rules()
+    return _rules
 
 
 def tokenize(text: str) -> set:
     """Значимые слова текста (>=3 символа, без стоп-слов)."""
     if not text:
         return set()
-    return {w for w in _WORD_RE.findall(text.lower()) if w not in _STOPWORDS}
+    return {w for w in _WORD_RE.findall(text.lower()) if w not in _STOPWORDS_SET}
 
 
 def approach_relevant(approach: dict, spec_text: str, extra_text: str = "") -> bool:
@@ -48,11 +182,7 @@ def approach_relevant(approach: dict, spec_text: str, extra_text: str = "") -> b
 # Токены-размеры/технические, не несущие смысла при сравнении товаров
 _SIZE_RE = re.compile(r"^(ду|дн|dn|dp|мм|дюйм|in|g\d+|\d+[./]?\d*)$", re.IGNORECASE)
 
-# Структурные слова: маркеры бренда/ГОСТ. Сами по себе не доказывают сходство —
-# «Теплосчетчик, завод-изготовитель Пульсар» и «Кран, завод-изготовитель Ридан»
-# не должны считаться похожими из-за общего «завод-изготовитель».
-_STRUCTURAL_WORDS = {"завод", "изготовитель", "производитель", "марка", "бренд", "гост", "ту"}
-
+# Маркеры бренда/ГОСТ в наименованиях
 _BRAND_RE = re.compile(
     r"(?:завод[- ]изготовитель|производитель|завод|бренд|марка)"
     r"\s*[:»]?\s*([а-яёa-z0-9][а-яёa-z0-9·&\-()]{1,30})",
@@ -100,13 +230,30 @@ def _brand_of(text: str) -> str:
     return m.group(1).strip().rstrip(",.;").lower() if m else ""
 
 
+def _context_normalize(text: str) -> str:
+    """Убирает характеристики, незначимые в контексте конкретного наименования.
+
+    Правила берутся из _CONTEXT_RULES (конфиг «Правила сопоставления»). Например,
+    «Труба стальная водогазопроводная оцинкованная на грувлоках ⌀150х4,5»
+    сопоставляется с «Труба стальная водогазопроводная оцинкованная ⌀150х4,5»:
+    «на грувлоках» незначимо для этого типа трубы. В других наименованиях
+    «грувлок» остаётся значимым («Труба на грувлоках» ≠ «Труба ⌀150»).
+    """
+    if not text:
+        return text
+    for base_re, drop_re in _CONTEXT_RULES:
+        if base_re.search(text):
+            text = drop_re.sub("", text)
+    return text
+
+
 def _product_tokens(text: str) -> set:
     """Значимые слова товара без размеров/номеров («ду15», «1/2», цифры)."""
     if not text:
         return set()
     tokens = set()
-    for w in _WORD_RE.findall(text.lower()):
-        if w in _STOPWORDS or w in _STRUCTURAL_WORDS or len(w) < 3:
+    for w in _WORD_RE.findall(_context_normalize(text).lower()):
+        if w in _STOPWORDS_SET or w in _STRUCTURAL_SET or len(w) < 3:
             continue
         if w.isdigit() or _SIZE_RE.match(w):
             continue
@@ -124,21 +271,13 @@ def _prefix_match(tok: str, found_tokens: set) -> bool:
     return False
 
 
-# Параметрические слова: могут отсутствовать в названии карточки на сайте
-# (указаны в характеристиках/описании) — не обязательны при сравнении товаров.
-_PARAM_WORDS = {
-    "ру", "pn", "нр", "np", "kvs", "kv", "бар", "па", "атм",
-    "тмакс", "макс", "мин", "max", "min", "град",
-}
-
-
 def _is_optional_token(w: str) -> bool:
     """Токен, наличие которого в названии найденного товара не обязательно.
 
     Параметры («ру16», «kvs», «нр5-35») и значения с цифрами («220в», «1,9»,
     «b69») указываются в спецификации, но часто отсутствуют в title карточки.
     """
-    if w in _PARAM_WORDS:
+    if w in _PARAM_SET:
         return True
     return bool(re.search(r"\d", w))
 
@@ -160,14 +299,17 @@ def missing_required_tokens(spec_text: str, found_name: str) -> list[str]:
 
 
 def _expand_conn_abbrev(text: str) -> str:
-    """Разворачивает сокращения типов соединения, отбрасываемые токенизатором.
+    """Разворачивает сокращения типов соединения из правил.
 
-    «фл» — 2 символа, выпадает из _WORD_RE, из-за чего обязательный токен
-    «фланцевый» не находится в названиях карточек («Ду 100 Ру16 фл Kvs=...»).
+    По умолчанию «фл»→«фланцевый»: «фл» — 2 символа, выпадает из _WORD_RE,
+    из-за чего обязательный токен «фланцевый» не находится в названиях карточек
+    («Ду 100 Ру16 фл Kvs=...»).
     """
     if not text:
         return text
-    return re.sub(r"\bфл\b", "фланцевый", text, flags=re.IGNORECASE)
+    for pat, full in _ABBR_PATTERNS:
+        text = pat.sub(full, text)
+    return text
 
 
 def product_name_matches(spec_text: str, found_name: str) -> bool:
@@ -179,8 +321,8 @@ def product_name_matches_ignore_brand(spec_text: str, found_name: str) -> bool:
     """Совпадение по всем атрибутам, кроме бренда.
 
     Для кандидатов-фолбэков: товар того же типа/размера/соединения, но другого
-    или неизвестного бренда. Бренд в сравнении игнорируется, «фл» расширяется
-    до «фланцевый» (частая аббревиатура соединения в названиях карточек).
+    или неизвестного бренда. Бренд в сравнении игнорируется, сокращения соединения
+    (по умолчанию «фл») расширяются до полной формы.
     """
     return _product_matches_core(
         _expand_conn_abbrev(spec_text),

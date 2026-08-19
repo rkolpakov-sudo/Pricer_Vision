@@ -8,7 +8,8 @@ class TestGraphEngine:
             "SELECT name FROM sqlite_master WHERE type='table' ORDER BY name"
         ).fetchall()
         names = [r["name"] for r in row]
-        for t in ("approaches", "confirmed_prices", "hints", "product_sites", "product_types", "sites"):
+        for t in ("approaches", "confirmed_prices", "hints", "product_sites", "product_types", "sites",
+                  "matching_equivalences"):
             assert t in names
 
     def test_empty_stats(self, graph_engine):
@@ -233,3 +234,36 @@ class TestGraphEngine:
         assert cache_rows and int(cache_rows[0][0]) == -64000
         sync_row = graph_engine._conn.execute("PRAGMA synchronous").fetchone()
         assert int(sync_row[0]) == 1
+
+
+class TestMatchingEquivalences:
+    def test_record_and_has(self, graph_engine):
+        assert graph_engine.has_matching_equivalence("Кран Ду15", "Кран шаровой Ду15") is False
+        graph_engine.record_matching_equivalence("Кран Ду15", "Кран шаровой Ду15")
+        assert graph_engine.has_matching_equivalence("Кран Ду15", "Кран шаровой Ду15") is True
+
+    def test_normalization_case_and_whitespace(self, graph_engine):
+        graph_engine.record_matching_equivalence("  КРАН   Ду15 ", "Кран шаровой Ду15")
+        assert graph_engine.has_matching_equivalence("кран ду15", "кран шаровой ду15") is True
+
+    def test_duplicate_ignored(self, graph_engine):
+        graph_engine.record_matching_equivalence("А", "Б")
+        graph_engine.record_matching_equivalence("А", "Б")
+        assert len(graph_engine.get_matching_equivalences()) == 1
+
+    def test_persists_across_rebuild(self, graph_engine):
+        graph_engine.record_matching_equivalence("А", "Б")
+        graph_engine.rebuild()
+        assert graph_engine.has_matching_equivalence("А", "Б") is True
+
+    def test_empty_input_ignored(self, graph_engine):
+        graph_engine.record_matching_equivalence("", "Б")
+        graph_engine.record_matching_equivalence("А", "")
+        assert graph_engine.get_matching_equivalences() == []
+
+    def test_memory_manager_wrappers(self, graph_engine):
+        from src.memory_manager import MemoryManager
+        mm = MemoryManager(graph_engine)
+        mm.record_matching_equivalence("А", "Б")
+        assert mm.has_matching_equivalence("А", "Б") is True
+        assert mm.has_matching_equivalence("А", "В") is False

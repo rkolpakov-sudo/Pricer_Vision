@@ -159,6 +159,8 @@ class MainWindow(QMainWindow):
         self._total_rows = 0
         self._skip_registry = SkipRegistry()
         self._skip_reconciling = False
+        from src.approach_relevance import load_rules
+        load_rules()
         from src.config_loader import load_settings
         self._current_theme = load_settings().get("ui", {}).get("theme") or detect_system_theme()
         self._spinner_color = "#89b4fa"
@@ -252,6 +254,11 @@ class MainWindow(QMainWindow):
         self.deps_btn.setToolTip("Обновить и изменить версии зависимостей (pip, @playwright/mcp)")
         self.deps_btn.clicked.connect(self.open_dependency_manager)
         top_bar.addWidget(self.deps_btn)
+
+        self.rules_btn = QPushButton("🧠 Правила сопоставления")
+        self.rules_btn.setToolTip("Настроить правила сопоставления наименований товаров (без правки кода)")
+        self.rules_btn.clicked.connect(self.open_rules_editor)
+        top_bar.addWidget(self.rules_btn)
 
         self.theme_btn = QPushButton("Тема")
         self.theme_btn.clicked.connect(self._toggle_theme)
@@ -417,6 +424,11 @@ class MainWindow(QMainWindow):
             parent=self,
             busy=getattr(self, "_processing_active", False),
         )
+        dlg.exec()
+
+    def open_rules_editor(self):
+        from gui.rules_editor import RulesEditorDialog
+        dlg = RulesEditorDialog(parent=self)
         dlg.exec()
 
     def load_spec(self, path: str | None = None):

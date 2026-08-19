@@ -217,3 +217,27 @@ class TestMissingRequiredTokens:
     def test_empty_input(self):
         assert missing_required_tokens("", "Кран") == []
         assert missing_required_tokens("Кран", "") == []
+
+
+class TestGroovlockContextRule:
+    """«на грувлоках» незначимо для ВГП-оцинкованной трубы, но значимо вне её."""
+
+    VGP_SPEC = "Труба стальная водогазопроводная оцинкованная на грувлоках ⌀150х4,5"
+    VGP_PLAIN = "Труба стальная водогазопроводная оцинкованная ⌀150х4,5"
+
+    def test_vgp_pipe_with_groovlock_matches_plain(self):
+        assert product_name_matches(self.VGP_SPEC, self.VGP_PLAIN) is True
+
+    def test_vgp_pipe_plain_matches_with_groovlock(self):
+        assert product_name_matches(self.VGP_PLAIN, self.VGP_SPEC) is True
+
+    def test_missing_required_tokens_empty_in_context(self):
+        assert missing_required_tokens(self.VGP_SPEC, self.VGP_PLAIN) == []
+
+    def test_groovlock_still_significant_elsewhere(self):
+        assert product_name_matches("Труба на грувлоках ⌀150", "Труба ⌀150") is False
+        assert missing_required_tokens("Труба на грувлоках ⌀150", "Труба ⌀150") == ["грувлоках"]
+
+    def test_different_size_still_rejected(self):
+        other = "Труба стальная водогазопроводная оцинкованная ⌀100х3"
+        assert product_name_matches(self.VGP_SPEC, other) is False

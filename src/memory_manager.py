@@ -32,6 +32,17 @@ class MemoryManager:
     def get_all_approaches_flat(self) -> list[dict]:
         return self._engine.get_all_approaches()
 
+    # ── Matching equivalences ──
+
+    def record_matching_equivalence(self, spec_text: str, found_name: str) -> None:
+        return self._engine.record_matching_equivalence(spec_text, found_name)
+
+    def has_matching_equivalence(self, spec_text: str, found_name: str) -> bool:
+        return self._engine.has_matching_equivalence(spec_text, found_name)
+
+    def get_matching_equivalences(self) -> list[dict]:
+        return self._engine.get_matching_equivalences()
+
     @staticmethod
     def clean_steps(steps: list[dict]) -> list[dict]:
         """Filter out wasted steps before saving (screenshots, redundant snapshots)."""
