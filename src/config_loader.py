@@ -41,6 +41,10 @@ def get_mcp_config(key: str, default):
     cfg = load_settings()
     return cfg.get("mcp", {}).get(key, default)
 
+def get_browser_config(key: str, default):
+    cfg = load_settings()
+    return cfg.get("browser", {}).get(key, default)
+
 def get_learning_config(key: str, default):
     cfg = load_settings()
     return cfg.get("learning", {}).get(key, default)

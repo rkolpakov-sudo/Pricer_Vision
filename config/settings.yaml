@@ -4,6 +4,11 @@ antidetect:
 browser:
   headless: false
   no_sandbox: true
+  backend: camoufox
+  backends:
+    - camoufox
+    - playwright
+    - nodriver
 deps:
   playwright_mcp:
     version: null

@@ -7,11 +7,40 @@ from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
 
 from src.resilience import mcp_circuit, CircuitState
-from src.config_loader import get_mcp_config
+from src.config_loader import get_mcp_config, load_settings
 
 logger = logging.getLogger("pricer.bridge")
 
 _HASH_REF_RE = __import__("re").compile(r"^[ef]\d+$|^f\d+e\d+$")
+
+_BACKENDS = ("camoufox", "playwright", "nodriver")
+_DEFAULT_BACKENDS = ("camoufox", "playwright", "nodriver")
+
+
+def resolve_backends(cfg: dict | None = None) -> list[str]:
+    """Ordered backend chain from settings.
+
+    ``browser.backend`` is the preferred/default backend (always first);
+    ``browser.backends`` is the full failover order. Unknown names are dropped
+    and the default set is always completed, so the result is never empty.
+    """
+    cfg = cfg if cfg is not None else load_settings()
+    browser = cfg.get("browser", {}) or {}
+    primary = browser.get("backend") or "camoufox"
+    chain = browser.get("backends") or list(_DEFAULT_BACKENDS)
+
+    out: list[str] = []
+    for b in chain:
+        if b in _BACKENDS and b not in out:
+            out.append(b)
+    if primary in _BACKENDS:
+        if primary in out:
+            out.remove(primary)
+        out.insert(0, primary)
+    for b in _DEFAULT_BACKENDS:
+        if b not in out:
+            out.append(b)
+    return out
 
 
 def _is_hash_ref(ref: str) -> bool:
@@ -118,64 +147,90 @@ class MCPBridge:
             else get_mcp_config("restart_after_timeouts", 2)
         )
         self._consecutive_timeouts = 0
+        self._backend: str | None = None
 
     async def start(self) -> bool:
         self._stopped = False
 
-        from src.config_loader import load_settings
-        pin = (load_settings(reload=True).get("deps", {}).get("playwright_mcp") or {}).get("version")
-        pw_pkg = f"@playwright/mcp@{pin}" if pin else "@playwright/mcp"
-        pw_args = [pw_pkg, "--browser", "chrome"]
-        if self._headless:
-            pw_args.append("--headless")
-        if os.path.exists(_STEALTH_JS):
-            pw_args.extend(["--init-script", _STEALTH_JS])
-        if os.path.exists(_MCP_CONFIG):
-            pw_args.extend(["--config", _MCP_CONFIG])
-        pw_args.extend(["--viewport-size", "1920x1080"])
-        pw_args.extend(["--timeout-action", "10000"])
-        pw_args.extend(["--timeout-navigation", "30000"])
-        pw = _ServerConnection("playwright", "npx.cmd", pw_args)
-        logger.info("MCP launch: %s %s (mode=%s)", pw_pkg, "--browser chrome",
+        backends = resolve_backends()
+        last_err: Exception | None = None
+        for backend in backends:
+            try:
+                if await self._start_one(backend):
+                    self._backend = backend
+                    logger.info("MCP bridge ready: backend=%s (%d tools)", backend, len(self._tool_map))
+                    return True
+            except Exception as e:
+                last_err = e
+                logger.error("Backend '%s' start raised: %s", backend, e)
+            logger.warning("Backend '%s' failed to start — trying next in chain: %s", backend, backends)
+            await self.stop()
+        if last_err:
+            logger.error("All backends failed to start (last error: %s)", last_err)
+        return False
+
+    def _build_server(self, backend: str) -> _ServerConnection | None:
+        if backend == "playwright":
+            pin = (load_settings().get("deps", {}).get("playwright_mcp") or {}).get("version")
+            pw_pkg = f"@playwright/mcp@{pin}" if pin else "@playwright/mcp"
+            pw_args = [pw_pkg, "--browser", "chrome"]
+            if self._headless:
+                pw_args.append("--headless")
+            if os.path.exists(_STEALTH_JS):
+                pw_args.extend(["--init-script", _STEALTH_JS])
+            if os.path.exists(_MCP_CONFIG):
+                pw_args.extend(["--config", _MCP_CONFIG])
+            pw_args.extend(["--viewport-size", "1920x1080"])
+            pw_args.extend(["--timeout-action", "10000"])
+            pw_args.extend(["--timeout-navigation", "30000"])
+            return _ServerConnection("playwright", "npx.cmd", pw_args)
+        if backend in ("camoufox", "nodriver"):
+            script = str(Path(__file__).resolve().parent.parent / "mcp_servers" / "browser_server.py")
+            args = [script, "--backend", backend]
+            if self._headless:
+                args.append("--headless")
+            return _ServerConnection(backend, sys.executable, args)
+        logger.error("Unknown browser backend: %s", backend)
+        return None
+
+    async def _start_one(self, backend: str) -> bool:
+        srv = self._build_server(backend)
+        if srv is None:
+            return False
+        logger.info("MCP launch: backend=%s command=%s %s (mode=%s)",
+                    backend, srv.command, " ".join(str(a) for a in srv.args[:6]),
                     "headless" if self._headless else "headed")
-
-        for srv in (pw,):
-            for attempt in range(2):
-                try:
-                    params = StdioServerParameters(
-                        command=srv.command, args=srv.args,
-                        env=os.environ.copy(),
-                    )
-                    srv.stdio_ctx = stdio_client(params)
-                    read, write = await srv.stdio_ctx.__aenter__()
-                    srv.session_ctx = ClientSession(read, write)
-                    srv.session = await srv.session_ctx.__aenter__()
-                    await asyncio.wait_for(srv.session.initialize(), timeout=15.0)
-                    resp = await srv.session.list_tools()
-                    srv.tools = resp.tools
-                    self._servers.append(srv)
-                    for t in resp.tools:
-                        self._tool_map[t.name] = srv
-                    logger.info("MCP server '%s' started: %d tools", srv.name, len(resp.tools))
-                    break
-                except Exception as e:
-                    logger.error("MCP server '%s' start failed (attempt %d): %s", srv.name, attempt + 1, e)
-                    await asyncio.sleep(2 if attempt == 0 else 0)
-                finally:
-                    if srv not in self._servers:
-                        for ctx_attr in ('session_ctx', 'stdio_ctx'):
-                            ctx = getattr(srv, ctx_attr, None)
-                            if ctx is not None:
-                                try:
-                                    await ctx.__aexit__(None, None, None)
-                                except Exception:
-                                    logger.warning("Failed to cleanup %s on %s", ctx_attr, srv)
-                                setattr(srv, ctx_attr, None)
-
-        if self._servers:
-            logger.info("MCP bridge ready: %d servers, %d total tools",
-                        len(self._servers), len(self._tool_map))
-            return True
+        for attempt in range(2):
+            try:
+                params = StdioServerParameters(
+                    command=srv.command, args=srv.args,
+                    env=os.environ.copy(),
+                )
+                srv.stdio_ctx = stdio_client(params)
+                read, write = await srv.stdio_ctx.__aenter__()
+                srv.session_ctx = ClientSession(read, write)
+                srv.session = await srv.session_ctx.__aenter__()
+                await asyncio.wait_for(srv.session.initialize(), timeout=30.0)
+                resp = await srv.session.list_tools()
+                srv.tools = resp.tools
+                self._servers.append(srv)
+                for t in resp.tools:
+                    self._tool_map[t.name] = srv
+                logger.info("MCP server '%s' started: %d tools", srv.name, len(resp.tools))
+                return True
+            except Exception as e:
+                logger.error("MCP server '%s' start failed (attempt %d): %s", srv.name, attempt + 1, e)
+                await asyncio.sleep(2 if attempt == 0 else 0)
+            finally:
+                if srv not in self._servers:
+                    for ctx_attr in ('session_ctx', 'stdio_ctx'):
+                        ctx = getattr(srv, ctx_attr, None)
+                        if ctx is not None:
+                            try:
+                                await ctx.__aexit__(None, None, None)
+                            except Exception:
+                                logger.warning("Failed to cleanup %s on %s", ctx_attr, srv)
+                            setattr(srv, ctx_attr, None)
         return False
 
     async def call_tool(self, tool_name: str, arguments: dict) -> str:
@@ -264,12 +319,15 @@ class MCPBridge:
                 try:
                     resp = await srv.session.list_tools()
                     for tool in resp.tools:
+                        schema = getattr(tool, "input_schema", None)
+                        if schema is None:
+                            schema = getattr(tool, "inputSchema", None)
                         all_tools.append({
                             "type": "function",
                             "function": {
                                 "name": tool.name,
                                 "description": tool.description or "",
-                                "parameters": tool.inputSchema if isinstance(tool.inputSchema, dict) else {"type": "object", "properties": {}},
+                                "parameters": schema if isinstance(schema, dict) else {"type": "object", "properties": {}},
                             }
                         })
                 except Exception as e:
