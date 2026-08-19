@@ -4,7 +4,7 @@ import pytest
 
 from src.approach_relevance import (
     tokenize, approach_relevant, product_name_matches, product_name_matches_ignore_brand,
-    missing_required_tokens,
+    missing_required_tokens, normalize_search_text,
 )
 
 
@@ -241,3 +241,27 @@ class TestGroovlockContextRule:
     def test_different_size_still_rejected(self):
         other = "Труба стальная водогазопроводная оцинкованная ⌀100х3"
         assert product_name_matches(self.VGP_SPEC, other) is False
+
+
+class TestNormalizeSearchText:
+    """Поисковый текст без контекстно-незначимых фраз (агент не ищет «грувлок»)."""
+
+    def test_strips_groovlock_phrase_when_base_present(self):
+        assert normalize_search_text(
+            "Труба стальная водогазопроводная оцинкованная на грувлоках ⌀150х4,5"
+        ) == "Труба стальная водогазопроводная оцинкованная ⌀150х4,5"
+
+    def test_no_double_spaces_after_removal(self):
+        assert "  " not in normalize_search_text(
+            "Труба стальная водогазопроводная оцинкованная на грувлоках ⌀150х4,5"
+        )
+
+    def test_keeps_text_without_rule(self):
+        assert normalize_search_text("Кран шаровой 1/2 ру 16") == "Кран шаровой 1/2 ру 16"
+
+    def test_keeps_groovlock_outside_context(self):
+        assert normalize_search_text("Труба на грувлоках ⌀150") == "Труба на грувлоках ⌀150"
+
+    def test_empty_and_none(self):
+        assert normalize_search_text("") == ""
+        assert normalize_search_text(None) is None

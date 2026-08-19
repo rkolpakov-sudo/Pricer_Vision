@@ -24,7 +24,7 @@ from src.rate_limiter import DomainRateLimiter
 from src.captcha_detector import CaptchaDetector, CaptchaType
 from src.approach_relevance import (
     approach_relevant, product_name_matches, product_name_matches_ignore_brand,
-    missing_required_tokens,
+    missing_required_tokens, normalize_search_text,
 )
 
 logger = logging.getLogger("pricer.agent")
@@ -368,6 +368,10 @@ async def process_row(
         return _result_to_schema(result)
 
     product_type = graph_engine.classify_product_type(spec_text)
+    search_text = normalize_search_text(spec_text)
+    if search_text != spec_text:
+        logger.info("Search text normalized: '%s' -> '%s' (незначимые фразы убраны из поиска)",
+                    spec_text[:60], search_text[:60])
     approaches = memory_manager.get_all_approaches(product_type) if product_type != UNKNOWN_PT else memory_manager.get_all_approaches_flat()
     confirmed_prices = [] if fresh else memory_manager.get_relevant_prices(spec_text)
 
@@ -441,7 +445,7 @@ async def process_row(
         except Exception:
             pass
 
-    context = _build_context(spec_text, product_type, approaches, confirmed_prices, sites, hints, product_data, site_guides, concepts, spec_meta)
+    context = _build_context(search_text, product_type, approaches, confirmed_prices, sites, hints, product_data, site_guides, concepts, spec_meta)
 
     mcp_tools = await mcp_bridge.list_tools()
     # Close previous page to avoid tab accumulation
@@ -531,7 +535,7 @@ async def process_row(
                 result["confidence"] = min(result.get("confidence", 0), 0.7)
                 result["requires_review"] = True
             if result.get("confidence", 0) >= CONF_GOOD and result.get("price") is not None:
-                _save_price_and_approach(memory_manager, spec_text, product_type, result, steps, record_soldat=True)
+                _save_price_and_approach(memory_manager, spec_text, product_type, result, steps, record_soldat=True, search_query=search_text)
             elapsed = (datetime.now() - start_time).total_seconds()
             logger.info("Row: price=%s conf=%.2f in %.1fs rounds=%d", result.get('price'), result.get('confidence', 0), elapsed, rounds)
             final = {"spec_text": spec_text, "product_type": product_type, **result, "elapsed": elapsed}
@@ -555,7 +559,7 @@ async def process_row(
             tool_args = tc.get("arguments", {})
 
             if tool_name in GRAPH_TOOL_NAMES:
-                result = _execute_graph_tool(tool_name, tool_args, graph_engine, memory_manager, spec_text=spec_text)
+                result = _execute_graph_tool(tool_name, tool_args, graph_engine, memory_manager, spec_text=search_text)
             elif tool_name in ("browser_navigate", "navigate"):
                 new_site = tool_args.get("url", "")
                 # Soft Yandex reminder: warn but do NOT block navigation
@@ -807,7 +811,7 @@ async def process_row(
                     elapsed = (datetime.now() - start_time).total_seconds()
                     logger.info("Row: price=%s validated=%.2f in %.1fs", validated['price'], validated['confidence'], elapsed)
                     try:
-                        _save_price_and_approach(memory_manager, spec_text, product_type, validated, steps, record_soldat=False)
+                        _save_price_and_approach(memory_manager, spec_text, product_type, validated, steps, record_soldat=False, search_query=search_text)
                     except Exception as e:
                         logger.warning("Failed to save price/approach in save_confirmed_price: %s", e)
                     try:
@@ -1210,11 +1214,12 @@ def _store_semantic_cache(semantic_cache, spec_text, result):
         logger.warning("Semantic cache store failed: %s", e)
 
 
-def _save_price_and_approach(memory_manager, spec_text, product_type, price_data, steps, record_soldat=False):
+def _save_price_and_approach(memory_manager, spec_text, product_type, price_data, steps, record_soldat=False, search_query=None):
     if _is_family_page(price_data.get("url", "")):
         logger.warning("⚠️ Skipping family-page price save: url=%s price=%.2f spec=%s",
                        price_data.get("url", ""), price_data["price"], spec_text[:50])
         return
+    query = (search_query or spec_text)[:200]
     memory_manager.save_price(
         spec_text=spec_text, product_type=product_type,
         site=price_data.get("site", ""), price=price_data["price"],
@@ -1227,9 +1232,9 @@ def _save_price_and_approach(memory_manager, spec_text, product_type, price_data
         saved_id = memory_manager.save_approach(
             product_type=product_type,
             site=price_data.get("site", ""),
-            concrete_steps=MemoryManager.clean_steps(steps) or [{"action": "search", "query": spec_text[:100]}],
+            concrete_steps=MemoryManager.clean_steps(steps) or [{"action": "search", "query": query[:100]}],
             method="browser_search",
-            search_query=spec_text[:200],
+            search_query=query,
             notes=f"price {price_data['price']} in {len(steps)} steps",
             param_slots={"product_name": {"type": "string", "description": "название товара из спецификации"}},
         )
