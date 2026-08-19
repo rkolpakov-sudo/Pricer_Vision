@@ -147,6 +147,28 @@ class TestGraphEngine:
         sites = graph_engine.get_sites_for_product("cables")
         assert any(s["id"] == "new-site.ru" for s in sites)
 
+    def test_set_site_priority_creates_new_site(self, graph_engine):
+        ok = graph_engine.set_product_site_priority("cables", "brand-new.example.com", 0)
+        assert ok is True
+        sites = graph_engine.get_sites_for_product("cables")
+        entry = next((s for s in sites if s["id"] == "brand-new.example.com"), None)
+        assert entry is not None
+        assert entry["priority"] == 0
+
+    def test_set_site_priority_updates_existing(self, graph_engine):
+        graph_engine.save_discovered_site("existing.ru", "Existing", "cables")
+        graph_engine.set_product_site_priority("cables", "existing.ru", 1)
+        sites = graph_engine.get_sites_for_product("cables")
+        entry = next((s for s in sites if s["id"] == "existing.ru"), None)
+        assert entry is not None
+        assert entry["priority"] == 1
+
+    def test_site_priority_persists_across_engine(self, graph_engine):
+        graph_engine.set_product_site_priority("cables", "persist.example.com", 2)
+        graph_engine._built = False
+        sites = graph_engine.get_sites_for_product("cables")
+        assert any(s["id"] == "persist.example.com" and s["priority"] == 2 for s in sites)
+
     def test_classify_product_type(self, graph_engine):
         assert graph_engine.classify_product_type("ВВГ-нг") == "unknown"
         graph_engine.save_product_type("cables", "Кабели", keywords="ВВГ, NYM, кабель")

@@ -855,15 +855,33 @@ class GraphEngine:
         self.build()
         with self._lock:
             self._conn.execute(
+                "INSERT OR IGNORE INTO product_types (id, name) VALUES (?, ?)",
+                (product_type_id, product_type_id)
+            )
+            self._conn.execute(
+                "INSERT OR IGNORE INTO sites (id, name, base_url, source) VALUES (?, ?, ?, 'manual')",
+                (site_id, site_id, f"https://{site_id}")
+            )
+            self._conn.execute(
                 "INSERT OR REPLACE INTO product_sites (product_type_id, site_id, priority) "
                 "VALUES (?, ?, ?)",
                 (product_type_id, site_id, priority)
             )
             self._conn.commit()
-            for s in self._product_sites.get(product_type_id, []):
+            self._all_sites.setdefault(site_id, {
+                "id": site_id, "name": site_id,
+                "base_url": f"https://{site_id}", "source": "manual",
+            })
+            sites = self._product_sites.setdefault(product_type_id, [])
+            for s in sites:
                 if s["id"] == site_id:
                     s["priority"] = priority
                     break
+            else:
+                sites.append({
+                    "id": site_id, "name": site_id,
+                    "base_url": f"https://{site_id}", "priority": priority,
+                })
         return True
 
     def delete_product_site(self, product_type_id: str, site_id: str) -> bool:
