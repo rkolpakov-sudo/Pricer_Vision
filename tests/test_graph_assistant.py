@@ -1,7 +1,8 @@
 import pytest
 from PySide6.QtWidgets import QApplication, QComboBox
+from types import SimpleNamespace
 
-from gui.graph_assistant import _combo_value
+from gui.graph_assistant import _combo_value, SitePage, CorrectionPage
 
 
 @pytest.fixture(scope="module")
@@ -41,3 +42,25 @@ class TestComboValue:
         cb = make_combo(qapp, [("abbro.ru", "abbro.ru")])
         cb.lineEdit().setText("")
         assert _combo_value(cb) == ""
+
+
+def make_panel(sites):
+    return SimpleNamespace(
+        mm=SimpleNamespace(get_all_sites=lambda: {s: {"name": s} for s in sites})
+    )
+
+
+class TestSitePageDefaultEmpty:
+    def test_add_site_combo_not_prefilled(self, qapp):
+        page = SitePage(make_panel(["abbro.ru", "santech.ru"]))
+        page.refresh_sites()
+        assert page.site_combo.currentIndex() == -1
+        assert page.site_combo.currentText() == ""
+        assert _combo_value(page.site_combo) == ""
+
+    def test_price_page_site_combo_not_prefilled(self, qapp):
+        page = CorrectionPage(make_panel(["abbro.ru", "santech.ru"]))
+        page.refresh_sites()
+        assert page.site_combo.currentIndex() == -1
+        assert page.site_combo.currentText() == ""
+        assert _combo_value(page.site_combo) == ""

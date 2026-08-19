@@ -36,7 +36,7 @@
   - `rate_limiter.py` — DomainRateLimiter: per-domain RPM лимит перед browser_navigate (Фаза 3).
   - `site_analyzer.py` — SiteAnalyzer: детекция SPA/SSR/антибота (Фаза 3).
   - `captcha_detector.py` — CaptchaDetector: типы captcha + рекомендации, без авторешения (Фаза 3).
-  - `mcp_bridge.py` — клиент Playwright MCP (`npx @playwright/mcp --browser chrome`), чтение пина версии из `config/settings.yaml → deps.playwright_mcp.version`, circuit breaker (`mcp_circuit`).
+  - `mcp_bridge.py` — мультибэкенд-клиент браузерной автоматизации: выбор бэкенда из `config/settings.yaml → browser.backend/backends` (`camoufox` по умолчанию, `playwright`, `nodriver`), автофейловер по цепочке, `mcp_circuit`. Python-бэкенды (`camoufox`/`nodriver`) запускаются через свой venv проекта (`mcp_servers/browser_server.py`), `playwright` — через `npx @playwright/mcp` (пин версии из `deps.playwright_mcp.version`).
   - `graph_engine.py` + `memory_manager.py` — граф знаний (SQLite `data/pricer.db`, seed из `config/categories_and_sites.yaml`).
   - `llm_client.py` — HTTP-клиент к локальному LLM (LM Studio/Ollama/llama.cpp), retry с backoff из `llm.retry`, per-call `temperature`/`max_tokens`.
   - `study_runner.py` — принудительное обучение (StudyRunner QThread).
@@ -47,8 +47,8 @@
   - `dependency_manager/` — инструмент «Зависимости» (Qt-free логика в `manager.py`/`npm.py`/`pypi.py`, UI в `dialog.py`). Проверка версий pip+npm и ревизии chromium (`BrowserInfo`) для `@playwright/mcp`.
   - `pdf_parser/` — парсер PDF (MinerU → fallback structurer, LLM отключён).
 - `gui/` — `graph_assistant.py` (панели: HelpPage, StudyPage, CRUD), `graph_explorer.py` (визуализация графа), `spinner_widget.py`.
-- `mcp_servers/` — MCP-серверы (patchright/pricer), **не используются**.
-- `config/` — YAML-конфиги, `stealth.js` (антидетект), `playwright-mcp.json`.
+- `mcp_servers/` — `browser_server.py` (MCP-сервер бэкендов camoufox/nodriver, используется), `pricer_server.py` (**не используется**).
+- `config/` — YAML-конфиги (`settings.yaml` → `browser.backend/backends`), `stealth.js` (антидетект), `playwright-mcp.json`.
 - `tests/` — pytest. Qt-свободная логика покрыта юнит-тестами (`test_dependency_manager.py`, `test_graph_engine.py`, `test_tool_parser.py` и др.).
 
 ## Соглашения

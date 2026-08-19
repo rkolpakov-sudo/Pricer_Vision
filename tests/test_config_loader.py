@@ -76,6 +76,15 @@ class TestSave:
         assert written["browser"]["headless"] is True
         assert cl.load_settings()["browser"]["headless"] is True
 
+    def test_save_browser_backend(self, tmp_path, monkeypatch):
+        target = tmp_path / "config" / "settings.yaml"
+        target.parent.mkdir(parents=True)
+        _redirect_config(tmp_path, monkeypatch, {"browser": {"backend": "camoufox"}})
+        cl.save_browser_backend("nodriver")
+        written = yaml.safe_load(target.read_text(encoding="utf-8"))
+        assert written["browser"]["backend"] == "nodriver"
+        assert cl.load_settings()["browser"]["backend"] == "nodriver"
+
     def test_save_fresh(self, tmp_path, monkeypatch):
         target = tmp_path / "config" / "settings.yaml"
         target.parent.mkdir(parents=True)

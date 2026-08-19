@@ -21,9 +21,12 @@
 - Graph tools выполняются локально
 
 ### MCP Bridge
-- `src/mcp_bridge.py` — обёртка над MCP протоколом (mcp SDK), управляет одним MCP сервером
-- Сервер: `playwright` — `npx.cmd @playwright/mcp` (23 инструмента: browser automation via Playwright MCP)
-- `start()`: 2 попытки на сервер, задержка 2с между retry
+- `src/mcp_bridge.py` — обёртка над MCP протоколом (mcp SDK), управляет одним выбранным MCP-сервером (браузерный бэкенд)
+- Бэкенды (из `config/settings.yaml → browser.backend/backends`, переключаются в GUI главного окна):
+  - `camoufox` (по умолчанию) — антидетект Firefox-fork, подмена отпечатка на уровне C++, реальные пресеты; запускается своим venv проекта через `mcp_servers/browser_server.py`
+  - `playwright` — `npx.cmd @playwright/mcp` (23 инструмента: browser automation via Playwright MCP)
+  - `nodriver` — CDP-драйвер реального Chrome (третий запасной)
+- `start()`: перебор цепочки бэкендов (автофейловер), 2 попытки на сервер, задержка 2с между retry
 - `list_tools()` — возвращает tools с сервера
 - `call_tool()` — роутит по `_tool_map[name]` к нужному серверу
 - Health check через `session.send_ping()` на каждом сервере
@@ -98,8 +101,8 @@ C:\Projects\Pricer_Vision\
 │   └── spinner_widget.py        # Spinner
 ├── mcp_servers/
 │   ├── __init__.py
-│   ├── pricer_server.py         # MCP сервер (DrissionPage, не используется)
-│   └── patchright_server.py     # MCP сервер (patchright, не используется)
+│   ├── browser_server.py          # MCP сервер бэкендов camoufox/nodriver (используется)
+│   └── pricer_server.py           # MCP сервер (DrissionPage, не используется)
 ├── src/
 │   ├── pdf_parser/              # Парсер PDF (MinerU → fallback structurer, LLM-опция)
 │   │   ├── mineru_backend.py    #   subprocess MinerU 3.4 в изолированном Python 3.11
@@ -119,7 +122,7 @@ C:\Projects\Pricer_Vision\
 │   ├── learning_loop.py         # LearningLoop — автообучение из результатов прогона (Фаза 4)
 │   ├── llm_client.py            # HTTP клиент для LM Studio (+ retry с backoff из llm.retry, per-call temperature/max_tokens)
 │   ├── mcp_agent_runner.py      # QThread обёртка (+ AuditLogger, TaskScheduler, SemanticCache, LearningLoop)
-│   ├── mcp_bridge.py            # MCP клиент (Playwright @playwright/mcp, ref→target, mcp_circuit)
+│   ├── mcp_bridge.py            # MCP клиент (мультибэкенд camoufox/playwright/nodriver, ref→target, mcp_circuit)
 │   ├── memory_manager.py        # CRUD графа (+ intent, dedup, SOLD_AT, HintManager, ApproachVersioning)
 │   ├── models/                  # Pydantic-схемы (Фаза 1)
 │   │   └── schemas.py           #   ExtractionResult, AgentDecision, ExtractedPrice, ActionType

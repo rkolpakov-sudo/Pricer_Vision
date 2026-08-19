@@ -57,6 +57,7 @@ class MCPAgentRunner(QThread):
         self._stop_event = threading.Event()
         self._restart_bridge = threading.Event()
         self._restart_bridge_value = None
+        self._restart_bridge_backend_value = None
         self._llm_times = []
         self._cache_hits = 0
         self._stuck_events = 0
@@ -145,14 +146,23 @@ class MCPAgentRunner(QThread):
             negative_cache = NegativeCache()
             for i, spec in enumerate(ordered):
                 if self._restart_bridge.is_set():
-                    new_headless = self._restart_bridge_value
                     self._restart_bridge.clear()
+                    new_headless = self._restart_bridge_value
+                    new_backend = self._restart_bridge_backend_value
                     self._restart_bridge_value = None
-                    logger.info("Restarting bridge with headless=%s due to toggle", new_headless)
-                    try:
-                        await asyncio.wait_for(bridge.set_headless(new_headless), timeout=20.0)
-                    except Exception:
-                        logger.warning("Bridge restart for headless toggle failed")
+                    self._restart_bridge_backend_value = None
+                    if new_backend:
+                        logger.info("Restarting bridge with backend=%s", new_backend)
+                        try:
+                            await asyncio.wait_for(bridge.set_backend(new_backend), timeout=20.0)
+                        except Exception:
+                            logger.warning("Bridge restart for backend toggle failed")
+                    if new_headless is not None:
+                        logger.info("Restarting bridge with headless=%s", new_headless)
+                        try:
+                            await asyncio.wait_for(bridge.set_headless(new_headless), timeout=20.0)
+                        except Exception:
+                            logger.warning("Bridge restart for headless toggle failed")
                 if self._stop_event.is_set():
                     self.status_signal.emit("stop")
                     self.monitor_signal.emit({"type": "stop"})
@@ -312,6 +322,10 @@ class MCPAgentRunner(QThread):
 
     def trigger_bridge_restart(self, headless: bool):
         self._restart_bridge_value = headless
+        self._restart_bridge.set()
+
+    def trigger_bridge_backend_restart(self, backend: str):
+        self._restart_bridge_backend_value = backend
         self._restart_bridge.set()
 
     def set_fresh(self, fresh: bool):

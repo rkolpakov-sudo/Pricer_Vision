@@ -2,7 +2,7 @@ import asyncio
 from types import SimpleNamespace
 from unittest.mock import patch, AsyncMock
 import pytest
-from src.mcp_bridge import MCPBridge, _sanitize_js, _is_url
+from src.mcp_bridge import MCPBridge, _sanitize_js, _is_url, resolve_backends
 from src.resilience import mcp_circuit
 
 
@@ -87,6 +87,38 @@ class TestMCPBridge:
         bridge = MCPBridge()
         ok = await bridge.start()
         assert isinstance(ok, bool)
+
+    @pytest.mark.asyncio
+    async def test_set_backend_unknown_rejected(self):
+        bridge = MCPBridge()
+        assert await bridge.set_backend("bogus") is False
+
+    @pytest.mark.asyncio
+    async def test_set_backend_valid_sets_override(self):
+        bridge = MCPBridge()
+        assert await bridge.set_backend("nodriver") is True
+        assert bridge._backend_override == "nodriver"
+
+    @pytest.mark.asyncio
+    async def test_start_resets_stopped_after_failover(self, monkeypatch):
+        bridge = MCPBridge()
+
+        async def fake_start_one(backend):
+            if backend == "camoufox":
+                return False
+            srv = SimpleNamespace(session=object(), tools=[], name=backend)
+            bridge._servers.append(srv)
+            bridge._tool_map["browser_navigate"] = srv
+            return True
+
+        monkeypatch.setattr(bridge, "_start_one", fake_start_one)
+        monkeypatch.setattr("src.mcp_bridge.resolve_backends",
+                            lambda: ["camoufox", "playwright", "nodriver"])
+        ok = await bridge.start()
+        assert ok is True
+        assert bridge._backend == "playwright"
+        assert bridge._stopped is False
+        assert "browser_navigate" in bridge._tool_map
 
 
 @pytest.mark.asyncio

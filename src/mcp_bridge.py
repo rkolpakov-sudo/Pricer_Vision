@@ -148,16 +148,21 @@ class MCPBridge:
         )
         self._consecutive_timeouts = 0
         self._backend: str | None = None
+        self._backend_override: str | None = None
 
     async def start(self) -> bool:
         self._stopped = False
 
         backends = resolve_backends()
+        if self._backend_override and self._backend_override in _BACKENDS:
+            backends = [self._backend_override,
+                        *[b for b in backends if b != self._backend_override]]
         last_err: Exception | None = None
         for backend in backends:
             try:
                 if await self._start_one(backend):
                     self._backend = backend
+                    self._stopped = False
                     logger.info("MCP bridge ready: backend=%s (%d tools)", backend, len(self._tool_map))
                     return True
             except Exception as e:
@@ -186,10 +191,15 @@ class MCPBridge:
             return _ServerConnection("playwright", "npx.cmd", pw_args)
         if backend in ("camoufox", "nodriver"):
             script = str(Path(__file__).resolve().parent.parent / "mcp_servers" / "browser_server.py")
+            # Запускать сервер СВОИМ venv проекта, а не интерпретатором, которым запущено
+            # приложение (sys.executable может указывать на чужой venv и не содержать
+            # camoufox/nodriver/нужной версии mcp).
+            own_venv = Path(__file__).resolve().parent.parent / "venv" / "Scripts" / "python.exe"
+            interpreter = str(own_venv) if own_venv.exists() else sys.executable
             args = [script, "--backend", backend]
             if self._headless:
                 args.append("--headless")
-            return _ServerConnection(backend, sys.executable, args)
+            return _ServerConnection(backend, interpreter, args)
         logger.error("Unknown browser backend: %s", backend)
         return None
 
@@ -361,6 +371,14 @@ class MCPBridge:
 
     async def set_headless(self, headless: bool) -> bool:
         self._headless = headless
+        return await self.restart()
+
+    async def set_backend(self, backend: str) -> bool:
+        """Switch browser backend at runtime and restart the bridge."""
+        if backend not in _BACKENDS:
+            logger.warning("Ignoring unknown backend '%s'", backend)
+            return False
+        self._backend_override = backend
         return await self.restart()
 
     async def stop(self):

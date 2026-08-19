@@ -41,11 +41,41 @@ async def _handle_call_tool(ctx, params) -> types.CallToolResult:
     return types.CallToolResult(content=[types.TextContent(type="text", text=result)])
 
 
-server = Server(
-    "pricer-browser",
-    on_list_tools=_handle_list_tools,
-    on_call_tool=_handle_call_tool,
-)
+async def _handle_call_tool_v1(name: str, arguments: dict) -> list[types.TextContent]:
+    if _driver._browser is None:
+        await _driver.start()
+    result = await _dispatch(name, arguments or {})
+    return [types.TextContent(type="text", text=result)]
+
+
+def _build_server():
+    """Create the lowlevel MCP server.
+
+    mcp >= 2.0 accepts on_list_tools/on_call_tool in the constructor; older mcp
+    (1.x, e.g. 1.28.1) registers handlers via decorators. Support both so the
+    server runs under whatever venv launches it.
+    """
+    try:
+        return Server(
+            "pricer-browser",
+            on_list_tools=_handle_list_tools,
+            on_call_tool=_handle_call_tool,
+        )
+    except TypeError:
+        srv = Server("pricer-browser")
+
+        @srv.list_tools()
+        async def _list_tools_v1():
+            return TOOL_DEFS
+
+        @srv.call_tool(validate_input=False)
+        async def _call_tool_v1(name: str, arguments: dict):
+            return await _handle_call_tool_v1(name, arguments)
+
+        return srv
+
+
+server = _build_server()
 
 _DOM_SCAN_SCRIPT = """
 (() => {

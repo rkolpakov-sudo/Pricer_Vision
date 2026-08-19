@@ -1,9 +1,11 @@
 # SPEC-005: Pricer_Vision v31.0 — MCP-Agent + GraphDB Architecture
 
 **Version:** 31.0 (MCP-Agent Pipeline)
-**Browser:** @playwright/mcp (23 tools, Playwright MCP over stdio)
+**Browser:** мультибэкенд — `camoufox` (по умолчанию, антидетект Firefox-fork), `playwright` (@playwright/mcp, 23 tools), `nodriver` (CDP Chrome). Выбор в `config/settings.yaml → browser.backend/backends` и в GUI главного окна.
 **LLM Strategy:** Agent-based — LLM autonomously navigates sites using MCP tools + graph memory
 **Status:** Implementation — Stable (76-88% success)
+
+> **2026-08-19 update (актуально):** `mcp_bridge.py` стал мультибэкендным. `camoufox` — дефолт: Firefox-форк с C++-уровневой подменой отпечатка и реальными пресетами, обходит hcheck/Qrator там, где Chrome-отпечаток блокируется. Python-бэкенды (`camoufox`/`nodriver`) запускаются через свой venv проекта (`mcp_servers/browser_server.py`), совместимы с mcp 1.x и 2.x. `mcp_servers/patchright_server.py` удалён (несовместим с mcp 2.0, заменён `browser_server.py`).
 
 ---
 
@@ -210,8 +212,8 @@ Graph Engine:
 |-----------|---------|
 | `@playwright/mcp` вместо nodriver | Playwright MCP — 23 production-grade tools |
 | `config/stealth.js` — 12 патчей | Anti-detection при переходе от nodriver |
-| `mcp_bridge.py` — один сервер (playwright) | Pricer/DrissionPage сервер удалён |
-| `patchright_server.py` — не используется | Замена @playwright/mcp отменена (регрессия) |
+| `mcp_bridge.py` — мультибэкенд (camoufox/playwright/nodriver) | Pricer/DrissionPage сервер удалён; антидетект через camoufox |
+| `patchright_server.py` — удалён (2026-08-19) | Замена @playwright/mcp отменена; несовместим с mcp 2.0; вместо него `browser_server.py` |
 | Tool routing: 3 ветки вместо 1 | Yandex Rule 12 guard сломал routing |
 | `MAX_ROUNDS=50` (из settings.yaml) | 40 не хватало |
 | `format_steps()` показывает URL | Подходы в контексте показывали пустые `[]` |

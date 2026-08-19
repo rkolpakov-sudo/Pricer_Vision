@@ -2203,3 +2203,62 @@ SemCache — всего 18.
   в двух других местах site_combo (поиск подходов, добавление цены) и в esolve_pt.
 - Тесты: 	ests/test_graph_assistant.py +4 (TestComboValue).
 - pytest -q: 687 passed.
+
+
+## 2026-08-19 — GUI-переключатель бэкенда браузера
+- В главном окне (main.py) рядом с «🕶️ Headless» добавлен QComboBox «Camoufox (антидетект) / Playwright MCP / Nodriver»,
+  инициализируется из settings browser.backend.
+- При выборе: save_browser_backend (config_loader) + 	rigger_bridge_backend_restart (рестарт bridge между строками).
+- MCPBridge: добавлен set_backend(backend) + _backend_override (override имеет приоритет над цепочкой из настроек).
+- Runner: 	rigger_bridge_backend_restart + обработка рестарта по backend в цикле.
+- Заодно исправлена случайная порча save_browser_headless (.parent на строке -> на Path) в этой же правке.
+- Тесты: +test_save_browser_backend (config_loader), +2 set_backend (mcp_bridge).
+- pytest -q: 690 passed.
+
+
+## 2026-08-19 — Контекстные правила: почему «не сохранялись»
+- Проверено: механизм сохранения рабочий (полный цикл диалог->файл->перезагрузка->новый диалог + тест записи
+  в реальный config/matching_rules.yaml с бэкапом).
+- Реальные причины потери данных (бесшумные):
+  1. Нажата «Проверить», а не «Сохранить» — «Проверить» применяет правки только к сессии (в память),
+     в файл не пишет; после перезапуска правки исчезают.
+  2. Неполная строка контекста: _collect() в rules_editor отбрасывал строку с пустым «Базовым наименованием»
+     без предупреждения.
+- Фикс (gui/rules_editor.py): _incomplete_context_rows() + после сохранения повторное чтение файла
+  (проверка числа context-правил) + предупреждение в статусе о пропущенных неполных строках.
+- Тесты: tests/test_rules_editor.py +3 (валидная строка сохраняется, неполная помечается, не ломает валидную).
+- pytest -q: 693 passed.
+
+
+## 2026-08-19 — Ассистент: поле добавления сайта больше не предзаполнено abbro.ru
+- Причина: efresh_sites() в SitePage (и CorrectionPage) заполнял editable-комбобокс сайтами и оставлял
+  выбранным первый по алфавиту (abbro.ru). При нажатии «+» без ввода привязывался дефолтный сайт.
+- Фикс (gui/graph_assistant.py): после заполнения setCurrentIndex(-1) + clearEditText() —
+  поле пустое, _add_site требует явный выбор/ввод («Введите или выберите сайт»).
+  Применено к SitePage (добавление сайта) и CorrectionPage (добавление цены).
+- SearchPage/ApproachPage фильтры не тронуты — там первым идёт «(все)».
+- Тесты: tests/test_graph_assistant.py +2 (SitePage и CorrectionPage combo пуст по умолчанию).
+- pytest -q: 695 passed.
+
+
+## 2026-08-19 — Критический фикс: агент не работал с новым MCP (MCP=0, браузер не открывался)
+### Симптомы из лога пользователя
+- Tools: MCP=0, graph=7 — LLM не получал browser-инструментов, агент зацикливался.
+- camoufox-бэкенд падал: MCP server 'camoufox' start failed ... Connection closed.
+
+### Корневые причины (2 бага)
+1. src/mcp_bridge.py start(): при фейловере между бэкендами вызывался stop() (ставит _stopped=True),
+   и после успешного старта следующего бэкенда _stopped НЕ сбрасывался → list_tools() сразу возвращал [] →
+   LLM видел 0 browser-инструментов. Фикс: self._stopped = False перед eturn True.
+2. _build_server запускал python-сервер через sys.executable. Если приложение запущено под чужим/другим venv
+   (в логе был C:\Projects\Pricer\venv — mcp 1.28.1, без camoufox), сервер падал.
+   Фикс: запускать сервер СВОИМ venv проекта Pricer_Vision\venv\Scripts\python.exe (fallback sys.executable),
+   а не интерпретатором приложения. Также убран дубль интерпретатора в args.
+3. mcp_servers/browser_server.py: совместимость с mcp 1.x (декораторы list_tools/call_tool) и 2.x
+   (конструктор on_list_tools/on_call_tool) — _build_server() с try/except TypeError.
+
+### Проверка
+- Полный E2E под проблемным интерпретатором (C:\Projects\Pricer\venv): backend=camoufox, stopped=False,
+  tools=23, navigate santech.ru OK (сервер запускался своим venv проекта).
+- pytest -q: 696 passed (добавлен тест test_start_resets_stopped_after_failover).
+- camoufox временно ставился в чужой venv для диагностики — удалён.

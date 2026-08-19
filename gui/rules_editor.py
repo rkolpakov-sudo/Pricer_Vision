@@ -234,8 +234,20 @@ class RulesEditorDialog(QDialog):
         self._fill_pairs(self.context_table, [(c.get("base", ""), c.get("drop", "")) for c in ctx])
 
     # ── actions ──────────────────────────────────────────────────
-    def _apply_tables(self):
-        ar.set_rules(self._collect())
+    def _apply_tables(self, collected: dict | None = None):
+        ar.set_rules(collected if collected is not None else self._collect())
+
+    def _incomplete_context_rows(self) -> list[str]:
+        """Контекстные строки, которые не будут сохранены (пустое base или drop)."""
+        rows = []
+        for r in range(self.context_table.rowCount()):
+            a = (self.context_table.item(r, 0).text() if self.context_table.item(r, 0) else "").strip()
+            b = (self.context_table.item(r, 1).text() if self.context_table.item(r, 1) else "").strip()
+            if a and not b:
+                rows.append(f"строка {r + 1}: есть «Базовое наименование», нет «Незначимой фразы»")
+            elif b and not a:
+                rows.append(f"строка {r + 1}: есть «Незначимая фраза», нет «Базового наименования»")
+        return rows
 
     def _on_check(self):
         self._apply_tables()
@@ -255,14 +267,24 @@ class RulesEditorDialog(QDialog):
             self.check_result.setStyleSheet("color: #f44336; font-weight: bold;")
 
     def _on_save(self):
-        self._apply_tables()
+        collected = self._collect()
+        ctx_count = len(collected.get("context_insignificant") or [])
+        self._apply_tables(collected)
         try:
             path = ar.save_rules()
         except Exception as e:
             logger.exception("Failed to save matching rules")
             self.status_label.setText(f"Не удалось сохранить: {e}")
             return
-        self.status_label.setText(f"Сохранено: {path}")
+        msg = f"Сохранено: {path}"
+        reloaded = ar.load_rules(path)
+        ctx_reloaded = len(reloaded.get("context_insignificant") or [])
+        if ctx_reloaded != ctx_count:
+            msg += f"\n⚠️ Ошибка: контекстных правил в файле {ctx_reloaded}, в таблице {ctx_count}"
+        incomplete = self._incomplete_context_rows()
+        if incomplete:
+            msg += "\n⚠️ Пропущено неполных строк контекста: " + "; ".join(incomplete)
+        self.status_label.setText(msg)
 
     def _on_reload(self):
         self._rules = copy.deepcopy(ar.load_rules())

@@ -516,6 +516,9 @@ class CorrectionPage(QWidget):
         for sid, sdata in sorted(all_sites.items()):
             name = sdata.get("name", sid)
             self.site_combo.addItem(name, sid)
+        # Поле сайта при добавлении цены должно быть пустым, а не предвыбранным.
+        self.site_combo.setCurrentIndex(-1)
+        self.site_combo.clearEditText()
 
     def _save(self):
         mm = self._panel.mm
@@ -831,6 +834,10 @@ class SitePage(QWidget):
         for sid, sdata in sorted(all_sites.items()):
             name = sdata.get("name", sid)
             self.site_combo.addItem(name, sid)
+        # Не предвыбирать первый сайт: поле добавления должно быть пустым,
+        # чтобы нельзя было случайно привязать сайт по умолчанию (напр. abbro.ru).
+        self.site_combo.setCurrentIndex(-1)
+        self.site_combo.clearEditText()
 
     def _load(self):
         if self._panel.engine is None:

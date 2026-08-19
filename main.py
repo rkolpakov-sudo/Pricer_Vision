@@ -237,6 +237,17 @@ class MainWindow(QMainWindow):
         self.headless_cb.toggled.connect(self._on_headless_toggle)
         top_bar.addWidget(self.headless_cb)
 
+        self.backend_combo = QComboBox()
+        self.backend_combo.setToolTip("Браузерный движок для агента: антидетект Camoufox, Playwright MCP или Nodriver")
+        self.backend_combo.addItem("Camoufox (антидетект)", "camoufox")
+        self.backend_combo.addItem("Playwright MCP", "playwright")
+        self.backend_combo.addItem("Nodriver", "nodriver")
+        current_backend = load_settings().get("browser", {}).get("backend", "camoufox")
+        bi = self.backend_combo.findData(current_backend)
+        self.backend_combo.setCurrentIndex(bi if bi >= 0 else 0)
+        self.backend_combo.currentIndexChanged.connect(self._on_backend_change)
+        top_bar.addWidget(self.backend_combo)
+
         self.fresh_cb = QCheckBox("Не учитывать кэш цен")
         self.fresh_cb.setToolTip("Не использовать ранее сохранённые цены")
         from src.config_loader import get_run_config
@@ -949,6 +960,16 @@ class MainWindow(QMainWindow):
         if self._processing_active and hasattr(self, '_runner') and self._runner:
             self._runner.trigger_bridge_restart(checked)
             self.add_log("INFO", "control", f"Bridge restarting with headless={checked}")
+
+    def _on_backend_change(self, index):
+        backend = self.backend_combo.itemData(index)
+        if not backend:
+            return
+        from src.config_loader import save_browser_backend
+        save_browser_backend(backend)
+        if self._processing_active and hasattr(self, '_runner') and self._runner:
+            self._runner.trigger_bridge_backend_restart(backend)
+            self.add_log("INFO", "control", f"Bridge restarting with backend={backend}")
 
     def _on_fresh_toggle(self, checked):
         from src.config_loader import save_fresh

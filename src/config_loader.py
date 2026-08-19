@@ -62,6 +62,15 @@ def save_browser_headless(headless: bool):
     global _SETTINGS_CACHE
     _SETTINGS_CACHE = cfg
 
+def save_browser_backend(backend: str):
+    cfg = load_settings()
+    cfg.setdefault("browser", {})["backend"] = backend
+    path = Path(os.path.dirname(os.path.abspath(__file__))).parent / "config" / "settings.yaml"
+    with open(path, "w", encoding="utf-8") as f:
+        yaml.dump(cfg, f, default_flow_style=False, allow_unicode=True)
+    global _SETTINGS_CACHE
+    _SETTINGS_CACHE = cfg
+
 def save_fresh(fresh: bool):
     cfg = load_settings()
     cfg.setdefault("run", {})["fresh"] = fresh
