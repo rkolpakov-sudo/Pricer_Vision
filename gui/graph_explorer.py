@@ -794,7 +794,10 @@ class GraphExplorerWidget(QWidget):
                 for a in approaches:
                     pid = a.get("product_type_id", "")
                     sid = a.get("site_id", "")
-                    if pid in all_products and sid in all_sites:
+                    # APPROACH-ребро показываем ТОЛЬКО если сайт реально зарегистрирован
+                    # для этого товара (HAS_SITE). Иначе устаревшие подходы из БД рисуют
+                    # сиротские сайты, не связанные с товаром.
+                    if pid in all_products and sid in all_sites and G.has_edge(pid, sid):
                         G.add_edge(pid, sid, relation="APPROACH")
 
             if show_price:
