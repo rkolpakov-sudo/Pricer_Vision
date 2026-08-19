@@ -43,6 +43,23 @@ def _msg(parent, text: str):
     QMessageBox.information(parent, "Готово", text)
 
 
+def _combo_value(combo) -> str:
+    """Value of an editable QComboBox.
+
+    In an editable combo `currentData()` keeps returning the previously selected
+    item's data while the user is typing new text, so `data or text` silently uses
+    the stale value. Only trust the item data when the current text matches the
+    current item's display text; otherwise use what the user typed.
+    """
+    text = combo.currentText().strip()
+    idx = combo.currentIndex()
+    if idx >= 0 and combo.itemText(idx) == text:
+        data = combo.itemData(idx)
+        if data is not None and str(data):
+            return str(data)
+    return text
+
+
 # ═══════════════════════════════════════════════
 # SearchPage — поиск подходов
 # ═══════════════════════════════════════════════
@@ -136,7 +153,7 @@ class SearchPage(QWidget):
     def _search(self):
         mm = self._panel.mm
         pt = self._panel.resolve_pt(self.product_combo)
-        site = str(self.site_combo.currentData() or self.site_combo.currentText().strip() or "")
+        site = _combo_value(self.site_combo)
         if not pt and not site:
             self.result_text.setText("Укажите тип товара или сайт")
             return
@@ -504,7 +521,7 @@ class CorrectionPage(QWidget):
         mm = self._panel.mm
         pt = self._panel.resolve_pt(self.product_combo)
         spec = self.spec_input.text().strip()
-        site = str(self.site_combo.currentData() or self.site_combo.currentText().strip())
+        site = _combo_value(self.site_combo)
         price = self.price_input.value()
         url = self.url_input.text().strip()
         conf = self.confidence_input.value()
@@ -838,7 +855,7 @@ class SitePage(QWidget):
         if not pid:
             self.status_label.setText("Сначала выберите тип товара")
             return
-        sid = self.site_combo.currentData() or self.site_combo.currentText().strip()
+        sid = _combo_value(self.site_combo)
         if not sid:
             self.status_label.setText("Введите или выберите сайт")
             return
@@ -1939,16 +1956,13 @@ class AssistantToolPanel(QWidget):
 
     def resolve_pt(self, combo: QComboBox) -> str:
         """Get product type ID from editable combo, resolve typed Russian name."""
-        data = combo.currentData()
-        if data:
-            return str(data)
-        text = combo.currentText().strip()
-        if not text:
+        val = _combo_value(combo)
+        if not val:
             return ""
         for i in range(combo.count()):
-            if text.lower() in combo.itemText(i).lower():
+            if val.lower() in combo.itemText(i).lower():
                 return str(combo.itemData(i) or "")
-        return text
+        return val
 
     def _switch(self, row):
         if 0 <= row < len(self._pages):

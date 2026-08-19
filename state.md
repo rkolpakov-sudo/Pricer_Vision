@@ -2192,3 +2192,14 @@ SemCache — всего 18.
   обновление индексов _all_sites и _product_sites (добавление нового сайта).
 - Тесты: 	ests/test_graph_engine.py +3 (создание нового сайта, обновление приоритета, персистентность).
 - pytest -q: 683 passed (680 + 3).
+
+
+## 2026-08-19 — Фикс: Ассистент добавлял abbro.ru вместо введённого сайта
+- Причина: в editable QComboBox currentData() возвращает данные предыдущего выбранного пункта,
+  даже когда пользователь ввёл произвольный текст. _add_site использовал currentData() or currentText()
+  -> при вводе «moy-site.ru» при дефолтном выборе abbro.ru привязывался abbro.ru.
+- Фикс: хелпер _combo_value(combo) (gui/graph_assistant.py) — берёт data пункта ТОЛЬКО если текущий текст
+  совпадает с display-текстом выбранного пункта, иначе — введённый текст. Применён в SitePage._add_site,
+  в двух других местах site_combo (поиск подходов, добавление цены) и в esolve_pt.
+- Тесты: 	ests/test_graph_assistant.py +4 (TestComboValue).
+- pytest -q: 687 passed.
