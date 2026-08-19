@@ -312,7 +312,7 @@ class MainWindow(QMainWindow):
             "#", "Спецификация", "Тип", "Цена", "Уверенность", "Время", "Сайт", "URL", "Обучение"
         ])
         self.results_table.setColumnWidth(0, 30)
-        self.results_table.setColumnWidth(1, 200)
+        self.results_table.setColumnWidth(1, 400)
         self.results_table.setColumnWidth(2, 80)
         self.results_table.setColumnWidth(3, 90)
         self.results_table.setColumnWidth(4, 80)
@@ -320,6 +320,7 @@ class MainWindow(QMainWindow):
         self.results_table.setColumnWidth(6, 110)
         self.results_table.horizontalHeader().setSectionResizeMode(7, QHeaderView.Stretch)
         self.results_table.setColumnWidth(8, 110)
+        self.results_table.setWordWrap(True)
         self.results_table.verticalHeader().setDefaultSectionSize(30)
         self.results_table.setAlternatingRowColors(True)
         self.results_table.itemDoubleClicked.connect(self._on_url_double_click)
@@ -694,7 +695,7 @@ class MainWindow(QMainWindow):
         elapsed_text = f"{elapsed:.0f}с" if elapsed is not None else "—"
         site = result.get("site", "")
         url = result.get("url", "")
-        spec = result.get("spec_text", "")[:60]
+        spec = result.get("spec_text", "")
         pt = result.get("product_type", "")
         error = result.get("error", "")
         brand_mismatch = result.get("brand_mismatch", False)
@@ -706,6 +707,8 @@ class MainWindow(QMainWindow):
         t = TOKENS.get(self._current_theme, TOKENS[Theme.DARK])
         for c, text in enumerate(items):
             item = QTableWidgetItem(text)
+            if c == 1 and spec:
+                item.setToolTip(spec)
             if error:
                 item.setForeground(QColor(t["danger"]))
             elif brand_mismatch:

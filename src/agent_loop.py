@@ -11,7 +11,7 @@ from urllib.parse import urlparse
 
 from src.llm_client import LLMClient
 from src.tool_parser import parse_tool_calls, parse_final_response, parse_text_tools, parse_text_result
-from src.mcp_bridge import MCPBridge
+from src.mcp_bridge import MCPBridge, _is_hash_ref
 from src.graph_engine import GraphEngine
 from src.memory_manager import MemoryManager
 from src.validator import validate_result
@@ -226,7 +226,7 @@ def format_steps(concrete: list[dict]) -> str:
     for s in concrete[:5]:
         intent = s.get("intent") or s.get("action", "?")
         emoji = INTENT_EMOJI.get(intent, "•")
-        target = s.get("url") or s.get("target") or s.get("element") or ""
+        target = s.get("url") or _portable_step_target(s)
         desc = f"{emoji} {intent}"
         if target and len(target) < 60:
             desc += f"[{target}]"
@@ -239,13 +239,31 @@ def format_steps_detailed(concrete: list[dict]) -> str:
     for i, s in enumerate(concrete[:5], 1):
         action = s.get("action", s.get("intent", "?"))
         parts = [action]
-        for k in ("url", "text", "target", "element", "key", "js_summary"):
+        for k in ("url", "text", "key", "js_summary"):
             v = s.get(k)
             if v:
                 val = str(v)[:80]
                 parts.append(f"{k}={val}")
+        portable = _portable_step_target(s)
+        if portable:
+            parts.append(f"target={portable}")
         lines.append(f"      {i}. {' '.join(parts)}")
     return "\n".join(lines)
+
+
+def _portable_step_target(step: dict) -> str:
+    """Портабельный локатор шага подхода для показа LLM.
+
+    Playwright-рефы (e82, f2e17) — внутренние идентификаторы accessibility-дерева,
+    они зависят от сессии и БЭКЕНДА: подход, сохранённый под Playwright, содержит
+    ref `e82`, который в Camoufox не существует (другой ref-генератор). Поэтому
+    для шагов click/type показываем element (роль/описание) или text — то, что
+    переносимо между бэкендами.
+    """
+    ref = str(step.get("target") or step.get("ref") or "")
+    if ref and not _is_hash_ref(ref):
+        return ref
+    return str(step.get("element") or step.get("text") or "")
 
 
 def _apply_approach(approach: dict, spec_text: str) -> dict:
@@ -584,16 +602,30 @@ async def process_row(
                     step["url"] = tool_args.get("url", "")
                 elif tool_name in ("browser_type", "type_text"):
                     step["text"] = tool_args.get("text", "")
-                    for k in ("target", "element", "submit", "slowly", "ref"):
+                    # Hash-рефы (e82/f2e17) — внутренние id accessibility-дерева Playwright:
+                    # в Camoufox они не существуют. При записи шага сохраняем портабельный
+                    # локатор (element/роль) вместо ref, чтобы подход работал на любом бэкенде.
+                    ref = str(tool_args.get("target") or tool_args.get("ref") or "")
+                    if ref and not _is_hash_ref(ref):
+                        step["target"] = ref
+                    elem = tool_args.get("element")
+                    if elem is not None and elem != "":
+                        step["element"] = elem
+                        if not step.get("target"):
+                            step["target"] = elem
+                    for k in ("submit", "slowly"):
                         v = tool_args.get(k)
                         if v is not None and v != "":
                             step[k] = v
                 elif tool_name in ("browser_click", "click"):
-                    step["target"] = str(tool_args.get("target", tool_args.get("ref", "")))
-                    for k in ("element",):
-                        v = tool_args.get(k)
-                        if v is not None and v != "":
-                            step[k] = v
+                    ref = str(tool_args.get("target") or tool_args.get("ref") or "")
+                    if ref and not _is_hash_ref(ref):
+                        step["target"] = ref
+                    elem = tool_args.get("element")
+                    if elem is not None and elem != "":
+                        step["element"] = elem
+                        if not step.get("target"):
+                            step["target"] = elem
                 elif tool_name == "browser_press_key":
                     key = tool_args.get("key", "")
                     if key:
@@ -1081,7 +1113,7 @@ def _execute_graph_tool(name: str, args: dict, engine, mm, spec_text: str = "") 
                 detail_parts = []
                 for s in concrete[:4]:
                     d = s.get("action", "?")
-                    loc = s.get("target") or s.get("element") or ""
+                    loc = _portable_step_target(s)
                     if loc:
                         d += "[" + loc + "]"
                     txt = s.get("text", "")
@@ -1241,7 +1273,7 @@ def _save_price_and_approach(memory_manager, spec_text, product_type, price_data
         if saved_id:
             memory_manager.record_success(saved_id)
             step_summary = " → ".join(
-                f"{s.get('action','?')}[{s.get('target') or s.get('element') or s.get('ref','') or ''}]"
+                f"{s.get('action','?')}[{_portable_step_target(s)}]"
                 for s in (MemoryManager.clean_steps(steps) or [])[:5]
             )
             logger.info("✅ Approach saved (ID=%d) for %s on %s: %.2f rub | steps: %s",

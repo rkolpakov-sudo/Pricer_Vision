@@ -191,7 +191,7 @@ _BRAND_RE = re.compile(
 
 _DU_RE = re.compile(r"(?:ду|дн|dn|dp)\s?(\d{2,3})", re.IGNORECASE)
 _DIM_RE = re.compile(r"(\d{1,3})\s?(?:х|x)\s?(\d{1,4})", re.IGNORECASE)
-_MM_RE = re.compile(r"(?:[øØ]\s?(\d{2,4})|(\d{2,4})\s?мм\b)")
+_MM_RE = re.compile(r"(?:[øØ⌀∅]\s?(\d{2,4})|(\d{2,4})\s?мм\b)")
 _FRAC_RE = re.compile(r"(\d+(?:\s+\d+)?\s*/\s*\d+)\s*\"")
 _INCH_RE = re.compile(r"\b(\d+)\"")
 _OUTLET_RE = re.compile(r"на\s+(\d+)\s+выход\w*", re.IGNORECASE)

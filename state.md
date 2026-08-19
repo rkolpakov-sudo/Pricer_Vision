@@ -2262,3 +2262,39 @@ SemCache — всего 18.
   tools=23, navigate santech.ru OK (сервер запускался своим venv проекта).
 - pytest -q: 696 passed (добавлен тест test_start_resets_stopped_after_failover).
 - camoufox временно ставился в чужой venv для диагностики — удалён.
+
+
+## 2026-08-19 — Две находки: кэш цен (⌀/Ø) и подходы Playwright→Camoufox (refs)
+
+### 1. Кэш цен: цены с «Ø» не переиспользовались для строк с «⌀»
+- **Симптом (пользователь)**: «не все цены подтягиваются или сохраняются в кеш».
+- **Root cause** (`src/approach_relevance.py`): `_MM_RE` матчил `Ø` (U+00D8), но НЕ `⌀`
+  (U+2300, знак диаметра из спецификаций). Спека «Труба … на грувлоках ⌀150х4,5», в кэше
+  «…Ø150х4,5 (ГОСТ 3262-75)». `_size_key()`: спека → `{'150x4'}`, кэш → `{'мм150','150x4'}` →
+  наборы НЕ равны → `product_name_matches=False` → 0.95-цены (ids 574–582) не переиспользовались,
+  правило 8 (reuse) и semantic_cache молчали.
+- **Fix**: `_MM_RE` → `[øØ⌀∅]`. Верификация на реальных данных: «…⌀150х4,5» теперь возвращает
+  5 записей conf=0.95 (была только 0.4). Тесты +3 (`TestProductNameMatches` диаметр-символы).
+- Регрессии нет: Ø200 по-прежнему ≠ ⌀150 (контроль размера сохранён).
+
+### 2. Подходы: Playwright-рефы не работали под Camoufox
+- **Симптом (пользователь)**: «подходы, использовавшиеся в Playwright, неправильно
+  интерпретируются через Camoufox».
+- **Root cause**: в `concrete`-шагах подхода сохранялись `target`/`ref` = хеш-рефы
+  accessibility-дерева Playwright (`e82`, `f2e81` — 1725 шагов в БД). Под Camoufox
+  реф-генератор другой → `_ref_to_role_locator()` пусто → клик по `e82` падает
+  («element not found»). Хеш-рефы вообще сессионны — бесполезны и между сессиями.
+- **Fix** (портабельные локаторы):
+  - Новый `_portable_step_target(step)` (`src/agent_loop.py`): для hash-ref возвращает
+    `element` (роль/описание) или `text`; CSS-селекторы и role-locator проходят как есть.
+  - `format_steps`, `format_steps_detailed`, `get_approaches`, лог `_save_price_and_approach`
+    используют его — LLM больше НЕ видит хеш-рефы (только портабельные локаторы).
+  - Запись шагов (agent_loop + study_runner): hash-ref не пишется в `target`;
+    при наличии `element` он становится `target` (портабельный).
+  - Импорт `_is_hash_ref` из `mcp_bridge` (уже существовал).
+- Тесты: +8 (`TestPortableStepTarget` 5, `TestFormatStepsPortable` 3 — рефы не протекают).
+- **707 passed** (696 + 11).
+
+### Затронутые файлы
+- `src/approach_relevance.py`, `src/agent_loop.py`, `src/study_runner.py`
+- `tests/test_approach_relevance.py`, `tests/test_agent_loop.py`

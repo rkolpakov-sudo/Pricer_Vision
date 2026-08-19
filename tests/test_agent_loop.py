@@ -10,6 +10,7 @@ from src.agent_loop import (
     _is_family_page, _is_empty_search_result,
     _pick_best_fallback, _fallback_result,
     _mismatch_warning_content,
+    _portable_step_target, format_steps, format_steps_detailed,
     CONTEXT_TOKEN_BUDGET, EMPTY_PROBE_LIMIT,
     TEMP_EXPLORATION, TEMP_NAVIGATION, TEMP_EXTRACTION, TEMP_RECOVERY,
 )
@@ -171,6 +172,57 @@ class TestApplyApproach:
         approach = {"concrete": [{"action": "browser_navigate", "url": "https://site.ru/catalog"}]}
         adapted = _apply_approach(approach, "Товар")
         assert adapted["concrete"][0]["url"] == "https://site.ru/catalog"
+
+
+class TestPortableStepTarget:
+    def test_css_target_kept(self):
+        step = {"action": "browser_click", "target": ".search-btn", "element": "Кнопка поиска"}
+        assert _portable_step_target(step) == ".search-btn"
+
+    def test_role_locator_kept(self):
+        step = {"action": "browser_click", "target": 'textbox "Поиск"'}
+        assert _portable_step_target(step) == 'textbox "Поиск"'
+
+    def test_hash_ref_replaced_by_element(self):
+        """Playwright-ref e82 бэкенд-специфичен — вместо него показываем element."""
+        step = {"action": "browser_click", "target": "e82", "element": 'textbox "Поиск по наименованию или коду товара"'}
+        assert _portable_step_target(step) == 'textbox "Поиск по наименованию или коду товара"'
+
+    def test_hash_ref_replaced_by_text(self):
+        step = {"action": "browser_type", "target": "f2e81", "text": "Мембранный бак 100л"}
+        assert _portable_step_target(step) == "Мембранный бак 100л"
+
+    def test_empty_step(self):
+        assert _portable_step_target({}) == ""
+
+
+class TestFormatStepsPortable:
+    def test_does_not_expose_hash_refs(self):
+        """Подход, сохранённый под Playwright, не должен показывать LLM хеш-рефы
+        (e82/f2e17), т.к. в Camoufox они не существуют."""
+        concrete = [
+            {"action": "browser_type", "target": "e82", "text": "Запрос", "element": 'textbox "Поиск"'},
+            {"action": "browser_click", "target": "e83", "element": "Кнопка Найти"},
+        ]
+        rendered = format_steps(concrete)
+        assert "e82" not in rendered
+        assert "e83" not in rendered
+        assert "Поиск" in rendered
+
+    def test_detailed_prefers_portable_target(self):
+        concrete = [{"action": "browser_click", "target": "e7", "element": "Кнопка ОК в cookie-баннере"}]
+        rendered = format_steps_detailed(concrete)
+        assert "e7" not in rendered
+        assert "cookie-баннере" in rendered
+
+    def test_detailed_keeps_url_and_text(self):
+        concrete = [
+            {"action": "browser_navigate", "url": "https://site.ru"},
+            {"action": "browser_type", "text": "Товар"},
+        ]
+        rendered = format_steps_detailed(concrete)
+        assert "https://site.ru" in rendered
+        assert "text=Товар" in rendered
 
 
 class TestStandardReference:

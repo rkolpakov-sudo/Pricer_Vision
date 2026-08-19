@@ -16,7 +16,7 @@ from src.graph_engine import GraphEngine
 from src.memory_manager import MemoryManager
 from src.config_loader import get_run_config, load_settings
 from src.validator import validate_result
-from src.agent_loop import _clean_snapshot, SUMMARIZE_MAX_CHARS, SUMMARIZE_MAX_LINES
+from src.agent_loop import _clean_snapshot, _portable_step_target, _is_hash_ref, SUMMARIZE_MAX_CHARS, SUMMARIZE_MAX_LINES
 
 logger = logging.getLogger("pricer.study")
 
@@ -368,7 +368,7 @@ class StudyRunner(QThread):
                 steps_detail = []
                 for s in concrete[:8]:
                     action = s.get("action", "?")
-                    target = s.get("target") or s.get("element") or ""
+                    target = _portable_step_target(s)
                     txt = s.get("text", "")
                     if target:
                         action += f"[{target}]"
@@ -494,16 +494,27 @@ class StudyRunner(QThread):
                             step["url"] = tool_args.get("url", "")
                         elif tool_name in ("browser_type", "type_text"):
                             step["text"] = tool_args.get("text", "")
-                            for k in ("target", "element", "submit", "slowly"):
+                            ref = str(tool_args.get("target") or tool_args.get("ref") or "")
+                            if ref and not _is_hash_ref(ref):
+                                step["target"] = ref
+                            elem = tool_args.get("element")
+                            if elem is not None and elem != "":
+                                step["element"] = elem
+                                if not step.get("target"):
+                                    step["target"] = elem
+                            for k in ("submit", "slowly"):
                                 v = tool_args.get(k)
                                 if v is not None and v != "":
                                     step[k] = v
                         elif tool_name in ("browser_click", "click"):
-                            step["target"] = str(tool_args.get("target", tool_args.get("ref", "")))
-                            for k in ("element",):
-                                v = tool_args.get(k)
-                                if v is not None and v != "":
-                                    step[k] = v
+                            ref = str(tool_args.get("target") or tool_args.get("ref") or "")
+                            if ref and not _is_hash_ref(ref):
+                                step["target"] = ref
+                            elem = tool_args.get("element")
+                            if elem is not None and elem != "":
+                                step["element"] = elem
+                                if not step.get("target"):
+                                    step["target"] = elem
                         elif tool_name == "browser_press_key":
                             key = tool_args.get("key", "")
                             if key:

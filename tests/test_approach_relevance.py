@@ -143,6 +143,27 @@ class TestProductNameMatches:
         assert product_name_matches("Кран шаровой Ду15",
                                     "Кран Ду15") is False
 
+    def test_diameter_symbol_variants_equivalent(self):
+        """⌀ (U+2300) и Ø (U+00D8) — один и тот же диаметр. Кэшированная цена,
+        сохранённая с «Ø150х4,5», должна переиспользоваться для строки «⌀150х4,5»."""
+        assert product_name_matches(
+            "Труба стальная водогазопроводная оцинкованная на грувлоках ⌀150х4,5",
+            "Труба стальная водогазопроводная оцинкованная на грувлоках Ø150х4,5 (ГОСТ 3262-75)",
+        ) is True
+
+    def test_diameter_symbol_both_directions(self):
+        assert product_name_matches(
+            "Труба стальная водогазопроводная оцинкованная Ø150х4,5",
+            "Труба стальная водогазопроводная оцинкованная ⌀150х4,5",
+        ) is True
+
+    def test_diameter_symbol_different_size_still_rejected(self):
+        """Символ не ослабляет контроль размера: Ø200 не подходит для ⌀150."""
+        assert product_name_matches(
+            "Труба стальная водогазопроводная оцинкованная ⌀150х4,5",
+            "Труба стальная водогазопроводная оцинкованная Ø200х6,0",
+        ) is False
+
 
 class TestProductNameMatchesIgnoreBrand:
     def test_brand_difference_accepted(self):
