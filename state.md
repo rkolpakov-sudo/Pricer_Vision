@@ -2098,3 +2098,97 @@ SemCache — всего 18.
 - Текст в «СТРУКТУРА ФАЙЛА» (name_raw) всё ещё может содержать незначимую фразу —
   она даётся как справочная информация файла; основным источником поискового запроса
   остаётся «ТОВАР ДЛЯ ПОИСКА» (нормализованный).
+
+
+## 2026-08-19 — Антидетект: эмпирическое исследование (Camoufox vs patchright/nodriver)
+
+### Проблема
+Агент блокируется на vseinstrumenti.ru (hcheck) и lunda.ru (Qrator 401) при сборе цен.
+
+### Эмпирические факты (реальные замеры, IP 5.228.80.117 — резиденциальный Rostelecom/Москва)
+| Инструмент | vseinstrumenti.ru | lunda.ru | santech.ru |
+|---|---|---|---|
+| requests (Python TLS) | 403 nginx (JS-challenge) | 401 QRATOR | 200 |
+| patchright 1.61.1 (реальный Chrome) | hcheck captcha (висит 30+ с) | 401 «подозрительная активность» | 200 |
+| nodriver 0.50.3 | hcheck captcha | 401 | 200 |
+| Camoufox v152 + fingerprint_preset=True | 3/3 PASS (в одной серии) | 3/3 PASS | 200 |
+
+### Ключевые выводы
+- hcheck на vseinstrumenti — это **Servicepipe** (*.servicepipe.tech), защита по типу JS/cookie/CAPTCHA
+  (док: docs.servicepipe.ru). Челлендж на вращение картинки (sp_rotated_captcha) решается только человеком.
+- Блокировка **по отпечатку браузера, а НЕ по IP**: один и тот же IP пропускает Camoufox, но режет patchright/nodriver.
+  patchright/nodriver на этой машине всегда дают одинаковый Chrome-отпечаток (один GPU/экран/OS) -> флаг.
+- Camoufox со **синтезированными** отпечатками: vseinstrumenti 0/5. С **реальными пресетами** (fingerprint_preset=True): 3/3.
+- Есть и IP-рисковая составляющая: после серии визитов hcheck ужесточается (полный флоу поиск->карточка не доведён до конца).
+- Camoufox качается python -m camoufox fetch (~492 МБ), venv: %TEMP%\opencode\cam_venv.
+
+### Лучший антидетект-инструмент (рекомендация)
+1. **Camoufox** (daijro/camoufox, 11.2k*): Firefox-fork, C++-уровневый fingerprint spoofing, песочница Juggler
+   (автоматизация не видна JS), BrowserForge + реальные пресеты v149-152. Python API совместим с Playwright
+   -> можно адаптировать mcp_servers/patchright_server.py (заменить async_playwright на AsyncCamoufox).
+2. Резидентные прокси с ротацией (README Camoufox прямо рекомендует) + human-pacing — для снижения IP-риска.
+3. Коммерческие антидетект-браузеры (Dolphin Anty, Octo, AdsPower, Multilogin Mimic/Stealthfox) — как альтернатива с профилями.
+4. patchright/nodriver НЕ решают: тот же Chrome-отпечаток -> те же блоки.
+
+### Артефакты (temp, НЕ коммитить)
+- %TEMP%\opencode\cam_venv — venv Camoufox
+- %TEMP%\opencode\passrate.py, camoufox_probe.py, camoufox_preset_flow.py, camoufox_flow.py, ctrl_probe.py, deep_nav_test.py и др.
+
+
+## 2026-08-19 — Мультибэкенд-браузер: camoufox (дефолт) / playwright / nodriver
+
+### Реализовано
+1. mcp_servers/browser_server.py (новый) — MCP-сервер-драйвер двух антидетект-бэкендов:
+   - --backend camoufox (дефолт): Firefox-форк, C++-уровневый fingerprint spoofing, ingerprint_preset=True,
+     os="windows", humanize=True; ретрай старта x4 на баг WebGL-пресетов; закрытие через __aexit__.
+   - --backend nodriver: реальный Chrome через CDP; свой резолвер элементов (CSS/role-locator/ref/text),
+     evaluate с ретраем на None, press_key через requestSubmit/KeyboardEvent.
+   - Общий DOM-скан снапшота + ref-кэш + TOOL_DEFS (23 инструмента) — совместимо с контрактом агента.
+2. src/mcp_bridge.py:
+   - esolve_backends() — цепочка из rowser.backend (приоритет) + rowser.backends (порядок фейловера).
+   - start() — перебор цепочки; _start_one()/_build_server(): playwright -> npx @playwright/mcp (как раньше),
+     camoufox/nodriver -> sys.executable mcp_servers/browser_server.py.
+   - ФИКС скрытого бага: list_tools() читал 	ool.inputSchema, а mcp 2.0 отдаёт input_schema
+     -> LLM получал 0 browser-инструментов. Теперь поддержка обоих имён (23 tools).
+3. src/config_loader.py: +get_browser_config().
+4. config/settings.yaml: rowser.backend: camoufox, rowser.backends: [camoufox, playwright, nodriver].
+5. 	ests/unit/test_backend_selection.py: 7 тестов резолвера.
+
+### Проверка
+- pytest -q: 680 passed (673 + 7 новых).
+- Smoke каждого бэкенда через MCP-клиент на santech.ru: camoufox PASS, nodriver PASS
+  (navigate -> snapshot с ref -> evaluate title -> close).
+- Интеграция MCPBridge: start=camoufox (ретрай WebGL сработал), list_tools=23, navigate/evaluate ok.
+- Playwright-фейловер: команда сохранена дословно (npx @playwright/mcp --init-script stealth.js --config ...).
+
+### Важно
+- mcp в venv обновлён до 2.0.0 — API низкоуровневого сервера изменился: вместо декораторов
+  @server.list_tools()/@server.call_tool() — Server(name, on_list_tools=..., on_call_tool=...).
+  Поэтому старый mcp_servers/patchright_server.py не работает с mcp 2.0 (никогда не был подключён).
+- Camoufox уже скачан (cache %LOCALAPPDATA%\camoufox), pip-пакет установлен в venv проекта.
+
+
+## 2026-08-19 — Очистка проекта от мусора
+- Удалён mcp_servers/patchright_server.py (мёртвый код, несовместим с mcp 2.0, заменён rowser_server.py).
+- По согласованию удалены: отладочные дампы в корне (json/yml/png/pdf/depsbak), .playwright-mcp/ (~946 МБ),
+  все __pycache__ + .pytest_cache, data/semantic_cache.json.bak_20260817, data/output/*.xlsx старше 01.08 (101 файл),
+  logs/study_*.log, data/audit/*.jsonl.
+- Не удалено (по решению): бэкапы БД data/pricer_backup_*.db, graph.json, data/input/*.xlsx.
+- data/pricer.db-shm/data/pricer.db-wal были заблокированы открытой БД — транзиентные, удалятся сами после закрытия приложения.
+- pytest -q: 680 passed.
+
+
+## 2026-08-19 — Очистка корня проекта
+- По результатам анализа корня удалены: .coverage (старый вывод coverage), graph.json (27.06, не читается кодом — граф в data/pricer.db).
+- Оставлены (по решению): .playwright-mcp/ (регенерируется работающим приложением, gitignored; накапливает снапшоты — чистить после закрытия приложения), .pytest_cache/.
+- Замечание: в корне НЕТ картинок-скриншотов — ранее удалены. «Скриншоты» — это DOM-снапшоты .playwright-mcp/page-*.yml.
+
+
+## 2026-08-19 — Фикс: Ассистент → Сайты не добавлялись
+- Причина: GraphEngine.set_product_site_priority вставлял в product_sites (FK на sites.id, PRAGMA foreign_keys=ON)
+  БЕЗ создания сайта в таблице sites → sqlite3.IntegrityError: FOREIGN KEY constraint failed при вводе нового сайта
+  (в Qt-слоте исключение глотается — кнопка «+» молча не работала).
+- Фикс (src/graph_engine.py): перед вставкой — INSERT OR IGNORE в product_types и sites (source='manual'),
+  обновление индексов _all_sites и _product_sites (добавление нового сайта).
+- Тесты: 	ests/test_graph_engine.py +3 (создание нового сайта, обновление приоритета, персистентность).
+- pytest -q: 683 passed (680 + 3).
