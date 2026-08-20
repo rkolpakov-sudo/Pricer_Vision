@@ -16,6 +16,8 @@ METRIC_DEFS = [
     ("success_rate", "Успешность"),
     ("llm_calls", "Запросов к LLM"),
     ("avg_llm_time", "Ср. время LLM"),
+    ("prompt_tokens", "Токены LLM (исх.)"),
+    ("completion_tokens", "Токены LLM (вх.)"),
     ("cache_hits", "Попаданий в кэш"),
     ("stuck_events", "Застреваний"),
     ("blocks", "Блокировок"),
@@ -32,6 +34,8 @@ def format_metric_value(key: str, value) -> str:
         return f"{value:.0%}"
     if key == "avg_llm_time":
         return f"{value:.1f}s"
+    if key in ("prompt_tokens", "completion_tokens"):
+        return f"{int(value):,}".replace(",", " ")
     if isinstance(value, float):
         return str(int(value)) if value.is_integer() else f"{value:.2f}"
     return str(value)

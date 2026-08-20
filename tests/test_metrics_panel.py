@@ -23,6 +23,10 @@ class TestFormatMetricValue:
     def test_avg_llm_time(self):
         assert format_metric_value("avg_llm_time", 2.26) == "2.3s"
 
+    def test_tokens(self):
+        assert format_metric_value("prompt_tokens", 12345) == "12 345"
+        assert format_metric_value("completion_tokens", 900) == "900"
+
 
 class TestBuildMetrics:
     def test_empty(self):
@@ -33,15 +37,19 @@ class TestBuildMetrics:
         assert m["success_rate"] == 0.0
         assert m["llm_calls"] == 0
         assert m["avg_llm_time"] == 0.0
+        assert m["prompt_tokens"] == 0
+        assert m["completion_tokens"] == 0
         assert m["cache_hits"] == 0
         assert m["stuck_events"] == 0
         assert m["blocks"] == 0
 
     def test_populated(self):
-        m = _build_metrics(10, 4, 3, [1.0, 2.0], 2, 1, 1)
+        m = _build_metrics(10, 4, 3, [1.0, 2.0], 2, 1, 1, prompt_tokens=1500, completion_tokens=450)
         assert m["success_rate"] == 0.75
         assert m["llm_calls"] == 2
         assert m["avg_llm_time"] == 1.5
+        assert m["prompt_tokens"] == 1500
+        assert m["completion_tokens"] == 450
         assert m["cache_hits"] == 2
         assert m["stuck_events"] == 1
         assert m["blocks"] == 1

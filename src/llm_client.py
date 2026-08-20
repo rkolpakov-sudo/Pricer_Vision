@@ -28,6 +28,13 @@ class LLMClient:
         self._detected = False
         self._fallback_urls: list[tuple[str, str]] = []
         self._active_url: str | None = None
+        self.prompt_tokens = 0
+        self.completion_tokens = 0
+
+    def reset_usage(self):
+        """Обнуляет накопители токенов (вход/выход LLM)."""
+        self.prompt_tokens = 0
+        self.completion_tokens = 0
 
     def set_fallbacks(self, fallbacks: list[tuple[str, str]]):
         self._fallback_urls = fallbacks
@@ -141,7 +148,11 @@ class LLMClient:
                 url, json=body, timeout=self.timeout,
             )
             response.raise_for_status()
-            return response.json()
+            data = response.json()
+            usage = data.get("usage") or {}
+            self.prompt_tokens += int(usage.get("prompt_tokens") or 0)
+            self.completion_tokens += int(usage.get("completion_tokens") or 0)
+            return data
         except httpx.TimeoutException:
             logger.error(f"LLM timeout ({self.timeout}s)")
             return {"error": "timeout"}

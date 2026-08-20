@@ -21,7 +21,8 @@ DB_PATH = "data/pricer.db"
 
 
 def _build_metrics(total: int, processed: int, found: int, llm_times: list,
-                   cache_hits: int, stuck_events: int, blocks: int) -> dict:
+                   cache_hits: int, stuck_events: int, blocks: int,
+                   prompt_tokens: int = 0, completion_tokens: int = 0) -> dict:
     """Собирает dict метрик прогона (чистая функция — тестируется без Qt)."""
     llm_calls = len(llm_times)
     avg = (sum(llm_times) / llm_calls) if llm_calls else 0.0
@@ -32,6 +33,8 @@ def _build_metrics(total: int, processed: int, found: int, llm_times: list,
         "success_rate": (found / processed) if processed else 0.0,
         "llm_calls": llm_calls,
         "avg_llm_time": avg,
+        "prompt_tokens": prompt_tokens,
+        "completion_tokens": completion_tokens,
         "cache_hits": cache_hits,
         "stuck_events": stuck_events,
         "blocks": blocks,
@@ -74,6 +77,8 @@ class MCPAgentRunner(QThread):
             cache_hits=self._cache_hits,
             stuck_events=self._stuck_events,
             blocks=self._blocks,
+            prompt_tokens=getattr(self.llm_client, "prompt_tokens", 0),
+            completion_tokens=getattr(self.llm_client, "completion_tokens", 0),
         )
 
     def run(self):
@@ -95,6 +100,9 @@ class MCPAgentRunner(QThread):
         self._blocks = 0
         self._processed = 0
         self._found = 0
+        reset_usage = getattr(self.llm_client, "reset_usage", None)
+        if reset_usage:
+            reset_usage()
         self.status_signal.emit("start")
         self.monitor_signal.emit({"type": "start", "total": len(self.specs)})
         self.status_signal.emit(("progress", 0, len(self.specs), "Загрузка графа..."))

@@ -19,6 +19,47 @@ class TestLLMClient:
         assert client.model == "qwen2.5"
         assert client.temperature == 0.1
 
+    def test_usage_counted_on_success(self):
+        import asyncio
+        from unittest.mock import AsyncMock, Mock
+        client = LLMClient(model="test-model")
+
+        class FakeResp:
+            def raise_for_status(self):
+                pass
+
+            def json(self):
+                return {"choices": [{"message": {"content": "ok"}}],
+                        "usage": {"prompt_tokens": 120, "completion_tokens": 45, "total_tokens": 165}}
+
+        client._client = Mock()
+        client._client.post = AsyncMock(return_value=FakeResp())
+
+        async def test():
+            result = await client._try_chat("http://x/v1/chat/completions",
+                                            [{"role": "user", "content": "hi"}])
+
+        asyncio.run(test())
+        assert client.prompt_tokens == 120
+        assert client.completion_tokens == 45
+
+        client.reset_usage()
+        assert client.prompt_tokens == 0
+        assert client.completion_tokens == 0
+
+    def test_usage_ignored_on_error(self):
+        import asyncio
+        client = LLMClient(model="test-model")
+        client._client = None
+
+        async def test():
+            result = await client.chat([{"role": "user", "content": "hi"}])
+            assert "error" in result
+
+        asyncio.run(test())
+        assert client.prompt_tokens == 0
+        assert client.completion_tokens == 0
+
     def test_no_client_returns_error(self):
         client = LLMClient()
 

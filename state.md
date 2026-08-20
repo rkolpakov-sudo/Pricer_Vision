@@ -1,5 +1,21 @@
 # State Log
 
+## 2026-08-20 — Счётчик токенов LLM во вкладке «Мониторинг»
+
+### Что сделано
+- **`src/llm_client.py`**: `LLMClient` теперь накапливает реальные токены из
+  `usage` ответа (`prompt_tokens`/`completion_tokens`). Счёт идёт в `_try_chat`
+  на каждом успешном ответе (единая точка входа всех вызовов: agent loop,
+  probe, study runner, PDF parser). Добавлен `reset_usage()`.
+- **`src/mcp_agent_runner.py`**: `_build_metrics` принимает `prompt_tokens` /
+  `completion_tokens` (берутся из `llm_client`), счётчики обнуляются в начале
+  прогона. Новая метрика автоматически доезжает в GUI через `metrics_signal`.
+- **`gui/metrics_panel.py`**: в `METRIC_DEFS` добавлены боксы «Токены LLM (исх.)»
+  и «Токены LLM (вх.)»; форматирование с разделителями тысяч («12 345»).
+- **Тесты**: `test_llm_client.py` — usage считается на успешном ответе и
+  игнорируется на ошибке, `reset_usage()` обнуляет; `test_metrics_panel.py` —
+  новые ключи и формат. **718/718 pass**.
+
 ## 2026-08-20 — Очистка отравленных цен (2-й проход) + защита кода от повторного отравления
 
 ### Проблема
