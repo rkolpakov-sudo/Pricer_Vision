@@ -1,8 +1,15 @@
 antidetect:
   rate_limit_max_requests_per_minute: 20
   rate_limit_min_interval: 1.5
+  jitter: 1.0
+  cooldown_seconds: 300
+  site_overrides:
+    vseinstrumenti.ru:
+      min_interval: 6.0
+      max_requests_per_minute: 6
+      cooldown_seconds: 900
 browser:
-  backend: playwright
+  backend: camoufox
   backends:
   - camoufox
   - playwright

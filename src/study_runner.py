@@ -14,8 +14,9 @@ from src.tool_parser import parse_tool_calls, parse_final_response, parse_text_t
 from src.mcp_bridge import MCPBridge
 from src.graph_engine import GraphEngine
 from src.memory_manager import MemoryManager
-from src.config_loader import get_run_config, load_settings
+from src.config_loader import get_run_config, load_settings, get_antidetect_config, get_antidetect_site_overrides
 from src.validator import validate_result
+from src.rate_limiter import DomainRateLimiter
 from src.agent_loop import _clean_snapshot, _portable_step_target, _is_hash_ref, SUMMARIZE_MAX_CHARS, SUMMARIZE_MAX_LINES
 
 logger = logging.getLogger("pricer.study")
@@ -306,6 +307,14 @@ class StudyRunner(QThread):
             self.done_signal.emit(False, "MCP сервер не запущен")
             return
 
+        self.rate_limiter = DomainRateLimiter(
+            min_interval=get_antidetect_config("rate_limit_min_interval", 1.5),
+            max_requests_per_minute=get_antidetect_config("rate_limit_max_requests_per_minute", 20),
+            jitter=get_antidetect_config("jitter", 1.0),
+            cooldown_seconds=get_antidetect_config("cooldown_seconds", 300),
+            site_overrides=get_antidetect_site_overrides(),
+        )
+
         self.log("🔄 Подключение к LLM...")
         await llm.__aenter__()
         # verify LLM is available before starting
@@ -486,6 +495,8 @@ class StudyRunner(QThread):
                 if tool_name in GRAPH_TOOL_NAMES:
                     result = await self._exec_graph_tool(tool_name, tool_args, engine, mm, site, study_steps)
                 else:
+                    if self.rate_limiter is not None:
+                        await self.rate_limiter.wait_if_needed(self._url)
                     result = await bridge.call_tool(tool_name, tool_args)
                     # Record actual browser action (only if successful)
                     if not str(result).startswith("error:"):

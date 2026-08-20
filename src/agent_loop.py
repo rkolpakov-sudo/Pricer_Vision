@@ -15,7 +15,7 @@ from src.mcp_bridge import MCPBridge, _is_hash_ref
 from src.graph_engine import GraphEngine
 from src.memory_manager import MemoryManager
 from src.validator import validate_result
-from src.config_loader import get_run_config, get_antidetect_config
+from src.config_loader import get_run_config, get_antidetect_config, get_antidetect_site_overrides
 from src.models.schemas import ExtractionResult
 from src.stuck_detector import StuckDetector, StuckLevel
 from src.resilience import llm_circuit
@@ -508,6 +508,9 @@ async def process_row(
     rate_limiter = DomainRateLimiter(
         min_interval=get_antidetect_config("rate_limit_min_interval", 1.5),
         max_requests_per_minute=get_antidetect_config("rate_limit_max_requests_per_minute", 20),
+        jitter=get_antidetect_config("jitter", 1.0),
+        cooldown_seconds=get_antidetect_config("cooldown_seconds", 300),
+        site_overrides=get_antidetect_site_overrides(),
     )
 
     while rounds < MAX_ROUNDS:
@@ -591,9 +594,14 @@ async def process_row(
                     current_site = new_site
                     rounds_on_site = 0
                 if rate_limiter is not None:
-                    await rate_limiter.wait_if_needed(new_site or "")
+                    await rate_limiter.wait_if_needed(current_site or "")
                 result = await mcp_bridge.call_tool(tool_name, tool_args)
             else:
+                # Rate limit EVERY browser action (not just navigate): клики, печать,
+                # evaluate, снапшоты идут на тот же домен и тоже ловят бан при частых
+                # запросах. Для per-site сайтов (vseinstrumenti) интервал больше.
+                if rate_limiter is not None and current_site:
+                    await rate_limiter.wait_if_needed(current_site)
                 result = await mcp_bridge.call_tool(tool_name, tool_args)
 
             if tool_name not in GRAPH_TOOL_NAMES:
@@ -680,10 +688,14 @@ async def process_row(
                     monitor_callback("block", captcha_type.value)
                 try:
                     failed_domain = _extract_domain(current_site)
+                    if rate_limiter is not None:
+                        rate_limiter.record_block(failed_domain)
+                        logger.warning("🚫 Cooldown set for %s (%.0fs) after block",
+                                       failed_domain, rate_limiter.cooldown_seconds)
                     _deprecate_site_approaches(memory_manager, product_type, failed_domain, "🚫 Captcha:")
                 except Exception as e:
                     logger.warning("Captcha deprecation failed: %s", e)
-                tool_content = f"Сайт заблокирован captcha/проверкой бота ({captcha_type.value}). Рекомендация: {recommendation}. НЕ ПЫТАЙСЯ ЕГО ОБОЙТИ."
+                tool_content = f"Сайт заблокирован captcha/проверкой бота ({captcha_type.value}). Рекомендация: {recommendation}. Домену установлен cooldown — вернёшься к нему позже в этой сессии через паузу (rate limiter сам выдержит ожидание). НЕ пытайся обойти captcha сейчас, переключись на другой сайт."
                 messages.append({
                     "role": "tool",
                     "tool_call_id": tc.get("id", ""),
