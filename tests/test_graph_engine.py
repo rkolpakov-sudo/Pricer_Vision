@@ -47,7 +47,7 @@ class TestGraphEngine:
             "product_type_id": "cables",
             "site_id": "tinko.ru",
             "price": 1500.50,
-            "url": "https://tinko.ru/cable1",
+            "url": "https://tinko.ru/product/cable1",
         })
         assert pid > 0
 
@@ -55,12 +55,44 @@ class TestGraphEngine:
         assert len(prices) >= 1
         assert prices[0]["price"] == 1500.50
 
+    def test_get_confirmed_prices_skip_family_page_url(self, graph_engine):
+        """Цена с семейной страницы (santech /catalog/N/M/i<id>/) НЕ возвращается
+        как кандидат на reuse — на ней несколько товаров с одной ценой."""
+        graph_engine.save_confirmed_price({
+            "spec_text": "Кран шаровой Ду15, завод-изготовитель Ридан",
+            "product_type_id": "valves",
+            "site_id": "santech.ru",
+            "price": 1193.2,
+            "url": "https://www.santech.ru/catalog/317/318/i2641/",
+        })
+        assert graph_engine.get_confirmed_prices("Кран шаровой Ду15, завод-изготовитель Ридан") == []
+
+    def test_get_confirmed_prices_skip_homepage_url(self, graph_engine):
+        """Цена с главной/поисковой страницы НЕ возвращается как кандидат на reuse."""
+        graph_engine.save_confirmed_price({
+            "spec_text": "Кран шаровой Ду15, завод-изготовитель Ридан",
+            "product_type_id": "valves",
+            "site_id": "santech.ru",
+            "price": 1193.2,
+            "url": "https://www.santech.ru",
+        })
+        assert graph_engine.get_confirmed_prices("Кран шаровой Ду15, завод-изготовитель Ридан") == []
+        graph_engine.save_confirmed_price({
+            "spec_text": "Кран шаровой Ду20, завод-изготовитель Ридан",
+            "product_type_id": "valves",
+            "site_id": "santech.ru",
+            "price": 2974.2,
+            "url": "https://www.santech.ru/catalog/search/?search=кран",
+        })
+        assert graph_engine.get_confirmed_prices("Кран шаровой Ду20, завод-изготовитель Ридан") == []
+
     def test_get_confirmed_prices_by_token_overlap(self, graph_engine):
         graph_engine.save_confirmed_price({
             "spec_text": "ВВГ-нг 3x1.5 ОГНЕСТОЙКИЙ КАБЕЛЬ",
             "product_type_id": "cables",
             "site_id": "tinko.ru",
             "price": 100,
+            "url": "https://tinko.ru/product/vvg-3x1-5",
         })
         same_size = graph_engine.get_confirmed_prices("ВВГ-нг 3x1.5 ОГНЕСТОЙКИЙ КАБЕЛЬ")
         assert len(same_size) >= 1
@@ -76,6 +108,7 @@ class TestGraphEngine:
             "product_type_id": "valves",
             "site_id": "santech.ru",
             "price": 1193.2,
+            "url": "https://www.santech.ru/catalog/317/318/i2641/v9/",
         })
         assert graph_engine.get_confirmed_prices("Кран шаровой Ду20") == []
         assert graph_engine.get_confirmed_prices("Кран шаровой Ду15")[0]["price"] == 1193.2
@@ -107,7 +140,7 @@ class TestGraphEngine:
             "product_type_id": "valves",
             "site_id": "santech.ru",
             "price": 15676.8,
-            "url": "https://www.santech.ru/catalog/337/340/i1322/",
+            "url": "https://www.santech.ru/catalog/337/340/i1322/v55/",
         })
         assert graph_engine.get_confirmed_prices("клапан баланс. статический Ду15") == []
         assert len(graph_engine.get_confirmed_prices("Клапан балансировочный авт. Ду15")) >= 1
@@ -119,12 +152,12 @@ class TestGraphEngine:
         mm = MemoryManager(graph_engine)
         mm.save_price(
             spec_text="Кран шаровой Ду15", product_type="valves",
-            site="santech.ru", price=100.0, url="https://santech.ru/kran15",
+            site="santech.ru", price=100.0, url="https://santech.ru/product/kran15",
             confidence=0.95,
         )
         mm.save_price(
             spec_text="Кран шаровой Ду15", product_type="valves",
-            site="santech.ru", price=120.0, url="https://santech.ru/kran15",
+            site="santech.ru", price=120.0, url="https://santech.ru/product/kran15",
             confidence=0.95, reason="rule8_reuse",
         )
         prices = graph_engine.get_confirmed_prices("Кран шаровой Ду15", max_results=20)

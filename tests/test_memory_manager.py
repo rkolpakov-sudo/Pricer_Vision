@@ -132,15 +132,15 @@ class TestMemoryManager:
 
     def test_save_price_rule5_analog_band_accepted(self, mm):
         """Rule 5 аналоги (confidence 0.3-0.5) должны попадать в БД (ранее отбрасывались < 0.6)."""
-        pid = mm.save_price("Клапан балансировочный Ду15", "valves", "tinko.ru", 1567, "http://x.ru", 0.4)
+        pid = mm.save_price("Клапан балансировочный Ду15", "valves", "tinko.ru", 1567, "https://tinko.ru/product/kran", 0.4)
         assert pid > 0
 
     def test_save_price_above_threshold(self, mm):
-        pid = mm.save_price("test item", "cables", "tinko.ru", 1500, "http://x.ru", 0.95)
+        pid = mm.save_price("test item", "cables", "tinko.ru", 1500, "https://tinko.ru/product/kabel", 0.95)
         assert pid > 0
 
     def test_get_relevant_prices(self, mm):
-        mm.save_price("ВВГ-нг 3x1.5 ОГНЕСТОЙКИЙ КАБЕЛЬ", "cables", "tinko.ru", 100, "http://x.ru", 0.95)
+        mm.save_price("ВВГ-нг 3x1.5 ОГНЕСТОЙКИЙ КАБЕЛЬ", "cables", "tinko.ru", 100, "https://tinko.ru/product/vvg-3x1-5", 0.95)
         same = mm.get_relevant_prices("ВВГ-нг 3x1.5 ОГНЕСТОЙКИЙ КАБЕЛЬ")
         assert len(same) >= 1
         # Разный типоразмер (3x1.5 vs 3x2.5) — цена не переиспользуется

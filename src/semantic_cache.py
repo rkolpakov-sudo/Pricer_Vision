@@ -10,6 +10,25 @@ from src.approach_relevance import product_name_matches
 CACHE_MAX_ENTRIES = 1000
 _EVICT_RATIO = 0.2
 
+_IS_FAMILY_PAGE_RE = re.compile(r"/catalog/\d+/\d+/i\d+$", re.IGNORECASE)
+
+
+def _is_invalid_price_url(url: str) -> bool:
+    """True, если URL — не карточка товара (главная/поисковая/семейная страница)."""
+    if not url:
+        return True
+    u = (url or "").split("?")[0].rstrip("/")
+    path = u.split("//")[-1]
+    domain = path.split("/")[0]
+    rest = path[len(domain):].strip("/")
+    if not rest:
+        return True
+    if re.search(r"/search", u, re.IGNORECASE):
+        return True
+    if _IS_FAMILY_PAGE_RE.search(u.rstrip("/")):
+        return True
+    return False
+
 
 class SemanticCache:
     """Кэш результатов для похожих товаров.
@@ -27,6 +46,9 @@ class SemanticCache:
         normalized = self._normalize(product_name)
 
         for cached_data in self.cache.values():
+            result = cached_data.get("result", {})
+            if _is_invalid_price_url(result.get("url", "")):
+                continue
             similarity = self._calculate_similarity(
                 normalized, cached_data.get("normalized_name", "")
             )
@@ -34,7 +56,7 @@ class SemanticCache:
                 product_name, cached_data.get("original_name", "")
             ):
                 return {
-                    **cached_data.get("result", {}),
+                    **result,
                     "cache_hit": True,
                     "similarity": similarity,
                     "original_query": cached_data.get("original_name", ""),
@@ -42,6 +64,8 @@ class SemanticCache:
         return None
 
     def store(self, product_name: str, result: dict):
+        if _is_invalid_price_url(result.get("url", "")):
+            return
         normalized = self._normalize(product_name)
         key = hashlib.md5(normalized.encode("utf-8")).hexdigest()
 

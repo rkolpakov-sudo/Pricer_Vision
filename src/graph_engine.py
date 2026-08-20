@@ -15,6 +15,26 @@ logger = logging.getLogger("pricer.graph")
 
 STALE_DAYS = get_price_config("stale_days", 30)
 
+_IS_FAMILY_PAGE_RE = re.compile(r"/catalog/\d+/\d+/i\d+$", re.IGNORECASE)
+
+
+def _is_invalid_price_url(url: str) -> bool:
+    """True, если URL — не карточка товара (главная/поисковая/семейная страница).
+    Такие цены не должны переиспользоваться как источник."""
+    if not url:
+        return True
+    u = (url or "").split("?")[0].rstrip("/")
+    path = u.split("//")[-1]
+    domain = path.split("/")[0]
+    rest = path[len(domain):].strip("/")
+    if not rest:
+        return True
+    if re.search(r"/search", u, re.IGNORECASE):
+        return True
+    if _IS_FAMILY_PAGE_RE.search(u.rstrip("/")):
+        return True
+    return False
+
 SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS product_types (
     id TEXT PRIMARY KEY,
@@ -426,6 +446,11 @@ class GraphEngine:
                 spec_text, info["price"].get("spec_text", "")
             ):
                 price = dict(info["price"])
+                url = price.get("url") or ""
+                # Не возвращаем цены с главной/поисковой/семейной страницы —
+                # они не являются карточкой товара и не должны переиспользоваться.
+                if _is_invalid_price_url(url):
+                    continue
                 created_at = price.get("created_at")
                 if created_at:
                     try:

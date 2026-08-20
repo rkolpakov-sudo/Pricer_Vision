@@ -395,24 +395,30 @@ async def process_row(
 
     # code-enforced rule 8: reuse high-confidence prices without LLM
     if not fresh and confirmed_prices:
-        best = max(confirmed_prices, key=lambda p: p.get("confidence", 0))
-        if best.get("confidence", 0) >= CONF_TRUSTED and (not fresh or best.get("confidence", 0) >= 0.95):
-            elapsed = (datetime.now() - start_time).total_seconds()
-            result = {
-                "spec_text": spec_text, "price": best.get("price"),
-                "confidence": best.get("confidence", 0),
-                "url": best.get("url", ""), "site": best.get("site_id", ""),
-                "reason": "Reused from DB (confidence >= 0.9)", "requires_review": False,
-                "elapsed": elapsed,
-            }
-            memory_manager.save_price(
-                spec_text=spec_text, product_type=product_type,
-                site=best.get("site_id", ""), price=best.get("price", 0),
-                url=best.get("url", ""), confidence=best.get("confidence", 0),
-                reason="rule8_reuse",
-            )
-            logger.info("Row: price=%s validated=%.2f in %.1fs", result["price"], result["confidence"], elapsed)
-            return _result_to_schema(result)
+        # Исключаем цены с невалидными URL (главная/поиск/семейная страница) —
+        # они не могут быть источником для переиспользования.
+        reusable = [p for p in confirmed_prices
+                    if not _is_homepage_or_search_url(p.get("url", ""))
+                    and not _is_family_page(p.get("url", ""))]
+        if reusable:
+            best = max(reusable, key=lambda p: p.get("confidence", 0))
+            if best.get("confidence", 0) >= CONF_TRUSTED and (not fresh or best.get("confidence", 0) >= 0.95):
+                elapsed = (datetime.now() - start_time).total_seconds()
+                result = {
+                    "spec_text": spec_text, "price": best.get("price"),
+                    "confidence": best.get("confidence", 0),
+                    "url": best.get("url", ""), "site": best.get("site_id", ""),
+                    "reason": "Reused from DB (confidence >= 0.9)", "requires_review": False,
+                    "elapsed": elapsed,
+                }
+                memory_manager.save_price(
+                    spec_text=spec_text, product_type=product_type,
+                    site=best.get("site_id", ""), price=best.get("price", 0),
+                    url=best.get("url", ""), confidence=best.get("confidence", 0),
+                    reason="rule8_reuse",
+                )
+                logger.info("Row: price=%s validated=%.2f in %.1fs", result["price"], result["confidence"], elapsed)
+                return _result_to_schema(result)
 
     # Semantic cache: reuse results for similar products (skipped when fresh)
     if not fresh and semantic_cache is not None:
@@ -796,6 +802,20 @@ async def process_row(
                                     spec_text[:50], str(found_name)[:50])
                         match_ok = True
                     elif confirm:
+                        llm_conf = float(tool_args.get("confidence", 0) or 0)
+                        if llm_conf < CONF_MIN:
+                            logger.warning("LLM confirm override REJECTED for mismatched product "
+                                           "(conf %.2f < %.2f): spec=%s found=%s",
+                                           llm_conf, CONF_MIN, spec_text[:50], str(found_name)[:50])
+                            messages.append({
+                                "role": "tool",
+                                "tool_call_id": tc.get("id", ""),
+                                "content": ("error: товар НЕ соответствует спецификации по наименованию, а "
+                                            "уверенность слишком низкая (conf < %.2f). НЕ сохраняю цену. "
+                                            "Продолжай поиск точного товара или найди карточку с подтверждённым "
+                                            "JSON-LD/ценой и передай confidence >= %.2f." % (CONF_MIN, CONF_MIN)),
+                            })
+                            continue
                         logger.warning("LLM confirm override for mismatched product: spec=%s found=%s",
                                        spec_text[:50], str(found_name)[:50])
                         if not brand_mismatch:
@@ -1263,6 +1283,10 @@ def _save_price_and_approach(memory_manager, spec_text, product_type, price_data
         logger.warning("⚠️ Skipping family-page price save: url=%s price=%.2f spec=%s",
                        price_data.get("url", ""), price_data["price"], spec_text[:50])
         return
+    if _is_homepage_or_search_url(price_data.get("url", "")):
+        logger.warning("⚠️ Skipping homepage/search price save: url=%s price=%.2f spec=%s",
+                       price_data.get("url", ""), price_data["price"], spec_text[:50])
+        return
     query = (search_query or spec_text)[:200]
     memory_manager.save_price(
         spec_text=spec_text, product_type=product_type,
@@ -1315,6 +1339,20 @@ def _is_product_card_url(url: str) -> bool:
         or re.search(r"/(?:product|item|p|products)/", url, re.IGNORECASE)
         or re.search(r"[?&]id=\d+", url, re.IGNORECASE)
     )
+
+
+def _is_homepage_or_search_url(url: str) -> bool:
+    """True, если URL — главная страница сайта или поисковая выдача
+    (не карточка товара). Такие цены недопустимы как источник."""
+    if not url:
+        return True
+    u = (url or "").split("?")[0].rstrip("/")
+    path = u.split("//")[-1]
+    domain = path.split("/")[0]
+    rest = path[len(domain):].strip("/")
+    if not rest:
+        return True
+    return bool(re.search(r"/search", u, re.IGNORECASE))
 
 
 def _is_family_page(url: str) -> bool:
