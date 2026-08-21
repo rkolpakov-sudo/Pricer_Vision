@@ -4,9 +4,9 @@ import logging
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QColor, QFont
 from PySide6.QtWidgets import (
-    QAbstractItemView, QCheckBox, QComboBox, QDialog, QHBoxLayout, QHeaderView,
-    QLabel, QMessageBox, QPlainTextEdit, QProgressBar, QPushButton, QTableWidget,
-    QTableWidgetItem, QVBoxLayout,
+    QAbstractItemView, QCheckBox, QComboBox, QDialog, QGroupBox, QHBoxLayout,
+    QHeaderView, QLabel, QMessageBox, QPlainTextEdit, QProgressBar, QPushButton,
+    QTableWidget, QTableWidgetItem, QVBoxLayout,
 )
 
 from .manager import DependencyManager
@@ -72,25 +72,29 @@ class DependencyManagerDialog(QDialog):
         self.check_btn.clicked.connect(self._start_check)
         top.addWidget(self.check_btn)
         self.install_browser_cb = QCheckBox("Установить браузер при обновлении @playwright/mcp")
-        self.install_browser_cb.setToolTip("Выполнит playwright install chromium для выбранной версии")
+        self.install_browser_cb.setToolTip("Установит Chromium для выбранной версии @playwright/mcp")
         top.addWidget(self.install_browser_cb)
         top.addStretch()
         self.status_label = QLabel("")
         top.addWidget(self.status_label)
         root.addLayout(top)
 
-        browser_row = QHBoxLayout()
-        self.browser_label = QLabel("Chromium (MCP): проверка…")
-        self.browser_label.setStyleSheet("color: #9aa0a6; font-size: 12px;")
-        self.browser_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
-        browser_row.addWidget(self.browser_label)
-        browser_row.addStretch()
-        self.browser_btn = QPushButton("Обновить браузер")
+        browser_group = QGroupBox("Браузеры (текущая конфигурация)")
+        browser_layout = QVBoxLayout(browser_group)
+        browser_layout.setContentsMargins(8, 14, 8, 8)
+        browser_layout.setSpacing(4)
+        self._browser_rows = QVBoxLayout()
+        self._browser_rows.setSpacing(2)
+        browser_layout.addLayout(self._browser_rows)
+        browser_btn_row = QHBoxLayout()
+        browser_btn_row.addStretch()
+        self.browser_btn = QPushButton("Обновить браузеры")
         self.browser_btn.setObjectName("primary")
-        self.browser_btn.setToolTip("Установит chromium, соответствующий активной версии @playwright/mcp")
+        self.browser_btn.setToolTip("Установит/обновит браузеры, недостающие для активной конфигурации")
         self.browser_btn.clicked.connect(self._on_browser_update)
-        browser_row.addWidget(self.browser_btn)
-        root.addLayout(browser_row)
+        browser_btn_row.addWidget(self.browser_btn)
+        browser_layout.addLayout(browser_btn_row)
+        root.addWidget(browser_group)
 
         self.table = QTableWidget(0, 7)
         self.table.setHorizontalHeaderLabels(
@@ -185,8 +189,7 @@ class DependencyManagerDialog(QDialog):
         self._deps = self._manager.load_manifest()
         self.table.setRowCount(0)
         self.status_label.setText("Проверка…")
-        self.browser_label.setText("Chromium (MCP): проверка…")
-        self.browser_label.setStyleSheet("color: #9aa0a6; font-size: 12px;")
+        self._browsers_checking()
         self._check_worker = CheckWorker(self._manager, self._deps, self._env, self)
         self._check_worker.progress.connect(self._on_check_progress)
         self._check_worker.finished_ok.connect(self._on_check_done)
@@ -214,42 +217,75 @@ class DependencyManagerDialog(QDialog):
         self.status_label.setText("Ошибка проверки")
         QMessageBox.warning(self, "Ошибка", message)
 
-    # ── playwright browser ───────────────────────────────────────
-    def _on_browser_checked(self, info: BrowserInfo):
-        self._browser_info = info
-        pkg = f"MCP {info.package_version}" if info.package_version else "MCP"
+    # ── browsers (per configured backend) ────────────────────────
+    def _clear_browser_rows(self):
+        while self._browser_rows.count():
+            item = self._browser_rows.takeAt(0)
+            w = item.widget()
+            if w is not None:
+                w.deleteLater()
+
+    @staticmethod
+    def _browser_text(info: BrowserInfo) -> str:
+        label = info.label or info.name
         if info.error or not info.expected_rev:
-            color = "#9aa0a6"
-            text = f"Chromium ({pkg}): не определён"
+            text = f"{label}: не определён"
             if info.error:
                 text += f" — {info.error}"
-        elif not info.installed:
-            color = "#ff9800"
-            text = f"Chromium ({pkg}): не установлен (ожидается r{info.expected_rev})"
-        elif info.up_to_date:
-            color = "#4caf50"
-            text = f"Chromium ({pkg}): r{info.expected_rev} — актуален"
-        else:
-            color = "#ff9800"
-            text = f"Chromium ({pkg}): устарел (установлен r{info.installed_rev}, ожидается r{info.expected_rev})"
-        self.browser_label.setText(text)
-        self.browser_label.setStyleSheet(f"color: {color}; font-size: 12px;")
-        tip = text
-        if info.details:
-            tip = f"{text}\nДополнительно:\n" + "\n".join(
-                f"{k}: {v}" for k, v in info.details.items()
-            )
-        self.browser_label.setToolTip(tip)
+            return text
+        if not info.installed:
+            return f"{label}: не установлен (ожидается {info.expected_rev})"
+        if info.up_to_date:
+            return f"{label}: {info.expected_rev} — актуален"
+        return f"{label}: устарел (установлен {info.installed_rev}, ожидается {info.expected_rev})"
+
+    @staticmethod
+    def _browser_color(info: BrowserInfo) -> str:
+        if info.error or not info.expected_rev:
+            return "#9aa0a6"
+        if info.up_to_date:
+            return "#4caf50"
+        return "#ff9800"
+
+    def _on_browser_checked(self, infos):
+        self._browser_info = infos if isinstance(infos, list) else [infos]
+        self._clear_browser_rows()
+        for info in self._browser_info:
+            label = QLabel(self._browser_text(info))
+            label.setStyleSheet(f"color: {self._browser_color(info)}; font-size: 12px;")
+            label.setTextInteractionFlags(Qt.TextSelectableByMouse)
+            tip = self._browser_text(info)
+            if info.details:
+                tip += "\n" + "\n".join(f"{k}: {v}" for k, v in info.details.items())
+            label.setToolTip(tip)
+            self._browser_rows.addWidget(label)
+
+    def _browsers_checking(self):
+        self._browser_info = None
+        self._clear_browser_rows()
+        label = QLabel("Браузеры: проверка…")
+        label.setStyleSheet("color: #9aa0a6; font-size: 12px;")
+        self._browser_rows.addWidget(label)
 
     def _start_browser_check(self):
         try:
-            info = self._manager.browser_status()
+            infos = self._manager.browser_status(self._env)
         except Exception as e:  # noqa: BLE001
-            info = BrowserInfo(error=str(e))
-        self._on_browser_checked(info)
+            infos = [BrowserInfo(error=str(e))]
+        self._on_browser_checked(infos)
 
     def _on_browser_update(self):
         if self._browser_worker is not None and self._browser_worker.isRunning():
+            return
+        if not self._browser_info:
+            QMessageBox.information(self, "Нет данных",
+                                    "Сначала выполните проверку зависимостей.")
+            return
+        targets = [i.name for i in self._browser_info
+                   if i.name in ("playwright", "camoufox") and not i.up_to_date]
+        if not targets:
+            QMessageBox.information(self, "Браузеры актуальны",
+                                    "Все браузеры текущей конфигурации установлены и актуальны.")
             return
         if self._busy:
             ret = QMessageBox.warning(
@@ -263,19 +299,20 @@ class DependencyManagerDialog(QDialog):
         self._set_busy_ui(True)
         self.log_view.clear()
         self.log_view.setVisible(True)
-        self._log_line("Обновление браузера Chromium...")
-        self._browser_worker = BrowserWorker(self._manager, self)
+        self._log_line(f"Обновление браузеров: {', '.join(targets)}")
+        self._browser_worker = BrowserWorker(self._manager, [(n, self._env) for n in targets], self)
         self._browser_worker.progress.connect(self._on_apply_progress)
         self._browser_worker.log.connect(self._log_line)
         self._browser_worker.finished_ok.connect(self._on_browser_done)
         self._browser_worker.failed.connect(self._on_browser_failed)
         self._browser_worker.start()
 
-    def _on_browser_done(self, message):
+    def _on_browser_done(self, messages):
         self._set_busy_ui(False)
-        self._log_line(message)
+        text = "\n".join(f"• {m}" for _, m in messages)
+        self._log_line(text)
         self._start_browser_check()
-        QMessageBox.information(self, "Готово", message)
+        QMessageBox.information(self, "Готово", text)
 
     def _on_browser_failed(self, message):
         self._set_busy_ui(False)
@@ -465,7 +502,7 @@ class DependencyManagerDialog(QDialog):
         if self._browser_worker is not None and self._browser_worker.isRunning():
             ret = QMessageBox.question(
                 self, "Выполняется установка браузера",
-                "Идёт установка браузера Chromium. Прервать и закрыть окно?",
+                "Идёт установка браузера. Прервать и закрыть окно?",
                 QMessageBox.Yes | QMessageBox.No, QMessageBox.No,
             )
             if ret != QMessageBox.Yes:

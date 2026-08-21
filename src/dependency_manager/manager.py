@@ -4,12 +4,13 @@ Kept Qt-free so it can be unit-tested without a QApplication.
 """
 import json
 import logging
+import os
 import shutil
 import subprocess
 from datetime import datetime
 from pathlib import Path
 
-from ..config_loader import get_deps_config, save_deps_config
+from ..config_loader import get_deps_config, load_settings, save_deps_config
 from . import versioning
 from .envs import find_environments, list_installed
 from .models import ApplyChange, BrowserInfo, Dependency, Env, Manager, ReqLine, Status
@@ -28,6 +29,51 @@ logger = logging.getLogger("pricer.deps")
 
 PLAYWRIGHT_MCP = "@playwright/mcp"
 BACKUP_SUFFIX = ".depsbak"
+
+BACKEND_LABELS = {
+    "playwright": "Chromium (Playwright)",
+    "camoufox": "Camoufox (Firefox)",
+    "nodriver": "Chrome (Nodriver)",
+}
+
+CAMOUFOX_LAUNCH_FILE = "camoufox.exe"
+
+
+def _configured_backends() -> list[str]:
+    """Backends that the current config uses (browser.backends), defaulting to the full chain."""
+    cfg = load_settings()
+    backends = cfg.get("browser", {}).get("backends") or []
+    if not backends:
+        backends = ["camoufox", "playwright", "nodriver"]
+    return [b for b in backends if b in BACKEND_LABELS]
+
+
+def camoufox_browser_root() -> Path:
+    """Directory where camoufox keeps its downloaded Firefox-fork browsers.
+    Uses the same layout as the camoufox package (platformdirs user_cache_dir),
+    e.g. %LOCALAPPDATA%\\camoufox\\camoufox\\Cache."""
+    try:
+        from platformdirs import user_cache_dir
+
+        return Path(user_cache_dir("camoufox"))
+    except ImportError:
+        base = os.environ.get("LOCALAPPDATA")
+        if base:
+            return Path(base) / "camoufox" / "camoufox" / "Cache"
+        return Path.home() / "AppData" / "Local" / "camoufox" / "camoufox" / "Cache"
+
+
+def chrome_executable() -> Path | None:
+    """System Google Chrome used by the nodriver backend, if found."""
+    candidates = []
+    for var in ("PROGRAMFILES", "PROGRAMFILES(X86)", "LOCALAPPDATA"):
+        base = os.environ.get(var)
+        if base:
+            candidates.append(Path(base) / "Google" / "Chrome" / "Application" / "chrome.exe")
+    for c in candidates:
+        if c.exists():
+            return c
+    return None
 
 
 class DependencyManager:
@@ -127,26 +173,43 @@ class DependencyManager:
             return Status.UPDATE
         return Status.DOWNGRADE
 
-    # ── playwright browser ───────────────────────────────────────
+    # ── browsers (per configured backend) ────────────────────────
     def _active_mcp_version(self) -> str | None:
         cfg = get_deps_config()
         return (cfg.get("playwright_mcp") or {}).get("version") or None
 
-    def browser_status(self) -> BrowserInfo:
+    def browser_status(self, env: Env | None = None) -> list[BrowserInfo]:
+        """Expected vs installed state for every browser in the current config
+        (playwright → chromium, camoufox → bundled Firefox, nodriver → system Chrome)."""
+        out = []
+        for backend in _configured_backends():
+            try:
+                if backend == "playwright":
+                    out.append(self._playwright_browser_status())
+                elif backend == "camoufox":
+                    out.append(self._camoufox_browser_status(env))
+                elif backend == "nodriver":
+                    out.append(self._nodriver_browser_status(env))
+            except Exception as e:  # noqa: BLE001
+                logger.exception("browser status failed for %s", backend)
+                out.append(BrowserInfo(name=backend, label=BACKEND_LABELS.get(backend, backend),
+                                       error=str(e)))
+        return out
+
+    def _playwright_browser_status(self) -> BrowserInfo:
         """Expected vs installed chromium revision for the active @playwright/mcp."""
         pin = self._active_mcp_version()
         ref_dir = mcp_package_dir(pin) if pin else mcp_package_dir()
+        info = BrowserInfo(name="playwright", label=BACKEND_LABELS["playwright"])
         if ref_dir is None:
-            return BrowserInfo(
-                package_version=pin or "",
-                error=f"пакет {PLAYWRIGHT_MCP} не найден в кэше npx",
-            )
+            info.error = f"пакет {PLAYWRIGHT_MCP} не найден в кэше npx"
+            return info
         try:
             pkg_ver = json.loads((ref_dir / "package.json").read_text(encoding="utf-8")).get("version", "")
         except Exception:  # noqa: BLE001
             pkg_ver = pin or ""
+        info.package_version = pkg_ver
 
-        info = BrowserInfo(package_version=pkg_ver)
         revs = expected_browser_revisions(ref_dir)
         if not revs:
             info.error = "browsers.json не найден для playwright-core"
@@ -165,22 +228,88 @@ class DependencyManager:
             info.details[f"{name} (ожидается r{rev})"] = state
         return info
 
-    def update_browser(self, on_log=None, on_progress=None) -> tuple[bool, str]:
-        """Run `playwright install chromium` for the active @playwright/mcp version."""
-        log = on_log or (lambda m: None)
-        npx = self._find_npx()
-        pin = self._active_mcp_version()
-        pkg_spec = f"{PLAYWRIGHT_MCP}@{pin}" if pin else PLAYWRIGHT_MCP
+    def _camoufox_browser_status(self, env: Env | None) -> BrowserInfo:
+        """Camoufox pip package present in the env + Firefox-fork browser bundle fetched."""
+        info = BrowserInfo(name="camoufox", label=BACKEND_LABELS["camoufox"])
+        if env is None:
+            info.error = "выберите окружение для проверки camoufox"
+            return info
+        pkg_ver = list_installed(env.python).get("camoufox")
+        info.package_version = pkg_ver or ""
+        if not pkg_ver:
+            info.error = "пакет camoufox не установлен в окружении"
+            return info
+        info.expected_rev = pkg_ver
+        build = ""
+        found = False
+        browsers = camoufox_browser_root() / "browsers"
+        if browsers.exists():
+            for p in browsers.rglob(CAMOUFOX_LAUNCH_FILE):
+                build = p.parent.name
+                found = True
+                break
+        info.installed = found
+        if found:
+            info.installed_rev = pkg_ver
+        info.details["бандл браузера"] = (
+            str(camoufox_browser_root()) if found else "не скачан (python -m camoufox fetch)"
+        )
+        if build:
+            info.details["версия браузера"] = build
+        return info
 
-        log(f"Установка браузера Chromium: npx -y {pkg_spec} install-browser chromium")
-        if on_progress:
-            on_progress(1, 1, "Установка браузера Chromium…")
-        ok = self._run_npx(npx, [pkg_spec, "install-browser", "chromium"], log, timeout=900)
-        if ok is None:
-            return False, "npx не запустился"
-        if ok:
-            return True, "Chromium установлен и соответствует ожидаемой ревизии"
-        return False, "install-browser завершился с ошибкой — см. лог"
+    def _nodriver_browser_status(self, env: Env | None) -> BrowserInfo:
+        """Nodriver pip package present; browser itself is system Google Chrome."""
+        info = BrowserInfo(name="nodriver", label=BACKEND_LABELS["nodriver"])
+        if env is None:
+            info.error = "выберите окружение для проверки nodriver"
+            return info
+        pkg_ver = list_installed(env.python).get("nodriver")
+        info.package_version = pkg_ver or ""
+        if not pkg_ver:
+            info.error = "пакет nodriver не установлен в окружении"
+            return info
+        info.expected_rev = pkg_ver
+        info.installed_rev = pkg_ver
+        exe = chrome_executable()
+        info.installed = exe is not None
+        info.details["браузер"] = str(exe) if exe else "системный Google Chrome не найден"
+        return info
+
+    def update_browser(self, name: str = "playwright", env: Env | None = None,
+                       on_log=None, on_progress=None) -> tuple[bool, str]:
+        """Install/refresh the browser for the given backend (playwright | camoufox | nodriver)."""
+        log = on_log or (lambda m: None)
+        if name == "playwright":
+            npx = self._find_npx()
+            pin = self._active_mcp_version()
+            pkg_spec = f"{PLAYWRIGHT_MCP}@{pin}" if pin else PLAYWRIGHT_MCP
+            log(f"Установка браузера Chromium: npx -y {pkg_spec} install-browser chromium")
+            if on_progress:
+                on_progress(1, 1, "Установка браузера Chromium…")
+            ok = self._run_npx(npx, [pkg_spec, "install-browser", "chromium"], log, timeout=900)
+            if ok is None:
+                return False, "npx не запустился"
+            if ok:
+                return True, "Chromium установлен и соответствует ожидаемой ревизии"
+            return False, "install-browser завершился с ошибкой — см. лог"
+        if name == "camoufox":
+            if env is None:
+                return False, "выберите окружение для установки camoufox"
+            if on_progress:
+                on_progress(1, 1, "Загрузка браузера Camoufox…")
+            ok = self._run_command(
+                [str(env.python), "-m", "camoufox", "fetch"], log, timeout=1200,
+                label="Загрузка браузера Camoufox (Firefox fork)",
+            )
+            if ok is None:
+                return False, "не удалось запустить python -m camoufox fetch"
+            if ok:
+                return True, "Camoufox установлен"
+            return False, "camoufox fetch завершился с ошибкой — см. лог"
+        if name == "nodriver":
+            return True, "Nodriver использует системный Google Chrome — загрузка не требуется"
+        return False, f"неизвестный браузер: {name}"
 
     # ── apply ────────────────────────────────────────────────────
     def backup(self) -> Path:
@@ -298,6 +427,26 @@ class DependencyManager:
             return False
         except OSError as e:
             log(f"[warn] npx не запустился: {e}")
+            return None
+        out = (proc.stdout or "") + (proc.stderr or "")
+        for ln in out.splitlines():
+            if ln.strip():
+                log(ln)
+        return proc.returncode == 0
+
+    @staticmethod
+    def _run_command(cmd: list, log, timeout: int, label: str = "") -> bool | None:
+        """Run an arbitrary command, streaming output to the log. Returns True/False/None."""
+        log(f"$ {' '.join(cmd)}")
+        if label:
+            log(label)
+        try:
+            proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+        except subprocess.TimeoutExpired:
+            log(f"[warn] Таймаут ({timeout}s) для {' '.join(cmd[:2])}")
+            return False
+        except OSError as e:
+            log(f"[warn] команда не запустилась: {e}")
             return None
         out = (proc.stdout or "") + (proc.stderr or "")
         for ln in out.splitlines():

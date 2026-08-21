@@ -1,5 +1,54 @@
 # State Log
 
+## 2026-08-20 — Фикс: определение бандла Camoufox (неверный корень кэша)
+
+### Проблема
+После `python -m camoufox fetch` (установка прошла успешно) дисклеймер по-прежнему
+показывал «Camoufox (Firefox): не установлен (ожидается 0.5.5)».
+
+### Root cause
+`camoufox_browser_root()` возвращал `%LOCALAPPDATA%\camoufox`, а реальный корень
+бандлов — `%LOCALAPPDATA%\camoufox\camoufox\Cache` (layout `platformdirs.user_cache_dir`:
+`LOCALAPPDATA\<appauthor>\<appname>\Cache`, appauthor = appname = «camoufox»).
+`browsers/` лежит внутри этого Cache-каталога, поэтому детект `camoufox.exe` не находил бандл.
+
+### Что сделано
+- `camoufox_browser_root()` теперь использует `platformdirs.user_cache_dir("camoufox")`
+  (с фолбэком на ручной Windows-путь) — совпадает с путём, который использует сам пакет camoufox.
+- В `_camoufox_browser_status()` дополнительно записывается фактическая версия бандла
+  из имени папки (например `152.0.4-beta.28-386fc2f4`) в `details["версия браузера"]`.
+- Проверено на реальной системе: camoufox → installed=True, up_to_date=True, версия 152.0.4-beta.28.
+
+## 2026-08-20 — Инструмент зависимостей: учёт всех браузеров конфигурации (не только chromium)
+
+### Проблема
+Инструмент «Зависимости» проверял/устанавливал только chromium (Playwright). Конфигурация
+(`config/settings.yaml → browser.backends`) использует 3 браузера: camoufox (Firefox fork),
+playwright (Chromium), nodriver (системный Chrome). Для camoufox/nodriver не было ни статуса
+бандла, ни кнопки установки.
+
+### Что сделано
+- **`src/dependency_manager/models.py`**: `BrowserInfo` расширен — `name` = backend,
+  добавлен `label`. `up_to_date` без жёсткой привязки к chromium.
+- **`src/dependency_manager/manager.py`**:
+  - `_configured_backends()` — читает `browser.backends` из settings.yaml (фолбэк на полную цепочку).
+  - `browser_status(env)` теперь возвращает **список** `BrowserInfo` по каждому backend:
+    - `playwright` → ревизия chromium из browsers.json (логика сохранена);
+    - `camoufox` → пакет в venv + бандл Firefox-форка (`%LOCALAPPDATA%\camoufox\browsers`,
+      поиск `camoufox.exe` рекурсивно);
+    - `nodriver` → пакет в venv + наличие системного Google Chrome.
+  - `update_browser(name, env)` обобщён: playwright → `npx install-browser chromium`,
+    camoufox → `python -m camoufox fetch`, nodriver → no-op (использует системный Chrome).
+  - Новый `_run_command()` для произвольных команд (fetch).
+- **`src/dependency_manager/worker.py`**: `CheckWorker` передаёт env в `browser_status`;
+  `BrowserWorker` принимает список целей `(name, env)`.
+- **`src/dependency_manager/dialog.py`**: вместо одной строки «Chromium (MCP)» — группа
+  «Браузеры (текущая конфигурация)» с отдельной строкой на каждый backend (цвет: зелёный
+  актуален / оранжевый требует установки / серый не определён). Кнопка «Обновить браузеры»
+  устанавливает недостающие (playwright/camoufox); nodriver показывает статус Chrome.
+- **Тесты**: обновлены `test_browser_status_*` на list-API; добавлены `TestConfiguredBackends`,
+  `TestCamoufoxBrowser` (5), `TestNodriverBrowser` (3). **729/729 pass**.
+
 ## 2026-08-20 — Счётчик токенов LLM во вкладке «Мониторинг»
 
 ### Что сделано

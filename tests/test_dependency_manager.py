@@ -5,8 +5,8 @@ from pathlib import Path
 import pytest
 
 from src.dependency_manager import versioning
-from src.dependency_manager.models import BrowserInfo, Dependency, Manager, Status
-from src.dependency_manager.manager import DependencyManager
+from src.dependency_manager.models import BrowserInfo, Dependency, Env, Manager, Status
+from src.dependency_manager.manager import DependencyManager, _configured_backends
 from src.dependency_manager.npm import (
     browsers_root,
     expected_browser_revisions,
@@ -252,7 +252,8 @@ class TestBrowserRevisions:
         with pytest.MonkeyPatch.context() as mp:
             mp.setattr("src.dependency_manager.manager.mcp_package_dir", lambda v=None: pkg)
             mp.setattr("src.dependency_manager.manager.browsers_root", lambda: tmp_path)
-            info = mgr.browser_status()
+            mp.setattr("src.dependency_manager.manager._configured_backends", lambda: ["playwright"])
+            info = _playwright_entry(mgr.browser_status())
         assert info.up_to_date
         assert info.package_version == "0.0.79"
         assert any("ffmpeg" in k for k in info.details)
@@ -267,7 +268,8 @@ class TestBrowserRevisions:
         with pytest.MonkeyPatch.context() as mp:
             mp.setattr("src.dependency_manager.manager.mcp_package_dir", lambda v=None: pkg)
             mp.setattr("src.dependency_manager.manager.browsers_root", lambda: tmp_path)
-            info = mgr.browser_status()
+            mp.setattr("src.dependency_manager.manager._configured_backends", lambda: ["playwright"])
+            info = _playwright_entry(mgr.browser_status())
         assert not info.up_to_date
         assert info.installed_rev == "1223"
         assert info.expected_rev == "1237"
@@ -280,7 +282,8 @@ class TestBrowserRevisions:
         with pytest.MonkeyPatch.context() as mp:
             mp.setattr("src.dependency_manager.manager.mcp_package_dir", lambda v=None: pkg)
             mp.setattr("src.dependency_manager.manager.browsers_root", lambda: tmp_path)
-            info = mgr.browser_status()
+            mp.setattr("src.dependency_manager.manager._configured_backends", lambda: ["playwright"])
+            info = _playwright_entry(mgr.browser_status())
         assert info.expected_rev == "1237"
         assert info.installed_rev == ""
         assert not info.installed
@@ -291,7 +294,8 @@ class TestBrowserRevisions:
         mgr = DependencyManager(tmp_path)
         with pytest.MonkeyPatch.context() as mp:
             mp.setattr("src.dependency_manager.manager.mcp_package_dir", lambda v=None: None)
-            info = mgr.browser_status()
+            mp.setattr("src.dependency_manager.manager._configured_backends", lambda: ["playwright"])
+            info = _playwright_entry(mgr.browser_status())
         assert info.error
         assert not info.up_to_date
         mgr.close()
@@ -308,7 +312,8 @@ class TestBrowserRevisions:
             mp.setattr("src.dependency_manager.manager.mcp_package_dir",
                        lambda v=None: pkg if v == "0.0.75" else None)
             mp.setattr("src.dependency_manager.manager.browsers_root", lambda: tmp_path)
-            info = mgr.browser_status()
+            mp.setattr("src.dependency_manager.manager._configured_backends", lambda: ["playwright"])
+            info = _playwright_entry(mgr.browser_status())
         assert info.package_version == "0.0.75"
         assert info.up_to_date
         mgr.close()
@@ -348,4 +353,126 @@ class TestBrowserRevisions:
         ok, msg = mgr.update_browser()
         assert ok
         assert seen["args"][0] == "@playwright/mcp"
+        mgr.close()
+
+
+def _playwright_entry(infos: list) -> BrowserInfo:
+    return next(i for i in infos if i.name == "playwright")
+
+
+class TestConfiguredBackends:
+    def test_defaults_when_no_settings(self, monkeypatch):
+        monkeypatch.setattr("src.dependency_manager.manager.load_settings", lambda: {})
+        assert _configured_backends() == ["camoufox", "playwright", "nodriver"]
+
+    def test_uses_settings_order(self, monkeypatch):
+        monkeypatch.setattr("src.dependency_manager.manager.load_settings",
+                            lambda: {"browser": {"backends": ["playwright", "nodriver"]}})
+        assert _configured_backends() == ["playwright", "nodriver"]
+
+    def test_drops_unknown_backends(self, monkeypatch):
+        monkeypatch.setattr("src.dependency_manager.manager.load_settings",
+                            lambda: {"browser": {"backends": ["camoufox", "unknown", "playwright"]}})
+        assert _configured_backends() == ["camoufox", "playwright"]
+
+
+class TestCamoufoxBrowser:
+    @staticmethod
+    def _env():
+        return Env(name="venv", python=Path("venv/Scripts/python.exe"))
+
+    def test_browser_status_bundle_present(self, tmp_path, monkeypatch):
+        from src.dependency_manager import manager as mgr_mod
+        browsers = tmp_path / "camoufox" / "browsers" / "repo" / "v"
+        browsers.mkdir(parents=True)
+        (browsers / "camoufox.exe").write_text("")
+        monkeypatch.setattr(mgr_mod, "_configured_backends", lambda: ["camoufox"])
+        monkeypatch.setattr(mgr_mod, "camoufox_browser_root", lambda: tmp_path / "camoufox")
+        monkeypatch.setattr(mgr_mod, "list_installed", lambda python: {"camoufox": "0.5.6"})
+        mgr = DependencyManager(tmp_path)
+        info = mgr.browser_status(self._env())[0]
+        assert info.name == "camoufox"
+        assert info.up_to_date
+        assert info.package_version == "0.5.6"
+        mgr.close()
+
+    def test_browser_status_bundle_missing(self, tmp_path, monkeypatch):
+        from src.dependency_manager import manager as mgr_mod
+        monkeypatch.setattr(mgr_mod, "_configured_backends", lambda: ["camoufox"])
+        monkeypatch.setattr(mgr_mod, "camoufox_browser_root", lambda: tmp_path / "camoufox")
+        monkeypatch.setattr(mgr_mod, "list_installed", lambda python: {"camoufox": "0.5.6"})
+        mgr = DependencyManager(tmp_path)
+        info = mgr.browser_status(self._env())[0]
+        assert not info.installed
+        assert not info.up_to_date
+        assert "fetch" in info.details["бандл браузера"]
+        mgr.close()
+
+    def test_browser_status_package_missing(self, tmp_path, monkeypatch):
+        from src.dependency_manager import manager as mgr_mod
+        monkeypatch.setattr(mgr_mod, "_configured_backends", lambda: ["camoufox"])
+        monkeypatch.setattr(mgr_mod, "list_installed", lambda python: {})
+        mgr = DependencyManager(tmp_path)
+        info = mgr.browser_status(self._env())[0]
+        assert info.error
+        assert "не установлен" in info.error
+        mgr.close()
+
+    def test_update_browser_runs_fetch(self, tmp_path, monkeypatch):
+        mgr = DependencyManager(tmp_path)
+        seen = {}
+
+        def fake_run(cmd, log, timeout, label=""):
+            seen["cmd"] = cmd
+            return True
+
+        monkeypatch.setattr(mgr, "_run_command", fake_run)
+        ok, msg = mgr.update_browser(name="camoufox", env=self._env())
+        assert ok
+        assert seen["cmd"][-3:] == ["-m", "camoufox", "fetch"]
+        mgr.close()
+
+    def test_update_browser_needs_env(self, tmp_path):
+        mgr = DependencyManager(tmp_path)
+        ok, msg = mgr.update_browser(name="camoufox", env=None)
+        assert not ok
+        mgr.close()
+
+
+class TestNodriverBrowser:
+    @staticmethod
+    def _env():
+        return Env(name="venv", python=Path("venv/Scripts/python.exe"))
+
+    def test_browser_status_chrome_found(self, tmp_path, monkeypatch):
+        from src.dependency_manager import manager as mgr_mod
+        chrome = tmp_path / "chrome.exe"
+        chrome.write_text("")
+        monkeypatch.setattr(mgr_mod, "_configured_backends", lambda: ["nodriver"])
+        monkeypatch.setattr(mgr_mod, "chrome_executable", lambda: chrome)
+        monkeypatch.setattr(mgr_mod, "list_installed", lambda python: {"nodriver": "0.50.2"})
+        mgr = DependencyManager(tmp_path)
+        info = mgr.browser_status(self._env())[0]
+        assert info.name == "nodriver"
+        assert info.installed
+        assert info.up_to_date
+        assert str(chrome) in info.details["браузер"]
+        mgr.close()
+
+    def test_browser_status_chrome_missing(self, tmp_path, monkeypatch):
+        from src.dependency_manager import manager as mgr_mod
+        monkeypatch.setattr(mgr_mod, "_configured_backends", lambda: ["nodriver"])
+        monkeypatch.setattr(mgr_mod, "chrome_executable", lambda: None)
+        monkeypatch.setattr(mgr_mod, "list_installed", lambda python: {"nodriver": "0.50.2"})
+        mgr = DependencyManager(tmp_path)
+        info = mgr.browser_status(self._env())[0]
+        assert not info.installed
+        assert "не найден" in info.details["браузер"]
+        mgr.close()
+
+    def test_update_browser_noop(self, tmp_path):
+        mgr = DependencyManager(tmp_path)
+        ok, msg = mgr.update_browser(name="nodriver", env=self._env())
+        assert ok
+        assert "системный" in msg
         mgr.close()

@@ -24,9 +24,9 @@ class CheckWorker(QThread):
         except Exception as e:  # noqa: BLE001
             self.failed.emit(str(e))
         try:
-            self.browser_checked.emit(self._manager.browser_status())
+            self.browser_checked.emit(self._manager.browser_status(self._env))
         except Exception as e:  # noqa: BLE001
-            self.browser_checked.emit(BrowserInfo(error=str(e)))
+            self.browser_checked.emit([BrowserInfo(error=str(e))])
 
 
 class ApplyWorker(QThread):
@@ -59,22 +59,29 @@ class ApplyWorker(QThread):
 class BrowserWorker(QThread):
     progress = Signal(int, int, str)
     log = Signal(str)
-    finished_ok = Signal(str)
+    finished_ok = Signal(list)  # list[(name, message)]
     failed = Signal(str)
 
-    def __init__(self, manager: DependencyManager, parent=None):
+    def __init__(self, manager: DependencyManager, targets: list[tuple[str, Env | None]],
+                 parent=None):
         super().__init__(parent)
         self._manager = manager
+        self._targets = targets
 
     def run(self):
-        try:
-            ok, message = self._manager.update_browser(
-                on_log=self.log.emit,
-                on_progress=self.progress.emit,
-            )
-            if ok:
-                self.finished_ok.emit(message)
-            else:
-                self.failed.emit(message)
-        except Exception as e:  # noqa: BLE001
-            self.failed.emit(str(e))
+        results = []
+        for name, env in self._targets:
+            try:
+                ok, message = self._manager.update_browser(
+                    name=name, env=env,
+                    on_log=self.log.emit,
+                    on_progress=self.progress.emit,
+                )
+                results.append((name, ok, message))
+            except Exception as e:  # noqa: BLE001
+                results.append((name, False, str(e)))
+        if all(ok for _, ok, _ in results):
+            self.finished_ok.emit([(n, m) for n, ok, m in results if ok])
+        else:
+            failed = [f"{n}: {m}" for n, ok, m in results if not ok]
+            self.failed.emit("; ".join(failed))

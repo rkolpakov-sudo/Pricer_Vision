@@ -72,15 +72,17 @@ class ApplyChange:
 
 @dataclass
 class BrowserInfo:
-    """Expected vs installed revision of the chromium browser used by playwright MCP."""
+    """Expected vs installed state of a browser used by one backend
+    (playwright → chromium revision, camoufox → bundled Firefox, nodriver → system Chrome)."""
 
-    name: str = "chromium"
-    package_version: str = ""      # @playwright/mcp version the expectation is based on
-    expected_rev: str = ""         # revision required by browsers.json
-    installed_rev: str = ""        # revision found in the ms-playwright folder
-    installed: bool = False        # browser folder present and INSTALLATION_COMPLETE
+    name: str = "playwright"      # backend: 'playwright' | 'camoufox' | 'nodriver'
+    label: str = ""               # display label, e.g. "Chromium (Playwright)"
+    package_version: str = ""     # package the expectation is based on (MCP / camoufox / nodriver)
+    expected_rev: str = ""        # revision/version required
+    installed_rev: str = ""       # revision/version found on disk
+    installed: bool = False       # browser present and usable
     error: str = ""
-    details: dict = field(default_factory=dict)  # extra browser names for the tooltip
+    details: dict = field(default_factory=dict)  # extra info (tooltip)
 
     @property
     def up_to_date(self) -> bool:
