@@ -9,7 +9,11 @@ from pathlib import Path
 
 logger = logging.getLogger("pricer.pdf.mineru")
 
-MINERU_CLI = str(Path(__file__).parents[2] / "mineru_venv" / "Scripts" / "mineru.exe")
+# MinerU живёт в том же venv, что и проект (Python 3.13 поддерживает оба).
+# Запуск через python -c, а не через trampoline mineru.exe: uv-трамплин
+# зашивает абсолютный путь окружения и ломается при переименовании venv.
+MINERU_PYTHON = str(Path(__file__).parents[2] / "venv" / "Scripts" / "python.exe")
+_MINERU_ENTRY = "from mineru.cli.client import main; main()"
 
 # "Layout Predict:  66%|######5   | 38/58 [...]" — стадия и процент из stderr tqdm
 _STAGE_RE = re.compile(r"([A-Za-z][A-Za-z0-9_\- ]{2,40}?):\s*(\d+)%")
@@ -47,7 +51,8 @@ class MinerUBackend:
 
     def _build_cmd(self, pdf_path: str, output_dir: str) -> list[str]:
         return [
-            MINERU_CLI,
+            MINERU_PYTHON,
+            "-c", _MINERU_ENTRY,
             "-p", str(pdf_path),
             "-o", output_dir,
             "-b", "pipeline",

@@ -1,5 +1,28 @@
 # State Log
 
+## 2026-08-22 — Единый venv: Python 3.13 (MinerU больше не в отдельном окружении)
+
+### Причина раздельного venv
+Основной venv был на Python 3.14, MinerU требует `>=3.10,<3.14` → отдельный
+`mineru_venv` на 3.11 + subprocess.
+
+### Решение
+- Новый `venv` на **Python 3.13.15** через `uv venv --python 3.13`; установлен весь
+  requirements.txt + `mineru[pipeline]==3.4.0` + six + reportlab.
+- Старые окружения удалены (`venv_314_bak`, `mineru_venv`) после валидации.
+- Кодовые правки: `MINERU_CLI` → `MINERU_PYTHON` (`venv/Scripts/python.exe -c
+  "from mineru.cli.client import main; main()"`), `envs.py` без mineru_venv,
+  skipif-путь теста, requirements.txt дополнен.
+- Важно: uv-trampoline `.exe` зашивает абсолютный путь окружения и ломается при
+  переименовании venv («uv trampoline failed to canonicalize script path») — запуск
+  через `python -c` делает вызов переименование-устойчивым.
+- Недостающие транзитивные зависимости MinerU: `six` (не объявлена в METADATA).
+
+### Валидация
+- **762 passed** (+1 slow); PDF_E2E_MINERU=1 — 8 passed включая полный прогон скана.
+- GOST на реальной спеке: 1024/1051 = **97.4%**; MinerU-скан: qtys {10, 120.5} ✓.
+- GUI/зависимости: инструмент «Зависимости» теперь видит одно окружение со всеми пакетами.
+
 ## 2026-08-22 — ФАЗА 4: геометрический парсер ГОСТ-форм (покрытие 40% → 97.4%)
 
 ### Провал, вскрытый пользователем

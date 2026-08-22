@@ -1,4 +1,4 @@
-import asyncio
+﻿import asyncio
 import logging
 
 from src.pdf_parser.mineru_backend import MinerUBackend
@@ -9,7 +9,7 @@ logger = logging.getLogger("pricer.pdf.ocr")
 class OCRFallback:
     """OCR for scanned PDFs without a text layer.
 
-    The real backend is MinerUBackend (mineru_venv), NOT PaddleOCR/Tesseract —
+    The real backend is MinerUBackend (project venv), NOT PaddleOCR/Tesseract —
     no new dependencies are required. MinerU already handles scans (built-in OCR).
     """
 
@@ -38,3 +38,4 @@ class OCRFallback:
         return await self.mineru_backend.parse_async(
             pdf_path, timeout=timeout, progress_callback=progress_callback,
         )
+

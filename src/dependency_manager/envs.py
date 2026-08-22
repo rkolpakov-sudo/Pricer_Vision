@@ -8,7 +8,7 @@ from .models import Env
 
 def find_environments(project_root: Path) -> list[Env]:
     envs = []
-    for name in ("venv", "mineru_venv"):
+    for name in ("venv",):
         root = project_root / name
         python = root / "Scripts" / "python.exe"
         if root.is_dir() and python.is_file():

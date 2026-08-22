@@ -1,8 +1,8 @@
-# -*- coding: utf-8 -*-
+﻿# -*- coding: utf-8 -*-
 """Generate PDF test fixtures for the pdf_parser suite (run once, outputs are committed).
 
-Run with mineru_venv python (has reportlab + Pillow):
-    mineru_venv\\Scripts\\python.exe tests\\fixtures\\pdf\\generate_fixtures.py
+Run with the project venv python (has reportlab + Pillow):
+    venv\\Scripts\\python.exe tests\\fixtures\\pdf\\generate_fixtures.py
 """
 import json
 import sys
@@ -160,3 +160,4 @@ def main():
 
 if __name__ == "__main__":
     sys.exit(main())
+

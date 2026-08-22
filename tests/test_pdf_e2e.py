@@ -68,8 +68,8 @@ class TestFastPathE2E:
     reason="полный прогон MinerU ~35 c; включается PDF_E2E_MINERU=1",
 )
 @pytest.mark.skipif(
-    not (Path(__file__).parents[1] / "mineru_venv" / "Scripts" / "mineru.exe").exists(),
-    reason="mineru_venv не найден",
+    not (Path(__file__).parents[1] / "venv" / "Scripts" / "mineru.exe").exists(),
+    reason="mineru не найден в venv",
 )
 class TestScanEscalationE2E:
     def test_scan_through_real_mineru(self):
