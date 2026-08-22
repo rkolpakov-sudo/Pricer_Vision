@@ -81,3 +81,22 @@ class TestScanEscalationE2E:
         items = asyncio.run(SpecStructurer(llm_client=None).structure(md))
         qtys = {it["qty"] for it in items}
         assert {10.0, 120.5} <= qtys
+
+
+class TestGostFormParser:
+    REAL_SPEC = Path(__file__).parents[1] / "08_12-23РД-К1-ОВ.pdf"
+
+    @pytest.mark.skipif(not REAL_SPEC.exists(), reason="реальная спецификация отсутствует")
+    def test_real_spec_coverage(self):
+        """Критерий приёмки: покрытие >=95% позиций реальной спецификации."""
+        from src.pdf_parser.gost_form_parser import GostFormParser
+
+        res = GostFormParser().parse(str(self.REAL_SPEC))
+        assert res is not None, "ГОСТ-форма не обнаружена"
+        items, markers = res
+        named = sum(1 for i in items if i["name"])
+        coverage = named / markers if markers else 0
+        assert coverage >= 0.95, f"покрытие {coverage:.1%} < 95%"
+        # Позиции идут до конца документа
+        max_pos = max(i["pos"] for i in items)
+        assert max_pos > 1400

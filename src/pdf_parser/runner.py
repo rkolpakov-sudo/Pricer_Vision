@@ -6,6 +6,7 @@ from PySide6.QtCore import QThread, Signal
 
 from src.llm_client import LLMClient
 from src.pdf_parser.fast_backend import FastBackend, FastBackendError, route_pdf
+from src.pdf_parser.gost_form_parser import GostFormParser
 from src.pdf_parser.mineru_backend import MinerUBackend
 from src.pdf_parser.review import SmartReview
 from src.pdf_parser.structurer import SpecStructurer
@@ -68,19 +69,25 @@ class PdfParserRunner(QThread):
             elif not fast.available():
                 logger.info("pdf-inspector недоступен — маршрут MinerU")
 
+            items = None
             raw_text = ""
             if route == "fast":
                 self.progress_signal.emit("Быстрое извлечение текста...", 0, 100)
-                raw_text = await self._run_parse(
-                    lambda: asyncio.to_thread(fast.extract_markdown, self._pdf_path)
-                )
-                if raw_text is None:
-                    self.done_signal.emit(False, "Остановлено пользователем")
-                    return
+                # Приоритет: геометрический разбор ГОСТ-формы (без потерь
+                # на объединённых ячейках). Фолбэк — markdown + structurer.
+                gost_items = await asyncio.to_thread(self._try_gost_parse)
+                if gost_items is not None:
+                    items = gost_items
+                else:
+                    raw_text = await self._run_parse(
+                        lambda: asyncio.to_thread(fast.extract_markdown, self._pdf_path)
+                    )
+                    if raw_text is None:
+                        self.done_signal.emit(False, "Остановлено пользователем")
+                        return
 
-            # Эскалация на MinerU: скан/битые шрифты по маршруту ИЛИ
-            # fast-path дал слишком мало текста. Один запуск вместо дублей.
-            if route == "mineru" or len(raw_text.strip()) < max(self._ocr_min_text_length, 1):
+            if items is None and (
+                    route == "mineru" or len(raw_text.strip()) < max(self._ocr_min_text_length, 1)):
                 if route == "fast":
                     self.progress_signal.emit(
                         "Мало текста — обработка через MinerU...", 0, 100)
@@ -96,20 +103,21 @@ class PdfParserRunner(QThread):
                     self.done_signal.emit(False, "Остановлено пользователем")
                     return
 
-            if not raw_text.strip():
-                self.done_signal.emit(False, "PDF пуст — не удалось извлечь текст")
-                return
+            if items is None:
+                if not raw_text.strip():
+                    self.done_signal.emit(False, "PDF пуст — не удалось извлечь текст")
+                    return
 
-            self.progress_signal.emit("Структурирование...", 2, 5)
+                self.progress_signal.emit("Структурирование...", 2, 5)
 
-            structurer = SpecStructurer(
-                self._llm_client,
-                use_llm=self._use_llm,
-                max_chars=self._llm_max_chars,
-                max_tokens=self._llm_max_tokens,
-                temperature=self._llm_temperature,
-            )
-            items = await structurer.structure(raw_text)
+                structurer = SpecStructurer(
+                    self._llm_client,
+                    use_llm=self._use_llm,
+                    max_chars=self._llm_max_chars,
+                    max_tokens=self._llm_max_tokens,
+                    temperature=self._llm_temperature,
+                )
+                items = await structurer.structure(raw_text)
 
             if self._stop_event.is_set():
                 self.done_signal.emit(False, "Остановлено пользователем")
@@ -143,6 +151,26 @@ class PdfParserRunner(QThread):
             self.done_signal.emit(False, f"Ошибка: {e}")
         finally:
             await self._llm_client.__aexit__(None, None, None)
+
+    def _try_gost_parse(self):
+        """Геометрический разбор ГОСТ-формы. None — если форма не найдена
+        или покрытие позиций ниже порога (тогда уходим в markdown-путь)."""
+        try:
+            gp = GostFormParser()
+            if not gp.available():
+                return None
+            res = gp.parse(self._pdf_path)
+        except Exception:  # noqa: BLE001
+            logger.warning("GOST geometric parse failed", exc_info=True)
+            return None
+        if not res:
+            return None
+        gitems, markers = res
+        named = sum(1 for i in gitems if i["name"])
+        coverage = named / markers if markers else 0.0
+        logger.info("GOST geometric parse: %d items, coverage %.0f%%",
+                    named, coverage * 100)
+        return gitems if coverage >= 0.9 else None
 
     async def _run_parse(self, coro_factory):
         """Запускает MinerU-задачу, реагирует на Стоп (убивает дерево процессов)."""
