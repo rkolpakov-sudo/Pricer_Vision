@@ -5,8 +5,8 @@ import threading
 from PySide6.QtCore import QThread, Signal
 
 from src.llm_client import LLMClient
+from src.pdf_parser.fast_backend import FastBackend, FastBackendError, route_pdf
 from src.pdf_parser.mineru_backend import MinerUBackend
-from src.pdf_parser.ocr_fallback import OCRFallback
 from src.pdf_parser.review import SmartReview
 from src.pdf_parser.structurer import SpecStructurer
 from src.pdf_parser.feedback import FeedbackCollector
@@ -37,6 +37,7 @@ class PdfParserRunner(QThread):
         self._llm_temperature = float(pdf_cfg.get("llm_temperature", 0.0))
         self._ocr_min_text_length = int(pdf_cfg.get("ocr_min_text_length", 100))
         self._review_threshold = float(pdf_cfg.get("review_threshold", SmartReview.CONFIDENCE_THRESHOLD))
+        self._fast_path = bool(pdf_cfg.get("fast_path", True))
 
     def stop(self):
         self._stop_event.set()
@@ -52,26 +53,41 @@ class PdfParserRunner(QThread):
     async def _run(self):
         await self._llm_client.__aenter__()
         try:
-            self.progress_signal.emit("Парсинг PDF через MinerU...", 0, 100)
-
+            # ── Маршрутизация: pdf-inspector classify (~20 мс) ──────
             backend = MinerUBackend(lang=self._mineru_lang, method=self._mineru_method)
-            raw_text = await self._run_parse(
-                lambda: backend.parse_async(
-                    self._pdf_path, timeout=self._mineru_timeout,
-                    progress_callback=self._on_mineru_progress,
-                )
-            )
-            if raw_text is None:
-                self.done_signal.emit(False, "Остановлено пользователем")
-                return
+            route = "mineru"
+            fast = FastBackend()
+            if self._fast_path and fast.available():
+                try:
+                    cls = await asyncio.to_thread(fast.classify, self._pdf_path)
+                    route = route_pdf(cls, fast_enabled=True)
+                    logger.info("PDF routed via %s (%s, conf %.2f)",
+                                route, cls.get("pdf_type"), cls.get("confidence", 0))
+                except FastBackendError as e:
+                    logger.warning("Fast classification failed, using MinerU: %s", e)
+            elif not fast.available():
+                logger.info("pdf-inspector недоступен — маршрут MinerU")
 
-            ocr = OCRFallback(lang=self._mineru_lang, method=self._mineru_method)
-            ocr.MIN_TEXT_LENGTH = self._ocr_min_text_length
-            if ocr.needs_ocr(raw_text):
-                self.progress_signal.emit("Текст короткий — повторный парсинг с OCR...", 1, 5)
-                logger.info("Low text extraction, retrying via MinerU OCR")
+            raw_text = ""
+            if route == "fast":
+                self.progress_signal.emit("Быстрое извлечение текста...", 0, 100)
                 raw_text = await self._run_parse(
-                    lambda: ocr.extract_with_ocr_async(
+                    lambda: asyncio.to_thread(fast.extract_markdown, self._pdf_path)
+                )
+                if raw_text is None:
+                    self.done_signal.emit(False, "Остановлено пользователем")
+                    return
+
+            # Эскалация на MinerU: скан/битые шрифты по маршруту ИЛИ
+            # fast-path дал слишком мало текста. Один запуск вместо дублей.
+            if route == "mineru" or len(raw_text.strip()) < max(self._ocr_min_text_length, 1):
+                if route == "fast":
+                    self.progress_signal.emit(
+                        "Мало текста — обработка через MinerU...", 0, 100)
+                else:
+                    self.progress_signal.emit("Парсинг PDF через MinerU...", 0, 100)
+                raw_text = await self._run_parse(
+                    lambda: backend.parse_async(
                         self._pdf_path, timeout=self._mineru_timeout,
                         progress_callback=self._on_mineru_progress,
                     )

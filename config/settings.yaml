@@ -47,6 +47,7 @@ paths:
   state: state.json
 pdf_parser:
   lang: east_slavic
+  fast_path: true
   llm_max_chars: 3000
   llm_max_tokens: 1024
   llm_temperature: 0.0

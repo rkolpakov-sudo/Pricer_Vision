@@ -1,5 +1,32 @@
 # State Log
 
+## 2026-08-22 — РЕФАКТОРИНГ PDF: Фаза 2 готова (fast-path роутинг в проде)
+
+### Что сделано
+- **`src/pdf_parser/fast_backend.py`** (новый): обёртка pdf-inspector с guarded import
+  (`AVAILABLE`), `FastBackend.classify/extract_markdown`, `FastBackendError`;
+  чистая функция **`route_pdf()`**: text_based + conf≥0.8 + без encoding issues → fast,
+  иначе (scanned/image/mixed/enc_issues/выкл/нет пакета) → mineru.
+- **`src/pdf_parser/runner.py`**: новый поток `_run` — classify (~20 мс) → route →
+  fast-extract (~200 мс) → эскалация на MinerU ОДИН раз при пустом/коротком тексте.
+  Дубль-запуск OCR-fallback (P3) удалён вместе с зависимостью от `OCRFallback`.
+  Конфиг `pdf_parser.fast_path: true` (settings.yaml).
+- Тесты `tests/test_pdf_router.py`: маршрутизация (8 кейсов), classify/extract на фейках,
+  оборачивание ошибок. **755/755**.
+
+### E2E-смоук нового пайплайна
+| PDF | Классификация | Маршрут | Позиций | Время |
+|---|---|---|---|---|
+| Реальная спека 58 стр | text_based conf 1.0 | fast | **355** | **0.27 с** |
+| table_classic.pdf | text_based | fast | 3 | <0.01 с |
+| scan_spec.pdf | scanned | mineru ✓ | — | — |
+| broken_fonts.pdf | text_based (enc не детектится) | **mineru-escalate** ✓ (56 симв.<100) | — | — |
+
+### Осталось (Фаза 3)
+- Прогон скана через полный runner с реальным MinerU (slow, ручная проверка).
+- UI: прогресс-сообщения уже обновлены («Быстрое извлечение текста…»);
+  при желании — индикатор маршрута в логе GUI.
+
 ## 2026-08-22 — РЕФАКТОРИНГ PDF (выполняется): Фаза 0 + Фаза 1 готовы
 
 ### Статус
