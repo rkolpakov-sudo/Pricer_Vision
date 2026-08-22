@@ -41,7 +41,11 @@ _COLUMN_ANCHORS = [
 ]
 
 _POS_CELL_RE = re.compile(r"^\.?\s*(\d{1,4})\s*\.?,?\s*$")
-_POS_GLUED_RE = re.compile(r"^\s*\.?\s*(\d{1,4})\.\s+(.+)$")
+# Клей «105. Труба…» и «1008.Вентилятор» (пробел после точки необязателен,
+# следующий символ — буква/кавычка/скобка).
+_POS_GLUED_RE = re.compile(
+    r"^\s*\.?\s*(\d{1,4})\.(?:\s+|(?=[А-Яа-яA-Za-z(\"]))(.*)$"
+)
 _JUNK_TOKENS = {"и", "№", "н"}
 
 
@@ -50,6 +54,7 @@ class GostFormParser:
 
     def __init__(self):
         self._struct = SpecStructurer(llm_client=None)
+        self._last_group_name = ""
 
     def available(self) -> bool:
         return AVAILABLE
@@ -64,6 +69,7 @@ class GostFormParser:
         """
         if not AVAILABLE:
             return None
+        self._last_group_name = ""
         try:
             raw = _pi.extract_text_with_positions(str(pdf_path))
         except Exception as e:  # noqa: BLE001
@@ -93,7 +99,10 @@ class GostFormParser:
             page_items = self._assemble_rows(bands, grid, items, seen)
             items.extend(page_items)
 
-        items = [it for it in items if re.search(r"[А-Яа-яA-Za-z]{2}", it["name"])]
+        # Позиции без распознанного имени не выбрасываем — помечаем на проверку
+        for it in items:
+            if not re.search(r"[А-Яа-яA-Za-z]{2}", it["name"]):
+                it["requires_review"] = True
         if not items:
             return None
         logger.info("gost parser: %d items, %d position markers", len(items), len(seen))
@@ -216,6 +225,18 @@ class GostFormParser:
             weight_c = cells[7] if len(cells) > 7 else ""
 
             unit_s, qty_s = self._split_unit_qty(unit_c, qty_c)
+
+            # Семантика ГОСТ-формы: у вариантов внутри группы имя в объединённой
+            # ячейке пустое — наследуем последнее увиденное имя группы.
+            review = False
+            if not re.search(r"[А-Яа-яA-Za-z]{2}", name):
+                if self._last_group_name:
+                    name = self._last_group_name
+                else:
+                    review = True
+            else:
+                self._last_group_name = name
+
             item = {
                 "pos": pos,
                 "name": name,
@@ -225,7 +246,7 @@ class GostFormParser:
                 "qty": self._struct._to_float(qty_s),
                 "unit": unit_s.lower().rstrip("."),
                 "weight": self._struct._to_float(weight_c),
-                "requires_review": False,
+                "requires_review": review,
             }
             built.append(item)
             prev = item
