@@ -2,9 +2,9 @@ import re
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QPushButton,
     QTextEdit, QLineEdit, QLabel, QStackedWidget,
-    QTableWidget, QTableWidgetItem, QHeaderView,
+    QTableWidget, QTableWidgetItem,
     QListWidget, QSplitter, QFrame, QFormLayout,
-    QSpinBox, QDoubleSpinBox, QComboBox, QMessageBox,
+    QDoubleSpinBox, QComboBox, QMessageBox,
     QCheckBox, QAbstractItemView, QProgressBar, QApplication,
 )
 from PySide6.QtGui import QTextCursor

@@ -11,7 +11,7 @@ from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QGridLayout, QLabel, QPushButton,
     QGraphicsView, QGraphicsScene, QGraphicsEllipseItem,
     QGraphicsLineItem, QGraphicsTextItem, QGraphicsItem,
-    QCheckBox, QToolTip, QFrame, QSizePolicy, QTextBrowser,
+    QCheckBox, QToolTip, QFrame, QSizePolicy,
 )
 from PySide6.QtOpenGLWidgets import QOpenGLWidget
 

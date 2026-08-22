@@ -1,14 +1,11 @@
 import sys
-import os
-import json
 import yaml
 import logging
-import time
 from pathlib import Path
 from datetime import datetime
 from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
                                  QHBoxLayout, QSplitter, QTableWidget, QTableWidgetItem,
-                                   QTextEdit, QPushButton, QLabel, QFileDialog, QProgressBar,
+                                   QPushButton, QLabel, QFileDialog, QProgressBar,
                                    QComboBox, QLineEdit, QTextBrowser,
                                    QDialog, QDialogButtonBox, QMessageBox,
                                    QStyleFactory, QCheckBox, QHeaderView, QDoubleSpinBox,
@@ -21,7 +18,7 @@ from src.pdf_parser.runner import PdfParserRunner
 from src.pdf_parser.review_dialog import ReviewDialog
 from src.pdf_parser.feedback import FeedbackCollector
 from src.toast import ToastManager
-from src.widget_base import CardWidget, paint_styled_background, setup_shadow
+from src.widget_base import paint_styled_background, setup_shadow
 from src.excel_writer import ExcelWriter
 from src.llm_client import LLMClient
 from src.mcp_agent_runner import MCPAgentRunner

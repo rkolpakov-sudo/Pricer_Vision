@@ -5,8 +5,6 @@ import sqlite3
 import threading
 import yaml
 from datetime import datetime
-from pathlib import Path
-from collections import defaultdict
 
 from src.config_loader import get_price_config
 from src.approach_relevance import product_name_matches

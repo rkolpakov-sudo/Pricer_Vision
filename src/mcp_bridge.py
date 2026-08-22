@@ -6,7 +6,7 @@ from pathlib import Path
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
 
-from src.resilience import mcp_circuit, CircuitState
+from src.resilience import mcp_circuit
 from src.config_loader import get_mcp_config, load_settings
 
 logger = logging.getLogger("pricer.bridge")

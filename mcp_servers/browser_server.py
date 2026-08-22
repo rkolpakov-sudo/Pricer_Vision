@@ -18,8 +18,6 @@ import argparse
 import asyncio
 import json
 import logging
-import os
-import sys
 import tempfile
 
 from mcp.server.lowlevel import Server
