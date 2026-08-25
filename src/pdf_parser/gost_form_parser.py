@@ -129,8 +129,17 @@ class GostFormParser:
         return [sorted(b, key=lambda i: i.x) for b in bands]
 
     # ── Детект сетки колонок ─────────────────────────────────────
-    def _detect_grid(self, bands: list[list]) -> list[float] | None:
-        """Маркеры «1»..«9» в одной строке -> границы (середины соседних X)."""
+    # Колонки формы по номеру маркера (1..9).
+    _COL_KEYS = ["pos", "name", "spec", "code", "manufacturer",
+                 "unit", "qty", "weight", "note"]
+
+    def _detect_grid(self, bands: list[list]) -> tuple[list[float], list[str]] | None:
+        """Маркеры «1»..«9» в одной строке -> (границы X, семантика ячеек).
+
+        Страница может быть повёрнута: маркеры идут по X и по возрастанию
+        значения (обычная форма), и по убыванию (зеркальная). Семантика
+        каждого столбца определяется ЗНАЧЕНИЕМ маркера, а не позицией.
+        """
         for band in bands:
             marks = []
             for it in band:
@@ -140,12 +149,16 @@ class GostFormParser:
             if len(marks) >= 6:
                 marks.sort()
                 vals = [v for _, v in marks]
-                if all(vals[k] < vals[k + 1] for k in range(len(vals) - 1)):
+                asc = all(vals[k] < vals[k + 1] for k in range(len(vals) - 1))
+                desc = all(vals[k] > vals[k + 1] for k in range(len(vals) - 1))
+                if asc or desc:
                     xs = [x for x, _ in marks]
-                    return [(xs[k] + xs[k + 1]) / 2 for k in range(len(xs) - 1)]
+                    bounds = [(xs[k] + xs[k + 1]) / 2 for k in range(len(xs) - 1)]
+                    keys = [self._COL_KEYS[v - 1] for _, v in marks]
+                    return bounds, keys
         return self._grid_from_titles(bands)
 
-    def _grid_from_titles(self, bands: list[list]) -> list[float] | None:
+    def _grid_from_titles(self, bands: list[list]):
         anchors: dict[str, float] = {}
         for band in bands:
             for it in band:
@@ -158,7 +171,9 @@ class GostFormParser:
             return None
         ordered = sorted(anchors.items(), key=lambda kv: kv[1])
         xs = [x for _, x in ordered]
-        return [(xs[k] + xs[k + 1]) / 2 for k in range(len(xs) - 1)]
+        bounds = [(xs[k] + xs[k + 1]) / 2 for k in range(len(xs) - 1)]
+        keys = [k for k, _ in ordered]
+        return bounds, keys
 
     # ── Сборка строк ─────────────────────────────────────────────
     def _clean_cell(self, band_item_group: list) -> str:
@@ -173,56 +188,73 @@ class GostFormParser:
                 break
         return txt
 
-    def _band_cells(self, band: list, bounds: list[float]) -> list[str]:
+    def _band_cells(self, band: list, grid) -> dict[str, str]:
+        bounds, keys = grid
+        last_b = bounds[-1] if bounds else float("inf")
         cells: list[list] = [[] for _ in range(len(bounds) + 1)]
         for it in band:
-            cx = it.x + (it.width or 0) / 2
-            idx = bisect.bisect_right(bounds, cx)
-            cells[idx].append(it)
-        return [self._clean_cell(g) for g in cells]
+            w = it.width or 0.0
+            # На повёрнутых страницах ширина текста отсчитывается в обратную
+            # сторону: элемент «вылезает» за последнюю границу сетки. Тогда его
+            # фактический отрезок — [x-w, x].
+            if w > 30 and it.x + w > last_b + 60:
+                lo, hi = it.x - w, it.x
+            else:
+                lo, hi = it.x, it.x + w
+            best, best_ov = 0, -1.0
+            prev_b = float("-inf")
+            for k, b in enumerate(list(bounds) + [float("inf")]):
+                ov = min(hi, b) - max(lo, prev_b)
+                if ov > best_ov:
+                    best, best_ov = k, ov
+                prev_b = b
+            cells[best].append(it)
+        return {keys[i]: self._clean_cell(g) for i, g in enumerate(cells)}
 
-    def _assemble_rows(self, bands: list[list], bounds: list[float],
+    def _assemble_rows(self, bands: list[list], grid,
                        items: list[dict], seen: set[int]) -> list[dict]:
         built: list[dict] = []
         prev = items[-1] if items else None
 
         for band in bands:
-            cells = self._band_cells(band, bounds)
-            if not any(cells) or self._is_header_band(cells):
+            cells = self._band_cells(band, grid)
+            if not any(cells.values()) or self._is_header_band(cells):
                 continue
 
+            c_pos = cells.get("pos", "")
+            c_name = cells.get("name", "")
             pos = None
-            m = _POS_CELL_RE.match(cells[0])
+            m = _POS_CELL_RE.match(c_pos)
             if m:
                 pos = int(m.group(1))
             else:
-                gm0 = _POS_GLUED_RE.match(cells[0])
+                gm0 = _POS_GLUED_RE.match(c_pos)
                 if gm0:
-                    # Клей «109. Цилиндр…» целиком в первой колонке
+                    # Клей «109. Цилиндр…» целиком в колонке «Позиция»
                     pos = int(gm0.group(1))
                     rest = gm0.group(2).strip()
-                    cells[1] = f"{rest} {cells[1]}".strip() if len(cells) > 1 else rest
-                elif len(cells) > 1:
-                    gm = _POS_GLUED_RE.match(cells[1])
+                    c_name = f"{rest} {c_name}".strip() if c_name else rest
+                elif c_name:
+                    gm = _POS_GLUED_RE.match(c_name)
                     if gm:
                         pos = int(gm.group(1))
-                        cells[1] = gm.group(2)
+                        c_name = gm.group(2)
 
             if pos is None:
                 # Продолжение предыдущей позиции (перенос имени и т.п.)
-                extra = cells[1] if len(cells) > 1 else ""
+                extra = c_name
                 if prev is not None and extra and re.search(r"[А-Яа-яA-Za-z]{2}", extra):
                     prev["name"] = f"{prev['name']} {extra}".strip()
                 continue
 
             seen.add(pos)
-            name = cells[1].strip() if len(cells) > 1 else ""
-            spec = cells[2] if len(cells) > 2 else ""
-            code = cells[3] if len(cells) > 3 else ""
-            manuf = cells[4].strip('" ').strip() if len(cells) > 4 else ""
-            unit_c = cells[5] if len(cells) > 5 else ""
-            qty_c = cells[6] if len(cells) > 6 else ""
-            weight_c = cells[7] if len(cells) > 7 else ""
+            name = c_name.strip()
+            spec = cells.get("spec", "")
+            code = cells.get("code", "")
+            manuf = cells.get("manufacturer", "").strip('" ').strip()
+            unit_c = cells.get("unit", "")
+            qty_c = cells.get("qty", "")
+            weight_c = cells.get("weight", "")
 
             unit_s, qty_s = self._split_unit_qty(unit_c, qty_c)
 
@@ -253,12 +285,13 @@ class GostFormParser:
 
         return built
 
-    def _is_header_band(self, cells: list[str]) -> bool:
+    def _is_header_band(self, cells: dict[str, str]) -> bool:
         """Строка заголовка формы («Позиция | Наименование…» / «1 | 2 | 3…»)."""
-        joined = " ".join(c.lower() for c in cells)
+        values = [c for c in cells.values()]
+        joined = " ".join(values).lower()
         if sum(1 for _, p in _COLUMN_ANCHORS if p in joined) >= 3:
             return True
-        nonempty = [c for c in cells if c]
+        nonempty = [c for c in values if c]
         return bool(nonempty) and all(re.fullmatch(r"[1-9]", c) for c in nonempty)
 
     @staticmethod
