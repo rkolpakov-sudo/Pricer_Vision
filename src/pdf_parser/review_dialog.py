@@ -54,13 +54,14 @@ class ReviewDialog(QDialog):
 
         self.table = QTableWidget(len(self._items), COL_COUNT)
         self.table.setHorizontalHeaderLabels([c[0] for c in COLUMNS])
+        header = self.table.horizontalHeader()
+        # Interactive во всех колонках — пользователь может менять ширину
+        # мышью. Наименование/Характеристики получают стартовую ширину,
+        # а не растяжение (Stretch блокирует ручную настройку).
+        header.setSectionResizeMode(QHeaderView.Interactive)
+        header.setStretchLastSection(False)
         for col, (_, width) in enumerate(COLUMNS):
-            h = self.table.horizontalHeader()
-            if width:
-                h.resizeSection(col, width)
-            else:
-                h.setSectionResizeMode(col, QHeaderView.Stretch)
-        self.table.horizontalHeader().setStretchLastSection(False)
+            self.table.setColumnWidth(col, width or 260)
         self.table.setAlternatingRowColors(True)
 
         corrected_bg = QColor("#3a3a2a") if self._theme_name == Theme.DARK else QColor("#fff9e0")
