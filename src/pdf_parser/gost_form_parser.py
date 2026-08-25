@@ -49,6 +49,12 @@ _POS_GLUED_RE = re.compile(
 _JUNK_TOKENS = {"и", "№", "н"}
 
 
+def _is_section_title(text: str) -> bool:
+    """Заголовок раздела («СИСТЕМА ОТОПЛЕНИЯ») — только ЗАГЛАВНЫЕ, короткий."""
+    s = re.sub(r"[^А-ЯA-Zа-яa-z0-9]", "", text)
+    return bool(s) and len(s) <= 40 and not re.search(r"[а-яa-z]", s)
+
+
 class GostFormParser:
     """Разбор позиций из PDF с ГОСТ-формой по координатам текста."""
 
@@ -72,6 +78,8 @@ class GostFormParser:
         self._last_group_name = ""
         self._pending_parent = ""
         self._synth_next = None
+        self._seen_first_marker = False
+        self._accumulating_mother = False
         try:
             raw = _pi.extract_text_with_positions(str(pdf_path))
         except Exception as e:  # noqa: BLE001
@@ -224,13 +232,57 @@ class GostFormParser:
         cap = (min(gaps) * 0.45) if gaps else 12.0
 
         bands: list[list] = [[] for _ in anchors]
+        unassigned: list = []
+        name_i = keys.index("name") if "name" in keys else -1
         for it in items:
             if outside(it):
-                continue          # штампы рамки за пределами таблицы
+                continue
             k = min(range(len(anchors)), key=lambda i: abs(anchors[i] - it.y))
             if abs(anchors[k] - it.y) <= cap:
                 bands[k].append(it)
-        return [sorted(b, key=lambda i: i.x) for b in bands if b]
+            elif name_i >= 0:
+                # Имена-строки между якорями (материнские строки групп).
+                # Принимаем ТОЛЬКО текст из колонки «Наименование», чтобы
+                # не тащить данные весов/штампов между строк.
+                w = it.width or 0.0
+                if w > 30 and it.x + w > bounds[-1] + 60:
+                    lo, hi = it.x - w, it.x
+                else:
+                    lo, hi = it.x, it.x + w
+                best, best_ov = -1, -1.0
+                prev_b = float("-inf")
+                for kk, bb in enumerate(list(bounds) + [float("inf")]):
+                    ov = min(hi, bb) - max(lo, prev_b)
+                    if ov > best_ov:
+                        best, best_ov = kk, ov
+                    prev_b = bb
+                if best == name_i and re.search(r"[А-Яа-яA-Za-z]{2}", it.text):
+                    unassigned.append(it)
+        out: list[list] = [sorted(b, key=lambda i: i.x) for b in bands if b]
+        if unassigned:
+            # Группируем нераспределённые имена по Y в отдельные полосы
+            # и вставляем в общий поток по вертикальному порядку.
+            un = sorted(unassigned, key=lambda i: (-i.y, i.x))
+            mini: list[list] = []
+            cur: list = []
+            last_y = None
+            for it in un:
+                if last_y is not None and abs(last_y - it.y) <= 8:
+                    cur.append(it)
+                else:
+                    if cur:
+                        mini.append(cur)
+                    cur = [it]
+                last_y = it.y
+            if cur:
+                mini.append(cur)
+            # объединяем: идём по всем полосам сверху вниз
+            merged: list[list] = []
+            pooled = [sorted(s, key=lambda i: i.x) for s in mini] + out
+            pooled.sort(key=lambda b: min(i.y for i in b), reverse=True)
+            merged = pooled
+            out = merged
+        return out
 
     # ── Сборка строк ─────────────────────────────────────────────
     def _clean_cell(self, band_item_group: list, reverse: bool = False) -> str:
@@ -309,19 +361,44 @@ class GostFormParser:
 
             if pos is None:
                 extra = c_name.strip()
-                if prev is None or not extra \
-                        or not re.search(r"[А-Яа-яA-Za-z]{2}", extra):
+                if not extra or not re.search(r"[А-Яа-яA-Za-z]{2}", extra):
                     continue
                 if has_own_qty:
                     # Самостоятельный товар без номера в документе —
                     # выдаём отдельной строкой с синтетическим номером.
                     pos = self._synth_next
                     self._synth_next += 1
+                elif _is_section_title(extra):
+                    # Заголовок раздела («СИСТЕМА ОТОПЛЕНИЯ») — не товар и не мать.
+                    self._pending_parent = ""
+                    self._accumulating_mother = False
+                    continue
+                elif not self._seen_first_marker:
+                    # Полосы-имена ДО первого маркера = материнское имя группы
+                    # (обычно на 2-3 визуальные строки). Копим для наследования.
+                    self._last_group_name = (
+                        f"{self._last_group_name} {extra}".strip()
+                        if self._accumulating_mother else extra)
+                    self._accumulating_mother = True
+                    continue
+                elif prev is not None and not re.search(r"\d", c_qty or ""):
+                    # Полоса-имя без номера в середине таблицы:
+                    #  - если сразу после другой полосы-имени — продолжение
+                    #    текущей материнской строки;
+                    #  - если после нумерованной строки — НОВАЯ материнская
+                    #    строка следующей группы товаров.
+                    if self._accumulating_mother:
+                        self._last_group_name = (
+                            f"{self._last_group_name} {extra}".strip())
+                    else:
+                        self._last_group_name = extra
+                    self._accumulating_mother = True
+                    continue
                 else:
-                    # Перенос имени/хвост спецификации предыдущей строки
-                    prev["name"] = f"{prev['name']} {extra}".strip()
                     continue
 
+            self._seen_first_marker = True
+            self._accumulating_mother = False
             seen.add(pos)
             name = c_name.strip()
 
@@ -343,6 +420,16 @@ class GostFormParser:
                 name = f"{self._pending_parent} {name}".strip()
             else:
                 self._pending_parent = ""
+
+            # Материнское имя: вариант наследует полное имя группы.
+            # Пустое имя -> вся мать; короткое имя варианта -> мать + вариант.
+            if self._last_group_name:
+                if not re.search(r"[А-Яа-яA-Za-z]{2}", name):
+                    name = self._last_group_name
+                elif not name.startswith(self._last_group_name[:25]):
+                    name = f"{self._last_group_name} {name}".strip()
+            else:
+                self._last_group_name = name
             # Нормализация пробелов/табуляции в собранном имени
             name = re.sub(r"\s+", " ", name).strip()
 
@@ -353,16 +440,7 @@ class GostFormParser:
 
             unit_s, qty_s = self._split_unit_qty(c_unit, c_qty)
 
-            # Семантика ГОСТ-формы: у вариантов внутри группы имя в объединённой
-            # ячейке пустое — наследуем последнее увиденное имя группы.
-            review = False
-            if not re.search(r"[А-Яа-яA-Za-z]{2}", name):
-                if self._last_group_name:
-                    name = self._last_group_name
-                else:
-                    review = True
-            else:
-                self._last_group_name = name
+            review = not re.search(r"[А-Яа-яA-Za-z]{2}", name)
 
             item = {
                 "pos": pos,
