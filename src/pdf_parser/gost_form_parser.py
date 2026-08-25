@@ -70,6 +70,8 @@ class GostFormParser:
         if not AVAILABLE:
             return None
         self._last_group_name = ""
+        self._pending_parent = ""
+        self._synth_next = None
         try:
             raw = _pi.extract_text_with_positions(str(pdf_path))
         except Exception as e:  # noqa: BLE001
@@ -133,12 +135,13 @@ class GostFormParser:
     _COL_KEYS = ["pos", "name", "spec", "code", "manufacturer",
                  "unit", "qty", "weight", "note"]
 
-    def _detect_grid(self, bands: list[list]) -> tuple[list[float], list[str]] | None:
-        """Маркеры «1»..«9» в одной строке -> (границы X, семантика ячеек).
+    def _detect_grid(self, bands: list[list]) -> tuple[list[float], list[str], bool] | None:
+        """Маркеры «1»..«9» в одной строке -> (границы X, семантика, зеркальность).
 
         Страница может быть повёрнута: маркеры идут по X и по возрастанию
         значения (обычная форма), и по убыванию (зеркальная). Семантика
-        каждого столбца определяется ЗНАЧЕНИЕМ маркера, а не позицией.
+        каждого столбца определяется ЗНАЧЕНИЕМ маркера, а не позицией;
+        на зеркальных страницах чтение внутри ячейки идёт по убыванию X.
         """
         for band in bands:
             marks = []
@@ -155,7 +158,7 @@ class GostFormParser:
                     xs = [x for x, _ in marks]
                     bounds = [(xs[k] + xs[k + 1]) / 2 for k in range(len(xs) - 1)]
                     keys = [self._COL_KEYS[v - 1] for _, v in marks]
-                    return bounds, keys
+                    return bounds, keys, desc
         return self._grid_from_titles(bands)
 
     def _grid_from_titles(self, bands: list[list]):
@@ -173,12 +176,14 @@ class GostFormParser:
         xs = [x for _, x in ordered]
         bounds = [(xs[k] + xs[k + 1]) / 2 for k in range(len(xs) - 1)]
         keys = [k for k, _ in ordered]
-        return bounds, keys
+        mirrored = keys.index("pos") > len(keys) / 2
+        return bounds, keys, mirrored
 
     # ── Сборка строк ─────────────────────────────────────────────
-    def _clean_cell(self, band_item_group: list) -> str:
+    def _clean_cell(self, band_item_group: list, reverse: bool = False) -> str:
         parts = [_STAMP_RE.sub("", it.text.strip()).strip()
-                 for it in sorted(band_item_group, key=lambda i: i.x)]
+                 for it in sorted(band_item_group, key=lambda i: i.x,
+                                  reverse=reverse)]
         txt = " ".join(p for p in parts if p)
         while True:
             head = txt.split()[0] if txt.split() else ""
@@ -189,7 +194,7 @@ class GostFormParser:
         return txt
 
     def _band_cells(self, band: list, grid) -> dict[str, str]:
-        bounds, keys = grid
+        bounds, keys, mirrored = grid
         last_b = bounds[-1] if bounds else float("inf")
         cells: list[list] = [[] for _ in range(len(bounds) + 1)]
         for it in band:
@@ -209,12 +214,18 @@ class GostFormParser:
                     best, best_ov = k, ov
                 prev_b = b
             cells[best].append(it)
-        return {keys[i]: self._clean_cell(g) for i, g in enumerate(cells)}
+        return {keys[i]: self._clean_cell(g, reverse=mirrored)
+                for i, g in enumerate(cells)}
 
     def _assemble_rows(self, bands: list[list], grid,
                        items: list[dict], seen: set[int]) -> list[dict]:
         built: list[dict] = []
         prev = items[-1] if items else None
+        mirrored = grid[2]
+        synth_next = getattr(self, "_synth_next", None)
+        if synth_next is None:
+            synth_next = max(seen or {0}) + 1000
+            self._synth_next = synth_next
 
         for band in bands:
             cells = self._band_cells(band, grid)
@@ -223,6 +234,8 @@ class GostFormParser:
 
             c_pos = cells.get("pos", "")
             c_name = cells.get("name", "")
+            c_qty = cells.get("qty", "")
+            c_unit = cells.get("unit", "")
             pos = None
             m = _POS_CELL_RE.match(c_pos)
             if m:
@@ -240,23 +253,53 @@ class GostFormParser:
                         pos = int(gm.group(1))
                         c_name = gm.group(2)
 
+            has_own_qty = bool(re.search(r"\d", c_qty)) and bool(c_unit)
+
             if pos is None:
-                # Продолжение предыдущей позиции (перенос имени и т.п.)
-                extra = c_name
-                if prev is not None and extra and re.search(r"[А-Яа-яA-Za-z]{2}", extra):
+                extra = c_name.strip()
+                if prev is None or not extra \
+                        or not re.search(r"[А-Яа-яA-Za-z]{2}", extra):
+                    continue
+                if has_own_qty:
+                    # Самостоятельный товар без номера в документе —
+                    # выдаём отдельной строкой с синтетическим номером.
+                    pos = self._synth_next
+                    self._synth_next += 1
+                else:
+                    # Перенос имени/хвост спецификации предыдущей строки
                     prev["name"] = f"{prev['name']} {extra}".strip()
-                continue
+                    continue
 
             seen.add(pos)
             name = c_name.strip()
+
+            # ── Иерархия комплектов ──────────────────────────────
+            is_label = bool(
+                re.search(r":\s*$", name)
+                or re.search(r"в составе|в комплекте", name, re.I)
+                or re.match(r"^Комплект\b", name, re.I)
+            )
+            is_child = bool(re.match(r"^\s*(?:-\s*|[а-дa-e]\)\s*)", name))
+            if is_label:
+                # Метка группы: имя уйдёт детям; строка остаётся, если имеет
+                # собственное количество (основной товар комплекта).
+                base = re.split(r":\s*", name, maxsplit=1)[0]
+                self._pending_parent = base.rstrip(": ").strip()
+                if is_child and self._pending_parent:
+                    name = f"{self._pending_parent} {name}".strip()
+            elif is_child and self._pending_parent:
+                name = f"{self._pending_parent} {name}".strip()
+            else:
+                self._pending_parent = ""
+            # Нормализация пробелов/табуляции в собранном имени
+            name = re.sub(r"\s+", " ", name).strip()
+
             spec = cells.get("spec", "")
             code = cells.get("code", "")
             manuf = cells.get("manufacturer", "").strip('" ').strip()
-            unit_c = cells.get("unit", "")
-            qty_c = cells.get("qty", "")
             weight_c = cells.get("weight", "")
 
-            unit_s, qty_s = self._split_unit_qty(unit_c, qty_c)
+            unit_s, qty_s = self._split_unit_qty(c_unit, c_qty)
 
             # Семантика ГОСТ-формы: у вариантов внутри группы имя в объединённой
             # ячейке пустое — наследуем последнее увиденное имя группы.
