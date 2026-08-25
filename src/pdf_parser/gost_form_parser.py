@@ -288,6 +288,8 @@ class GostFormParser:
             return None
         ordered = sorted(anchors.items(), key=lambda kv: kv[1])
         xs = [x for _, x in ordered]
+        # Нет цифр-маркеров: границы по серединам между X заголовков
+        # (X текста заголовка ≈ центр его колонки).
         bounds = [(xs[k] + xs[k + 1]) / 2 for k in range(len(xs) - 1)]
         keys = [k for k, _ in ordered]
         mirrored = keys.index("pos") > len(keys) / 2
@@ -455,10 +457,21 @@ class GostFormParser:
             if m:
                 pos = int(m.group(1))
             else:
+                # Клей в pos-ячейке: «30 Хомут ∅100», «109. Цилиндр…»
                 gm0 = _POS_GLUED_RE.match(c_pos)
+                sp0 = None if gm0 else _POS_SPACE_RE.match(c_pos)
+                dr0 = None if (gm0 or sp0) else _POS_DIRECT_RE.match(c_pos)
                 if gm0:
                     pos = int(gm0.group(1))
                     rest = gm0.group(2).strip()
+                    c_name = f"{rest} {c_name}".strip() if c_name else rest
+                elif sp0:
+                    pos = int(sp0.group(1))
+                    rest = sp0.group(2).strip()
+                    c_name = f"{rest} {c_name}".strip() if c_name else rest
+                elif dr0:
+                    pos = int(dr0.group(1))
+                    rest = dr0.group(2).strip()
                     c_name = f"{rest} {c_name}".strip() if c_name else rest
                 elif c_name:
                     gm = _POS_GLUED_RE.match(c_name)
