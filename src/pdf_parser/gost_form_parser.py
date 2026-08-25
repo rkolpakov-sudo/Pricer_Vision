@@ -46,13 +46,85 @@ _POS_CELL_RE = re.compile(r"^\.?\s*(\d{1,4})\s*\.?,?\s*$")
 _POS_GLUED_RE = re.compile(
     r"^\s*\.?\s*(\d{1,4})\.(?:\s+|(?=[А-Яа-яA-Za-z(\"]))(.*)$"
 )
+# Клей без точки: «6 DN57х2,5» — номер позиции пробелом отделён от имени.
+_POS_SPACE_RE = re.compile(r"^\s*(\d{1,4})\s+([А-ЯA-Z].*)$")
 _JUNK_TOKENS = {"и", "№", "н"}
 
 
 def _is_section_title(text: str) -> bool:
-    """Заголовок раздела («СИСТЕМА ОТОПЛЕНИЯ») — только ЗАГЛАВНЫЕ, короткий."""
-    s = re.sub(r"[^А-ЯA-Zа-яa-z0-9]", "", text)
-    return bool(s) and len(s) <= 40 and not re.search(r"[а-яa-z]", s)
+    """Заголовок раздела: «СИСТЕМА ОТОПЛЕНИЯ» (только ЗАГЛАВНЫЕ) или
+    короткая фраза с ключевым словом раздела («Хозяйственно бытовая
+    канализация»). Короткие названия товаров не трогаем."""
+    s = text.strip()
+    if not s or not re.search(r"[А-Яа-яA-Za-z]{2}", s):
+        return True
+    if len(s) <= 40 and not re.search(r"[а-яa-z]", s):
+        return True
+    words = s.split()
+    if len(words) <= 4:
+        for kw in ("канализац", "водопровод", "отоплени", "вентиляц",
+                   "кондиционирован", "сеть", "система"):
+            if kw in s.lower():
+                return True
+    return False
+
+
+def _apply_mothers(items: list[dict], mothers) -> None:
+    """Наследование материнских имён в порядке чтения документа.
+
+    Координата Y ЛОКАЛЬНА для страницы, поэтому события сортируются по
+    (page, -y). Поток «мать/строка» сегментируется по матерям:
+      - мать, за которой ≥2 строк (до следующей матери) — настоящее имя
+        группы, наследуется всеми её вариантами;
+      - мать с 0–1 строкой — верхняя строка обёрнутого имени ОДНОЙ позиции:
+        приклеивается только к этой строке (если она выглядит продолжением).
+    """
+    if not mothers or not items:
+        return
+
+    events: list[tuple[int, float, int, object]] = []
+    for row in items:
+        events.append((row["_page"], -row["_y"], 1, row))
+    for pg, y, txt in mothers:
+        events.append((pg, -y, 0, txt))
+    events.sort(key=lambda e: (e[0], e[1], e[2]))
+
+    # Сегменты: список (имя_матери, [строки])
+    segments: list[tuple[str, list[dict]]] = []
+    cur_mom: str | None = None
+    cur_rows: list[dict] = []
+    last_kind = None
+    for _pg, _ny, kind, payload in events:
+        if kind == 0:
+            txt = str(payload).strip()
+            if cur_mom is not None and last_kind == 0:
+                cur_mom = f"{cur_mom} {txt}".strip()   # продолжение той же ячейки
+            else:
+                if cur_mom is not None or cur_rows:
+                    segments.append((cur_mom or "", cur_rows))
+                cur_mom = txt
+                cur_rows = []
+            last_kind = 0
+        else:
+            cur_rows.append(payload)
+            last_kind = 1
+    if cur_mom is not None or cur_rows:
+        segments.append((cur_mom or "", cur_rows))
+
+    for mom_name, rows in segments:
+        if not mom_name or not rows:
+            continue
+        # Только настоящая группа (≥3 строк) с информативным именем матери.
+        # Обёрнутые имена одиночных позиций не распространяем — слишком
+        # рискованно смешивать несвязанные строки.
+        if len(rows) < 3 or len(mom_name) < 20:
+            continue
+        for row in rows:
+            name = (row.get("name") or "").strip()
+            if not re.search(r"[А-Яа-яA-Za-z]{2}", name):
+                row["name"] = mom_name
+            elif not name.startswith(mom_name[:25]):
+                row["name"] = f"{mom_name} {name}".strip()
 
 
 class GostFormParser:
@@ -96,6 +168,7 @@ class GostFormParser:
         grid = None
         items: list[dict] = []
         seen: set[int] = set()
+        mothers: list[tuple[float, str]] = []   # (y, объединённое имя группы)
 
         for page in sorted(pages):
             probe = self._cluster_bands(pages[page])
@@ -110,8 +183,19 @@ class GostFormParser:
             # устойчива к цепному слиянию соседних строк при кластеризации.
             bands = self._split_by_anchors(pages[page], grid) \
                 or self._cluster_bands(pages[page])
-            page_items = self._assemble_rows(bands, grid, items, seen)
+            page_items, page_mothers = self._assemble_rows(
+                bands, grid, items, seen, page=page)
             items.extend(page_items)
+            mothers.extend(page_mothers)
+
+        # ── Глобальное разрешение материнских имён ────────────────
+        # Мать может состоять из нескольких визуальных строк (объединённая
+        # ячейка) и находиться в середине/начале группы; группы переходят
+        # между страницами. Разбиваем страницу на группы «мать + её строки»
+        # и наследуем имя матери всем строкам группы.
+        items.sort(key=lambda i: i.get("_y", 0), reverse=True)
+        mothers.sort(key=lambda m: m[0], reverse=True)
+        _apply_mothers(items, mothers)
 
         # Позиции без распознанного имени не выбрасываем — помечаем на проверку
         for it in items:
@@ -207,9 +291,6 @@ class GostFormParser:
         p_lo = bounds[pos_i - 1] if pos_i > 0 else float("-inf")
         p_hi = bounds[pos_i] if pos_i < len(bounds) else float("inf")
 
-        def cx(it):
-            return it.x + (it.width or 0) / 2
-
         def outside(it):
             # Штампы рамки: на зеркальных страницах правее таблицы,
             # на обычных — левее.
@@ -219,7 +300,7 @@ class GostFormParser:
 
         markers = [it for it in items
                    if re.fullmatch(r"\d{1,4}", it.text.strip())
-                   and p_lo <= cx(it) <= p_hi]
+                   and p_lo <= it.x <= p_hi]
         if len(markers) < 2:
             return None
         raw_ys = sorted((m.y for m in markers), reverse=True)
@@ -304,10 +385,16 @@ class GostFormParser:
         cells: list[list] = [[] for _ in range(len(bounds) + 1)]
         for it in band:
             w = it.width or 0.0
-            # На повёрнутых страницах ширина текста отсчитывается в обратную
-            # сторону: элемент «вылезает» за последнюю границу сетки. Тогда его
-            # фактический отрезок — [x-w, x].
-            if w > 30 and it.x + w > bounds[-1] + 60:
+            if w <= 30:
+                # Узкие элементы (номера позиций, кол-ва): колонка по НАЧАЛУ X —
+                # перекрытие выкидывает короткий маркер, задевающий границу,
+                # в соседнюю колонку.
+                idx = bisect.bisect_right(bounds, it.x)
+                cells[idx].append(it)
+                continue
+            # Широкие: повёрнутая ширина может отсчитываться в обратную сторону,
+            # назначение по максимальному перекрытию отрезка.
+            if it.x + w > bounds[-1] + 60:
                 lo, hi = it.x - w, it.x
             else:
                 lo, hi = it.x, it.x + w
@@ -323,9 +410,12 @@ class GostFormParser:
                 for i, g in enumerate(cells)}
 
     def _assemble_rows(self, bands: list[list], grid,
-                       items: list[dict], seen: set[int]) -> list[dict]:
+                       items: list[dict], seen: set[int], page: int = 0):
+        """-> (строки, матери). Материнские имена НЕ применяются здесь —
+        они разрешаются глобально в parse() (группы переходят между
+        страницами, мать может стоять в середине группы по Y)."""
         built: list[dict] = []
-        prev = items[-1] if items else None
+        mothers: list[tuple[int, float, str]] = []   # (page, y, имя)
         synth_next = getattr(self, "_synth_next", None)
         if synth_next is None:
             synth_next = max(seen or {0}) + 1000
@@ -340,6 +430,7 @@ class GostFormParser:
             c_name = cells.get("name", "")
             c_qty = cells.get("qty", "")
             c_unit = cells.get("unit", "")
+            row_y = min(i.y for i in band)
             pos = None
             m = _POS_CELL_RE.match(c_pos)
             if m:
@@ -356,6 +447,12 @@ class GostFormParser:
                     if gm:
                         pos = int(gm.group(1))
                         c_name = gm.group(2)
+                    else:
+                        sp = _POS_SPACE_RE.match(c_name)
+                        if sp:
+                            # Клей без точки: «6 DN57х2,5» — «6» это позиция.
+                            pos = int(sp.group(1))
+                            c_name = sp.group(2)
 
             has_own_qty = bool(re.search(r"\d", c_qty)) and bool(c_unit)
 
@@ -369,36 +466,13 @@ class GostFormParser:
                     pos = self._synth_next
                     self._synth_next += 1
                 elif _is_section_title(extra):
-                    # Заголовок раздела («СИСТЕМА ОТОПЛЕНИЯ») — не товар и не мать.
-                    self._pending_parent = ""
-                    self._accumulating_mother = False
-                    continue
-                elif not self._seen_first_marker:
-                    # Полосы-имена ДО первого маркера = материнское имя группы
-                    # (обычно на 2-3 визуальные строки). Копим для наследования.
-                    self._last_group_name = (
-                        f"{self._last_group_name} {extra}".strip()
-                        if self._accumulating_mother else extra)
-                    self._accumulating_mother = True
-                    continue
-                elif prev is not None and not re.search(r"\d", c_qty or ""):
-                    # Полоса-имя без номера в середине таблицы:
-                    #  - если сразу после другой полосы-имени — продолжение
-                    #    текущей материнской строки;
-                    #  - если после нумерованной строки — НОВАЯ материнская
-                    #    строка следующей группы товаров.
-                    if self._accumulating_mother:
-                        self._last_group_name = (
-                            f"{self._last_group_name} {extra}".strip())
-                    else:
-                        self._last_group_name = extra
-                    self._accumulating_mother = True
                     continue
                 else:
+                    # Материнская строка (имя без номера) — собираем глобально.
+                    if not re.search(r"наименование", extra, re.I):
+                        mothers.append((page, row_y, extra))
                     continue
 
-            self._seen_first_marker = True
-            self._accumulating_mother = False
             seen.add(pos)
             name = c_name.strip()
 
@@ -410,8 +484,6 @@ class GostFormParser:
             )
             is_child = bool(re.match(r"^\s*(?:-\s*|[а-дa-e]\)\s*)", name))
             if is_label:
-                # Метка группы: имя уйдёт детям; строка остаётся, если имеет
-                # собственное количество (основной товар комплекта).
                 base = re.split(r":\s*", name, maxsplit=1)[0]
                 self._pending_parent = base.rstrip(": ").strip()
                 if is_child and self._pending_parent:
@@ -420,17 +492,6 @@ class GostFormParser:
                 name = f"{self._pending_parent} {name}".strip()
             else:
                 self._pending_parent = ""
-
-            # Материнское имя: вариант наследует полное имя группы.
-            # Пустое имя -> вся мать; короткое имя варианта -> мать + вариант.
-            if self._last_group_name:
-                if not re.search(r"[А-Яа-яA-Za-z]{2}", name):
-                    name = self._last_group_name
-                elif not name.startswith(self._last_group_name[:25]):
-                    name = f"{self._last_group_name} {name}".strip()
-            else:
-                self._last_group_name = name
-            # Нормализация пробелов/табуляции в собранном имени
             name = re.sub(r"\s+", " ", name).strip()
 
             spec = cells.get("spec", "")
@@ -452,20 +513,36 @@ class GostFormParser:
                 "unit": unit_s.lower().rstrip("."),
                 "weight": self._struct._to_float(weight_c),
                 "requires_review": review,
+                "_y": row_y,
+                "_page": page,
             }
             built.append(item)
-            prev = item
 
-        return built
+        return built, mothers
 
     def _is_header_band(self, cells: dict[str, str]) -> bool:
-        """Строка заголовка формы («Позиция | Наименование…» / «1 | 2 | 3…»)."""
+        """Строка заголовка формы («Позиция | Наименование…» / «1 | 2 | 3…»).
+        Строка без номера и количества, содержащая слово-якорь шапки
+        («тип, марка», «наименование», «единица», «кол-во», «масса»,
+        «примечание», «завод-изготовитель»), считается фрагментом шапки.
+        """
         values = [c for c in cells.values()]
         joined = " ".join(values).lower()
-        if sum(1 for _, p in _COLUMN_ANCHORS if p in joined) >= 3:
+        anchors = sum(1 for _, p in _COLUMN_ANCHORS if p in joined)
+        if anchors >= 3:
             return True
         nonempty = [c for c in values if c]
-        return bool(nonempty) and all(re.fullmatch(r"[1-9]", c) for c in nonempty)
+        if nonempty and all(re.fullmatch(r"[1-9]", c) for c in nonempty):
+            return True
+        # Фрагмент шапки: без позиции и количества + якорное слово
+        if not cells.get("pos", "").strip() and not re.search(r"\d", cells.get("qty", "")):
+            for word in ("наименование", "техническая характеристика",
+                         "тип, марка", "обозначение", "единица", "кол-во",
+                         "количество", "масса единицы", "примечание",
+                         "завод-изготовитель", "изготовитель/поставщик"):
+                if word in joined:
+                    return True
+        return False
 
     @staticmethod
     def _split_unit_qty(unit_c: str, qty_c: str) -> tuple[str, str]:
