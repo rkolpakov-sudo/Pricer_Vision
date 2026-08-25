@@ -90,14 +90,18 @@ class GostFormParser:
         seen: set[int] = set()
 
         for page in sorted(pages):
-            bands = self._cluster_bands(pages[page])
-            found = self._detect_grid(bands)
+            probe = self._cluster_bands(pages[page])
+            found = self._detect_grid(probe)
             if found:
                 # Заголовок СОСУЩЕСТВУЕТ с данными на той же странице —
                 # сетку обновляем, но строки страницы не пропускаем.
                 grid = found
             if not grid:
                 continue
+            # Приоритет: разбивка строк по якорям колонки «Позиция» —
+            # устойчива к цепному слиянию соседних строк при кластеризации.
+            bands = self._split_by_anchors(pages[page], grid) \
+                or self._cluster_bands(pages[page])
             page_items = self._assemble_rows(bands, grid, items, seen)
             items.extend(page_items)
 
@@ -158,7 +162,8 @@ class GostFormParser:
                     xs = [x for x, _ in marks]
                     bounds = [(xs[k] + xs[k + 1]) / 2 for k in range(len(xs) - 1)]
                     keys = [self._COL_KEYS[v - 1] for _, v in marks]
-                    return bounds, keys, desc
+                    return {"bounds": bounds, "keys": keys, "mirrored": desc,
+                            "mx_min": min(xs), "mx_max": max(xs)}
         return self._grid_from_titles(bands)
 
     def _grid_from_titles(self, bands: list[list]):
@@ -177,7 +182,55 @@ class GostFormParser:
         bounds = [(xs[k] + xs[k + 1]) / 2 for k in range(len(xs) - 1)]
         keys = [k for k, _ in ordered]
         mirrored = keys.index("pos") > len(keys) / 2
-        return bounds, keys, mirrored
+        return {"bounds": bounds, "keys": keys, "mirrored": mirrored,
+                "mx_min": min(xs), "mx_max": max(xs)}
+
+    # ── Разбивка строк по якорям колонки «Позиция» ───────────────
+    def _split_by_anchors(self, items: list, grid) -> list[list] | None:
+        """Каждый маркер позиции задаёт Y-якорь строки; элементы страницы
+        прикрепляются к ближайшему якорю. Исключает цепное слияние соседних
+        строк при обычной кластеризации и отбрасывает штампы вне таблицы."""
+        if grid is None:
+            return None
+        bounds, keys = grid["bounds"], grid["keys"]
+        mx_min, mx_max = grid["mx_min"], grid["mx_max"]
+        mirrored = grid["mirrored"]
+        pos_i = keys.index("pos")
+        p_lo = bounds[pos_i - 1] if pos_i > 0 else float("-inf")
+        p_hi = bounds[pos_i] if pos_i < len(bounds) else float("inf")
+
+        def cx(it):
+            return it.x + (it.width or 0) / 2
+
+        def outside(it):
+            # Штампы рамки: на зеркальных страницах правее таблицы,
+            # на обычных — левее.
+            if mirrored:
+                return it.x > mx_max + 40
+            return (it.x + (it.width or 0)) < mx_min - 40
+
+        markers = [it for it in items
+                   if re.fullmatch(r"\d{1,4}", it.text.strip())
+                   and p_lo <= cx(it) <= p_hi]
+        if len(markers) < 2:
+            return None
+        raw_ys = sorted((m.y for m in markers), reverse=True)
+        anchors: list[float] = []
+        for y in raw_ys:
+            if not anchors or abs(anchors[-1] - y) > 8:
+                anchors.append(y)
+        gaps = [anchors[k] - anchors[k + 1] for k in range(len(anchors) - 1)
+                if anchors[k] - anchors[k + 1] > 0]
+        cap = (min(gaps) * 0.45) if gaps else 12.0
+
+        bands: list[list] = [[] for _ in anchors]
+        for it in items:
+            if outside(it):
+                continue          # штампы рамки за пределами таблицы
+            k = min(range(len(anchors)), key=lambda i: abs(anchors[i] - it.y))
+            if abs(anchors[k] - it.y) <= cap:
+                bands[k].append(it)
+        return [sorted(b, key=lambda i: i.x) for b in bands if b]
 
     # ── Сборка строк ─────────────────────────────────────────────
     def _clean_cell(self, band_item_group: list, reverse: bool = False) -> str:
@@ -194,15 +247,15 @@ class GostFormParser:
         return txt
 
     def _band_cells(self, band: list, grid) -> dict[str, str]:
-        bounds, keys, mirrored = grid
-        last_b = bounds[-1] if bounds else float("inf")
+        bounds, keys = grid["bounds"], grid["keys"]
+        mirrored = grid["mirrored"]
         cells: list[list] = [[] for _ in range(len(bounds) + 1)]
         for it in band:
             w = it.width or 0.0
             # На повёрнутых страницах ширина текста отсчитывается в обратную
             # сторону: элемент «вылезает» за последнюю границу сетки. Тогда его
             # фактический отрезок — [x-w, x].
-            if w > 30 and it.x + w > last_b + 60:
+            if w > 30 and it.x + w > bounds[-1] + 60:
                 lo, hi = it.x - w, it.x
             else:
                 lo, hi = it.x, it.x + w
@@ -221,7 +274,6 @@ class GostFormParser:
                        items: list[dict], seen: set[int]) -> list[dict]:
         built: list[dict] = []
         prev = items[-1] if items else None
-        mirrored = grid[2]
         synth_next = getattr(self, "_synth_next", None)
         if synth_next is None:
             synth_next = max(seen or {0}) + 1000
