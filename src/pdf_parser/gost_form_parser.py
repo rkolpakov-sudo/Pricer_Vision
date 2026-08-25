@@ -48,6 +48,8 @@ _POS_GLUED_RE = re.compile(
 )
 # Клей без точки: «6 DN57х2,5» — номер позиции пробелом отделён от имени.
 _POS_SPACE_RE = re.compile(r"^\s*(\d{1,4})\s+([А-ЯA-Z].*)$")
+# Клей без пробела: «20Рулон», «22Зажимы» — цифра сразу перед заглавной буквой.
+_POS_DIRECT_RE = re.compile(r"^\s*(\d{1,4})([А-ЯA-Z].*)$")
 _JUNK_TOKENS = {"и", "№", "н"}
 
 
@@ -69,15 +71,35 @@ def _is_section_title(text: str) -> bool:
     return False
 
 
+def _significant_tokens(text: str) -> set[str]:
+    """Значимые слова (≥4 симв., буквы), без стоп-слов/размерных токенов."""
+    import re as _re
+    words = _re.findall(r"[А-Яа-яA-Za-z]{4,}", text.lower())
+    stop = {"типа", "тип", "марка", "включ", "компл", "креп", "прибор",
+            "стандарт", "проход", "систем", "режим", "работ", "подключ"}
+    return {w for w in words if w not in stop}
+
+
+def _is_bare_variant(name: str) -> bool:
+    """Имя — «голый» вариант: только размер/тип/ду, без существительного
+    товара («DN15», «500x400», «М30х1,5», «PN 2,5»)."""
+    s = name.strip()
+    if not s:
+        return True
+    # существительные товара (длинные слова) отсутствуют
+    words = re.findall(r"[А-Яа-яA-Za-z]{4,}", s)
+    if not words:
+        return True   # только размеры/цифры
+    return False
+
+
 def _apply_mothers(items: list[dict], mothers) -> None:
     """Наследование материнских имён в порядке чтения документа.
 
-    Координата Y ЛОКАЛЬНА для страницы, поэтому события сортируются по
-    (page, -y). Поток «мать/строка» сегментируется по матерям:
-      - мать, за которой ≥2 строк (до следующей матери) — настоящее имя
-        группы, наследуется всеми её вариантами;
-      - мать с 0–1 строкой — верхняя строка обёрнутого имени ОДНОЙ позиции:
-        приклеивается только к этой строке (если она выглядит продолжением).
+    Позиция наследует имя матери, только если она — её вариант:
+      - имя «голое» (размер/тип без существительного), или
+      - делит значимый токен с именем матери («LEMAX», «МС-140»).
+    Иначе это самостоятельный товар — группа матери заканчивается.
     """
     if not mothers or not items:
         return
@@ -89,42 +111,37 @@ def _apply_mothers(items: list[dict], mothers) -> None:
         events.append((pg, -y, 0, txt))
     events.sort(key=lambda e: (e[0], e[1], e[2]))
 
-    # Сегменты: список (имя_матери, [строки])
-    segments: list[tuple[str, list[dict]]] = []
-    cur_mom: str | None = None
-    cur_rows: list[dict] = []
+    cur: str | None = None
+    cur_tokens: set[str] = set()
     last_kind = None
     for _pg, _ny, kind, payload in events:
         if kind == 0:
             txt = str(payload).strip()
-            if cur_mom is not None and last_kind == 0:
-                cur_mom = f"{cur_mom} {txt}".strip()   # продолжение той же ячейки
+            if cur is not None and last_kind == 0:
+                cur = f"{cur} {txt}".strip()          # продолжение той же ячейки
+                cur_tokens |= _significant_tokens(txt)
             else:
-                if cur_mom is not None or cur_rows:
-                    segments.append((cur_mom or "", cur_rows))
-                cur_mom = txt
-                cur_rows = []
+                cur = txt
+                cur_tokens = _significant_tokens(txt)
             last_kind = 0
+            continue
+        last_kind = 1
+        row = payload
+        name = (row.get("name") or "").strip()
+        if not name or not cur:
+            continue
+        if not re.search(r"[А-Яа-яA-Za-z]{2}", name):
+            row["name"] = cur
+            continue
+        # Вариант матери: голый размер/тип ИЛИ общий значимый токен
+        is_variant = _is_bare_variant(name) or bool(
+            _significant_tokens(name) & cur_tokens)
+        if is_variant:
+            if not name.startswith(cur[:25]):
+                row["name"] = f"{cur} {name}".strip()
         else:
-            cur_rows.append(payload)
-            last_kind = 1
-    if cur_mom is not None or cur_rows:
-        segments.append((cur_mom or "", cur_rows))
-
-    for mom_name, rows in segments:
-        if not mom_name or not rows:
-            continue
-        # Только настоящая группа (≥3 строк) с информативным именем матери.
-        # Обёрнутые имена одиночных позиций не распространяем — слишком
-        # рискованно смешивать несвязанные строки.
-        if len(rows) < 3 or len(mom_name) < 20:
-            continue
-        for row in rows:
-            name = (row.get("name") or "").strip()
-            if not re.search(r"[А-Яа-яA-Za-z]{2}", name):
-                row["name"] = mom_name
-            elif not name.startswith(mom_name[:25]):
-                row["name"] = f"{mom_name} {name}".strip()
+            cur = None          # самостоятельный товар — группа матери окончена
+            cur_tokens = set()
 
 
 class GostFormParser:
@@ -431,6 +448,8 @@ class GostFormParser:
             c_qty = cells.get("qty", "")
             c_unit = cells.get("unit", "")
             row_y = min(i.y for i in band)
+
+            # Позиция из всех форм клея
             pos = None
             m = _POS_CELL_RE.match(c_pos)
             if m:
@@ -438,7 +457,6 @@ class GostFormParser:
             else:
                 gm0 = _POS_GLUED_RE.match(c_pos)
                 if gm0:
-                    # Клей «109. Цилиндр…» целиком в колонке «Позиция»
                     pos = int(gm0.group(1))
                     rest = gm0.group(2).strip()
                     c_name = f"{rest} {c_name}".strip() if c_name else rest
@@ -450,28 +468,35 @@ class GostFormParser:
                     else:
                         sp = _POS_SPACE_RE.match(c_name)
                         if sp:
-                            # Клей без точки: «6 DN57х2,5» — «6» это позиция.
                             pos = int(sp.group(1))
                             c_name = sp.group(2)
+                        else:
+                            dr = _POS_DIRECT_RE.match(c_name)
+                            if dr:
+                                pos = int(dr.group(1))
+                                c_name = dr.group(2)
 
-            has_own_qty = bool(re.search(r"\d", c_qty)) and bool(c_unit)
+            # ── ГЛАВНЫЙ ПРИЗНАК: наличие количества. ──────────────
+            # У каждой реальной номенклатурной позиции ЕСТЬ количество.
+            # Полоса с количеством = позиция (даже без номера — синтетический).
+            # Полоса без количества = мать/шапка/заголовок.
+            has_qty = bool(re.search(r"\d", c_qty))
+
+            if pos is None and has_qty:
+                # Самостоятельный товар без номера в документе
+                pos = self._synth_next
+                self._synth_next += 1
 
             if pos is None:
                 extra = c_name.strip()
                 if not extra or not re.search(r"[А-Яа-яA-Za-z]{2}", extra):
                     continue
-                if has_own_qty:
-                    # Самостоятельный товар без номера в документе —
-                    # выдаём отдельной строкой с синтетическим номером.
-                    pos = self._synth_next
-                    self._synth_next += 1
-                elif _is_section_title(extra):
+                if _is_section_title(extra):
                     continue
-                else:
-                    # Материнская строка (имя без номера) — собираем глобально.
-                    if not re.search(r"наименование", extra, re.I):
-                        mothers.append((page, row_y, extra))
-                    continue
+                # Материнская строка (имя без количества) — собираем глобально.
+                if not re.search(r"наименование", extra, re.I):
+                    mothers.append((page, row_y, extra))
+                continue
 
             seen.add(pos)
             name = c_name.strip()
