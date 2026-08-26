@@ -25,8 +25,9 @@ from src.captcha_detector import CaptchaDetector, CaptchaType
 from src.approach_relevance import (
     approach_relevant, product_name_matches, product_name_matches_ignore_brand,
     missing_required_tokens, normalize_search_text, is_standard_reference,
+    search_key_tokens,
 )
-from src.session_facts import RowFacts
+from src.session_facts import RowFacts, SessionFacts
 
 logger = logging.getLogger("pricer.agent")
 
@@ -177,7 +178,7 @@ SYSTEM_PROMPT = """Ты — опытный пользователь с дост�
 - get_hints: подсказки по работе на сайтах
 
 Правила:
-1. Сначала проверь get_approaches. Если есть подход — используй его target/element (CSS-селекторы) и последовательность действий. НО: url для browser_navigate должен вести на ГЛАВНУЮ сайта или страницу поиска, а не на конкретный товар из подхода. Текст для поиска (query, text) бери из текущего ТОВАР ДЛЯ ПОИСКА. Вводи ПОЛНОЕ наименование дословно — НЕ сокращай, НЕ перефразируй и НЕ меняй слова (например, «Воздуховод из оцинкованной стали Ø100, толщина стали 0,5мм» вводи целиком; допускается убрать только техническую часть после запятой).
+1. Сначала проверь get_approaches. Если есть подход — используй его target/element (CSS-селекторы) и последовательность действий. НО: url для browser_navigate должен вести на ГЛАВНУЮ сайта или страницу поиска, а не на конкретный товар из подхода. Текст для поиска (query, text) бери из КЛЮЧЕВЫХ ТОКЕНОВ и ТОВАР ДЛЯ ПОИСКА: вводи запрос, сохраняющий бренд + серию + тип + размер/Ду (например «LEMAX Premium C10 500x600»). Шаблонный хвост («в компл. с краном…», «с боковым подключением») можно опускать, НО размер/тип/Ду — НИКОГДА.
 2. Работай с ОДНИМ сайтом за раз. НЕ переключайся между сайтами без причины.
 3. browser_snapshot даёт accessibility-tree. Если цены не видны — используй browser_evaluate с JS (querySelectorAll) для прямого извлечения данных из DOM.
 4. После поиска на сайте: кликни на карточку товара → откроется страница с ценой. Если цены нет в карточке — ищи на странице через browser_evaluate.
@@ -378,12 +379,30 @@ async def process_row(
     negative_cache=None,
     site_blacklist=None,
     site_visit_callback: Callable[[str], None] | None = None,
+    session_facts: SessionFacts | None = None,
 ) -> dict:
     start_time = datetime.now()
+    spec_brand = (spec_meta or {}).get("brand", "") or ""
 
     def _stop_check():
         if stop_event and stop_event.is_set():
             raise asyncio.CancelledError("stopped by user")
+
+    def _session_success(site: str, url: str = "", query: str = "") -> None:
+        """Межстрочный факт: на сайте есть товар (тип|бренд) + рабочий паттерн."""
+        if session_facts is not None:
+            try:
+                session_facts.record_success(product_type, spec_brand, site, url=url, query=query)
+            except Exception as e:
+                logger.warning("SessionFacts.record_success failed: %s", e)
+
+    def _session_no_product(site: str) -> None:
+        """Межстрочный факт: на сайте товара (тип|бренд) не найдено."""
+        if session_facts is not None:
+            try:
+                session_facts.record_no_product(product_type, spec_brand, site)
+            except Exception as e:
+                logger.warning("SessionFacts.record_no_product failed: %s", e)
 
     # Сессионный отрицательный кэш: товар уже дважды не найден — не ищем снова
     if negative_cache is not None and negative_cache.is_blocked(spec_text):
@@ -432,6 +451,7 @@ async def process_row(
                     reason="rule8_reuse",
                 )
                 logger.info("Row: price=%s validated=%.2f in %.1fs", result["price"], result["confidence"], elapsed)
+                _session_success(best.get("site_id", ""), url=best.get("url", ""))
                 return _result_to_schema(result)
 
     # Semantic cache: reuse results for similar products (skipped when fresh)
@@ -453,6 +473,7 @@ async def process_row(
                 "elapsed": elapsed,
             }
             logger.info("Cache hit for '%s' (similarity: %.2f)", spec_text[:40], cached.get("similarity", 0.0))
+            _session_success(cached.get("site", ""), url=cached.get("url", ""))
             return _result_to_schema(result)
 
     sites = memory_manager.get_sites(product_type)
@@ -468,8 +489,9 @@ async def process_row(
     # Adaptive rounds per-site: reduce for high-failure sites
     adaptive_limits = AdaptiveRoundManager(base_rounds=MAX_ROUNDS_PER_SITE)
     site_round_limits = adaptive_limits.per_site_limits(sites) if sites else {}
-    hints = memory_manager.get_hints(product_type) or []
-    if product_type != UNKNOWN_PT:
+    # Хинты — «память графа»: скрыты при use_approaches=False (чистый поиск без подсказок).
+    hints = [] if not use_approaches else (memory_manager.get_hints(product_type) or [])
+    if product_type != UNKNOWN_PT and use_approaches:
         hints += memory_manager.get_hints(UNKNOWN_PT)
     product_data = graph_engine._all_products.get(product_type)
 
@@ -494,7 +516,8 @@ async def process_row(
             pass
 
     context = _build_context(search_text, product_type, approaches, guide_prices, sites, hints, product_data, site_guides, concepts, spec_meta,
-                             use_site_ranking=use_site_ranking, site_ranking=site_ranking)
+                             use_site_ranking=use_site_ranking, site_ranking=site_ranking,
+                             use_approaches=use_approaches, session_facts=session_facts)
 
     mcp_tools = await mcp_bridge.list_tools()
     # Close previous page to avoid tab accumulation
@@ -511,6 +534,9 @@ async def process_row(
     else:
         all_tools = mcp_tools + GRAPH_TOOL_DEFS
         system_prompt = SYSTEM_PROMPT
+    if not use_approaches:
+        # «Чистый поиск»: скрываем инструменты памяти-подсказок (подходы, хинты).
+        all_tools = [t for t in all_tools if t["function"]["name"] not in ("get_approaches", "get_hints")]
     logger.info("Tools: MCP=%d, graph=%d, total=%d", len(mcp_tools), len(GRAPH_TOOL_DEFS), len(all_tools))
 
     messages = [
@@ -604,6 +630,7 @@ async def process_row(
             logger.info("Row: price=%s conf=%.2f in %.1fs rounds=%d", result.get('price'), result.get('confidence', 0), elapsed, rounds)
             final = {"spec_text": spec_text, "product_type": product_type, **result, "elapsed": elapsed}
             _store_semantic_cache(semantic_cache, spec_text, final)
+            _session_success(result.get("site", "") or result.get("url", ""), url=result.get("url", ""), query=search_text)
             return _result_to_schema(final)
 
         if not tool_calls:
@@ -804,6 +831,7 @@ async def process_row(
                 probe_domain = _extract_domain(current_site)
                 if _is_empty_search_result(tool_name, tool_content):
                     facts.record_empty_result(probe_domain)
+                    _session_no_product(probe_domain)
                     empty_probe_streak[probe_domain] = empty_probe_streak.get(probe_domain, 0) + 1
                     if empty_probe_streak[probe_domain] >= EMPTY_PROBE_LIMIT and probe_domain not in empty_probe_guidance_sent:
                         empty_probe_guidance_sent.add(probe_domain)
@@ -945,6 +973,8 @@ async def process_row(
                             **validated, "elapsed": elapsed,
                         }
                         _store_semantic_cache(semantic_cache, spec_text, final)
+                        _session_success(validated.get("site") or _extract_domain(save_url),
+                                         url=save_url, query=search_text)
                         return _result_to_schema(final)
                     logger.info("Low confidence (%.2f) — saved, continuing search", validated['confidence'])
                     messages.append({
@@ -1008,6 +1038,7 @@ async def process_row(
                         logger.info("Force switch: price candidate seen on %s — approaches preserved", failed_site)
                     else:
                         _penalize_approaches(memory_manager, _shown_approach_ids(failed_site), "📉 Force switch:")
+                        _session_no_product(failed_site)
                 except Exception as e:
                     logger.warning("Force switch deprecation failed: %s", e)
             force_msg = f"Ты сделал {rounds_on_site} шагов на текущем сайте без результата — лимит исчерпан."
@@ -1072,12 +1103,31 @@ def _is_standard_reference(spec: str) -> bool:
 
 
 def _build_context(spec_text, product_type, approaches, confirmed_prices, sites, hints, product_data=None, site_guides=None, concepts=None, spec_meta=None,
-                   use_site_ranking: bool = True, site_ranking: dict | None = None):
+                   use_site_ranking: bool = True, site_ranking: dict | None = None,
+                   use_approaches: bool = True, session_facts: SessionFacts | None = None):
     # фильтр релевантности: подходы, обученные на ДРУГИХ товарах того же типа
     # (например регуляторы скорости для воздуховодов), не показываются
     extra = (spec_meta or {}).get("article", "")
     approaches = [a for a in (approaches or []) if approach_relevant(a, spec_text, extra)]
     parts = [f"ТОВАР ДЛЯ ПОИСКА: {spec_text}"]
+    # Ключевые токены (ОТОБРАЖЕНИЕ, не скриптовый запрос): бренд/тип/размер/Ду —
+    # дифференциаторы, которые LLM не должен терять при составлении запроса.
+    key_tokens = search_key_tokens(spec_text, spec_meta)
+    if key_tokens:
+        parts.append("")
+        parts.append("КЛЮЧЕВЫЕ ТОКЕНЫ ДЛЯ ПОИСКА (сохраняй их в запросе):")
+        labels = {"brand": "Бренд", "type": "Тип/обозначение", "article": "Артикул/код",
+                  "size": "Размер/Ду", "keywords": "Ключевые слова"}
+        for k, v in key_tokens.items():
+            parts.append(f"  {labels.get(k, k)}: {v}")
+    if session_facts is not None:
+        pos, neg = session_facts.to_context_blocks(product_type, (spec_meta or {}).get("brand", "") or "")
+        if use_approaches and pos:
+            parts.append("\nСессионные факты прогона (положительные):")
+            parts.append(pos)
+        if use_site_ranking and neg:
+            parts.append("\nСессионные факты прогона (отрицательные):")
+            parts.append(neg)
     if spec_meta:
         parts.append("")
         parts.append("СТРУКТУРА ФАЙЛА:")
@@ -1423,6 +1473,23 @@ def _save_price_and_approach(memory_manager, spec_text, product_type, price_data
             )
             logger.info("✅ Approach saved (ID=%d) for %s on %s: %.2f rub | steps: %s",
                         saved_id, product_type, price_data.get("site", ""), price_data['price'], step_summary)
+        # 3.4: персистим выигрышный паттерн как hint (тип, сайт) — «как найти этот товар».
+        # Переносит микро-стратегию (запрос с размером, URL-паттерн) между строками.
+        if product_type != UNKNOWN_PT:
+            site_domain = (price_data.get("site") or "").split("//")[-1].split("/")[0].removeprefix("www.")
+            if site_domain and query:
+                try:
+                    hint_text = f"{site_domain}: этот товар найден по запросу «{query}»"
+                    if price_data.get("url"):
+                        hint_text += f"; карточка: {price_data['url'][:120]}"
+                    memory_manager.add_hint(
+                        product_type=product_type,
+                        text=hint_text,
+                        site=site_domain,
+                        priority=0.7,
+                    )
+                except Exception as e:
+                    logger.warning("Failed to save winning-pattern hint: %s", e)
     except Exception as e:
         logger.warning("Failed to save approach/success for %.2f price: %s", price_data['price'], e)
 

@@ -288,6 +288,40 @@ def normalize_search_text(text: str) -> str:
     return normalized
 
 
+def search_key_tokens(spec_text: str, spec_meta: dict | None = None) -> dict:
+    """Ключевые токены товара для поиска (ОТОБРАЖЕНИЕ, НЕ скриптовый запрос).
+
+    Показывает LLM дифференциаторы (бренд/тип/размер/Ду/артикул), которые нельзя
+    терять при составлении запроса — корень деградации прогона 26.08 (запрос
+    без размера, «…LEMAX Premium Compact Hygiene» без «C10 500xNNNN»). Запрос
+    по-прежнему собирает сам LLM; этот блок лишь не даёт ему «не заметить» размер.
+    """
+    meta = spec_meta or {}
+    text = (spec_text or "").strip()
+    out: dict[str, str] = {}
+    brand = (meta.get("brand") or "").strip()
+    if brand:
+        latin = _translit(brand)
+        label = brand
+        if latin and latin not in brand.lower():
+            label = f"{brand} ({latin.upper()})"
+        out["brand"] = label
+    spec = (meta.get("spec") or "").strip()
+    if spec and not is_standard_reference(spec):
+        out["type"] = spec
+    article = (meta.get("article") or "").strip()
+    if article:
+        out["article"] = article
+    sizes = _size_key(text)
+    if sizes:
+        out["size"] = ", ".join(sorted(sizes))
+    if not out:
+        toks = [w for w in _product_tokens(text) if w not in _OPTIONAL_SET]
+        if toks:
+            out["keywords"] = " ".join(sorted(toks)[:8])
+    return out
+
+
 def _product_tokens(text: str) -> set:
     """Значимые слова товара без размеров/номеров («ду15», «1/2», цифры)."""
     if not text:

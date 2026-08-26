@@ -1,6 +1,6 @@
 """Тесты операционной памяти строки RowFacts (src/session_facts.py)."""
 
-from src.session_facts import RowFacts, REPEAT_NOTICE_THRESHOLD
+from src.session_facts import RowFacts, REPEAT_NOTICE_THRESHOLD, SessionFacts
 
 
 class TestRowFacts:
@@ -80,3 +80,50 @@ class TestRowFacts:
         f.record_query("x.ru", "")
         f.record_query("x.ru", "   ")
         assert f.to_prompt_block() == ""
+
+class TestSessionFacts:
+    PT = 'plumbing_heating_radiators'
+    BRAND = 'Лемакс'
+
+    def test_success_records_has_product(self):
+        f = SessionFacts()
+        f.record_success(self.PT, self.BRAND, 'https://mircli.ru', url='https://mircli.ru/p/x', query='Лемакс Premium C10 500x600')
+        pos, neg = f.to_context_blocks(self.PT, self.BRAND)
+        assert 'mircli.ru' in pos
+        assert 'рабочий запрос' in pos
+        assert neg == ''
+
+    def test_no_product_records_negative(self):
+        f = SessionFacts()
+        f.record_no_product(self.PT, self.BRAND, 'santech.ru')
+        pos, neg = f.to_context_blocks(self.PT, self.BRAND)
+        assert 'santech.ru' in neg
+        assert pos == ''
+
+    def test_no_product_does_not_override_has_product(self):
+        f = SessionFacts()
+        f.record_success(self.PT, self.BRAND, 'mircli.ru', url='https://mircli.ru/p/x', query='q')
+        f.record_no_product(self.PT, self.BRAND, 'mircli.ru')
+        pos, neg = f.to_context_blocks(self.PT, self.BRAND)
+        assert 'mircli.ru' in pos
+        assert 'mircli.ru' not in neg
+
+    def test_query_dedup_and_keep_last(self):
+        f = SessionFacts()
+        f.record_success(self.PT, self.BRAND, 'mircli.ru', query='q1')
+        f.record_success(self.PT, self.BRAND, 'mircli.ru', query='q1')
+        f.record_success(self.PT, self.BRAND, 'mircli.ru', query='q2')
+        pos, _ = f.to_context_blocks(self.PT, self.BRAND)
+        assert pos.count('q1') == 1
+        assert 'q2' in pos
+
+    def test_relevance_by_type_without_brand(self):
+        f = SessionFacts()
+        f.record_success(self.PT, 'ДругойБренд', 'x.ru', query='q')
+        pos, _ = f.to_context_blocks(self.PT, self.BRAND)
+        assert 'x.ru' in pos  # совпадение по типу
+
+    def test_empty_blocks_when_no_facts(self):
+        f = SessionFacts()
+        pos, neg = f.to_context_blocks(self.PT, self.BRAND)
+        assert pos == '' and neg == ''

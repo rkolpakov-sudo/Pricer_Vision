@@ -15,7 +15,7 @@ from src.agent_loop import (
     TEMP_EXPLORATION, TEMP_NAVIGATION, TEMP_EXTRACTION, TEMP_RECOVERY,
     _penalize_approaches, _deprecate_site_approaches, _inject_facts_block,
 )
-from src.session_facts import RowFacts
+from src.session_facts import RowFacts, SessionFacts
 
 
 class TestConstants:
@@ -685,3 +685,55 @@ class TestFactsBlock:
         out2 = _inject_facts_block(messages, "ФАКТЫ v2")
         assert sum(1 for m in out1 if m.get("content") == "ФАКТЫ v1") == 1
         assert sum(1 for m in out2 if m.get("content") == "ФАКТЫ v2") == 1
+
+class TestPhase3Context:
+    def test_key_tokens_block_present(self):
+        meta = {'brand': 'Лемакс', 'spec': 'LEMAX Premium C10 500x600', 'article': '', 'headers': []}
+        spec = 'Стальной панельный радиатор LEMAX Premium C10 500x600'
+        ctx = _build_context(spec, 'plumbing_heating_radiators', [], [], [], [], spec_meta=meta)
+        assert 'КЛЮЧЕВЫЕ ТОКЕНЫ ДЛЯ ПОИСКА' in ctx
+        assert '500x600' in ctx
+        assert 'Бренд' in ctx
+
+    def test_positive_session_facts_shown_with_approaches(self):
+        f = SessionFacts()
+        f.record_success('cables', 'Бренд', 'mircli.ru', url='https://mircli.ru/p/x', query='Ключ')
+        ctx = _build_context('test', 'cables', [], [], [], [], use_approaches=True, use_site_ranking=False,
+                             session_facts=f)
+        assert 'Сессионные факты прогона (положительные)' in ctx
+        assert 'mircli.ru' in ctx
+
+    def test_positive_session_facts_hidden_without_approaches(self):
+        f = SessionFacts()
+        f.record_success('cables', 'Бренд', 'mircli.ru', url='u', query='q')
+        ctx = _build_context('test', 'cables', [], [], [], [], use_approaches=False, use_site_ranking=True,
+                             session_facts=f)
+        assert 'положительные' not in ctx
+
+    def test_negative_session_facts_shown_with_site_ranking(self):
+        f = SessionFacts()
+        f.record_no_product('cables', 'Бренд', 'santech.ru')
+        ctx = _build_context('test', 'cables', [], [], [], [], use_approaches=False, use_site_ranking=True,
+                             session_facts=f)
+        assert 'Сессионные факты прогона (отрицательные)' in ctx
+        assert 'santech.ru' in ctx
+
+    def test_negative_session_facts_hidden_without_site_ranking(self):
+        f = SessionFacts()
+        f.record_no_product('cables', 'Бренд', 'santech.ru')
+        ctx = _build_context('test', 'cables', [], [], [], [], use_approaches=True, use_site_ranking=False,
+                             session_facts=f)
+        assert 'отрицательные' not in ctx
+
+    def test_clean_search_no_session_facts(self):
+        f = SessionFacts()
+        f.record_success('cables', 'Бренд', 'mircli.ru', url='u', query='q')
+        f.record_no_product('cables', 'Бренд', 'santech.ru')
+        ctx = _build_context('test', 'cables', [], [], [], [], use_approaches=False, use_site_ranking=False,
+                             session_facts=f)
+        assert 'Сессионные факты' not in ctx
+
+    def test_rule1_keeps_size_and_no_comma_truncation(self):
+        assert 'после запятой' not in SYSTEM_PROMPT
+        assert 'размер/тип/Ду — НИКОГДА' in SYSTEM_PROMPT
+        assert 'LEMAX Premium C10 500x600' in SYSTEM_PROMPT

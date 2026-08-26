@@ -115,3 +115,84 @@ class RowFacts:
                     "last_call": None, "repeat_streak": 0}
             self._sites[domain] = site
         return site
+
+
+class SessionFacts:
+    """Межстрочные факты прогона: сайт × (тип|бренд) статус и рабочие паттерны.
+
+    Заполняется детерминированно по итогам строк (без LLM):
+    - успех строки → has_product + рабочий запрос/URL;
+    - force-switch/пустой поиск без кандидата → no_product (НЕ перезаписывает
+      has_product — иначе повторим ложный вывод «mircli без радиаторов» 26.08).
+
+    В контекст следующих строк подмешиваются: положительные факты — под флагом
+    use_approaches, отрицательные — под use_site_ranking («чистый поиск» = без памяти).
+    """
+
+    def __init__(self):
+        self._status: dict[tuple[str, str], str] = {}
+        self._working: dict[str, dict] = {}
+
+    @staticmethod
+    def _key(product_type: str, brand: str) -> str:
+        return f"{product_type or 'unknown'}|{brand or ''}".strip("|")
+
+    @staticmethod
+    def _norm_site(site: str) -> str:
+        s = (site or "").strip().lower().rstrip("/")
+        for prefix in ("https://", "http://", "www."):
+            if s.startswith(prefix):
+                s = s[len(prefix):]
+        return s
+
+    def record_success(self, product_type: str, brand: str, site: str,
+                       url: str = "", query: str = "") -> None:
+        dom = self._norm_site(site)
+        if not dom:
+            return
+        self._status[(self._key(product_type, brand), dom)] = "has_product"
+        w = self._working.setdefault(dom, {"queries": [], "urls": []})
+        q = (query or "").strip()
+        if q and q not in w["queries"]:
+            w["queries"].append(q[:120])
+            w["queries"] = w["queries"][-2:]
+        u = (url or "").strip()
+        if u and u not in w["urls"]:
+            w["urls"].append(u[:120])
+            w["urls"] = w["urls"][-2:]
+
+    def record_no_product(self, product_type: str, brand: str, site: str) -> None:
+        dom = self._norm_site(site)
+        if not dom:
+            return
+        key = (self._key(product_type, brand), dom)
+        if key in self._status and self._status[key] == "has_product":
+            return
+        self._status[key] = "no_product"
+
+    def _relevant(self, product_type: str, brand: str) -> list[tuple[str, str]]:
+        key = self._key(product_type, brand)
+        key_type = f"{product_type}|" if product_type and product_type != "unknown" else ""
+        key_brand = f"|{brand}" if brand else ""
+        out = []
+        for (k, dom), status in self._status.items():
+            if k == key or (key_type and k.startswith(key_type)) or (key_brand and k.endswith(key_brand)):
+                out.append((dom, status))
+        return out
+
+    def to_context_blocks(self, product_type: str, brand: str,
+                          limit: int = 4) -> tuple[str, str]:
+        """Возвращает (положительный_блок, отрицательный_блок) для контекста."""
+        pos, neg = [], []
+        for dom, status in self._relevant(product_type, brand)[:limit]:
+            if status == "has_product":
+                line = f"  {dom}: товар этого типа/бренда есть"
+                w = self._working.get(dom)
+                if w and w["queries"]:
+                    line += "; рабочий запрос: «" + "» / «".join(w["queries"]) + "»"
+                if w and w["urls"]:
+                    line += "; URL: " + w["urls"][0]
+                pos.append(line)
+            else:
+                neg.append(f"  {dom}: товара этого типа/бренда не найдено")
+        return ("\n".join(pos), "\n".join(neg))

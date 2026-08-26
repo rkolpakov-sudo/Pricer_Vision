@@ -6,6 +6,7 @@ from src.approach_relevance import (
     tokenize, approach_relevant, product_name_matches, product_name_matches_ignore_brand,
     _size_key,
     missing_required_tokens, normalize_search_text,
+    search_key_tokens,
 )
 
 
@@ -427,3 +428,31 @@ class TestCardH1LenientMatch:
             "Радиатор стальной LEMAX C10 500x600",
             "Радиатор стальной Лемакс C 10х500х600",
         ) is True
+
+class TestSearchKeyTokens:
+    SPEC = 'Стальной панельный радиатор с боковым подключением LEMAX Premium Compact Hygiene, тип C10, в компл. с краном для выпуска воздуха и креплениями LEMAX Premium C10 500x600'
+    META = {'brand': 'Лемакс', 'spec': 'LEMAX Premium C10 500x600', 'article': '065B8203R', 'headers': []}
+
+    def test_extracts_size_from_spec(self):
+        out = search_key_tokens(self.SPEC, self.META)
+        assert '500x600' in out.get('size', '')
+
+    def test_brand_with_translit(self):
+        out = search_key_tokens(self.SPEC, self.META)
+        assert 'LEMAX' in out['brand'] or 'Лемакс' in out['brand']
+
+    def test_article_and_type(self):
+        out = search_key_tokens(self.SPEC, self.META)
+        assert out['article'] == '065B8203R'
+        assert 'C10' in out['type']
+
+    def test_standard_reference_excluded_from_type(self):
+        out = search_key_tokens('Труба стальная', {'spec': 'ГОСТ 3262-75', 'brand': ''})
+        assert 'type' not in out
+
+    def test_no_meta_falls_back_to_keywords(self):
+        out = search_key_tokens('Кран шаровой Ду15', None)
+        assert out  # не пусто: keywords или размер
+
+    def test_empty_returns_empty(self):
+        assert search_key_tokens('', {}) == {}

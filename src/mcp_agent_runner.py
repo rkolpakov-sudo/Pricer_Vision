@@ -14,6 +14,7 @@ from src.task_scheduler import TaskScheduler
 from src.semantic_cache import SemanticCache
 from src.learning_loop import LearningLoop
 from src.session_cache import NegativeCache, SiteBlacklist
+from src.session_facts import SessionFacts
 
 logger = logging.getLogger("pricer.runner")
 
@@ -223,6 +224,8 @@ class MCPAgentRunner(QThread):
             # Сессионный блэклист сайтов: сайт, где несколько строк подряд не нашли
             # товар (таймаут/force-switch/макс. раундов), исключается из поиска.
             site_blacklist = SiteBlacklist()
+            # Межстрочные факты: сайт × (тип|бренд) статус + рабочие паттерны.
+            session_facts = SessionFacts()
 
             def _on_site_visited(site_id: str):
                 self._last_visited_site = site_id
@@ -352,6 +355,7 @@ class MCPAgentRunner(QThread):
                                 negative_cache=negative_cache,
                                 site_blacklist=site_blacklist,
                                 site_visit_callback=_site_visited,
+                                session_facts=session_facts,
                             ),
                             idle_timeout=row_idle_timeout,
                             max_seconds=row_max_seconds,
