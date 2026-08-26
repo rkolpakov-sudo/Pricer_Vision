@@ -1,8 +1,15 @@
 import asyncio
+import json
 from types import SimpleNamespace
 from unittest.mock import patch, AsyncMock
 import pytest
-from src.mcp_bridge import MCPBridge, _sanitize_js, _is_url, resolve_backends
+from src.mcp_bridge import (
+    MCPBridge, _sanitize_js, _is_url, resolve_backends,
+    _is_strict_mode_error, _extract_strict_selector, _strict_inventory_js,
+    _fields_inventory_js, _is_css_parse_error, _is_fill_timeout, _is_click_timeout,
+    _role_locator_to_css, _strict_mode_hint, _fill_timeout_hint,
+    _css_parse_hint, _click_timeout_hint,
+)
 from src.resilience import mcp_circuit
 
 
@@ -243,6 +250,134 @@ class _FakeMCPTool:
         self.name = name
         self.description = ""
         self.inputSchema = {"type": "object", "properties": {}}
+
+
+class TestPlaywrightErrorFeedback:
+    """Чистые помощники Фазы 2: детекция и перевод ошибок Playwright."""
+
+    def test_strict_mode_detection(self):
+        err = 'error: type failed: Locator.fill: Error: strict mode violation: locator("input[name=\\"search\\"]") resolved to 2 elements'
+        assert _is_strict_mode_error(err) is True
+        assert _extract_strict_selector(err) == 'input[name="search"]'
+
+    def test_strict_selector_none_when_not_present(self):
+        assert _extract_strict_selector("no such pattern") is None
+
+    def test_strict_inventory_js_embeds_selector_safely(self):
+        js = _strict_inventory_js('input[name="search"]')
+        # JS-строка должна быть валидным литералом (json.dumps)
+        parsed = json.loads(js.split("const sel = ")[1].split(";")[0])
+        assert parsed == 'input[name="search"]'
+        assert "offsetWidth" in js
+
+    def test_fields_inventory_js(self):
+        js = _fields_inventory_js()
+        assert "input,textarea,select" in js
+        assert "placeholder" in js
+
+    def test_css_parse_detection(self):
+        err = 'error: type failed: Locator.fill: Unexpected token "get_by_role(" while parsing css selector'
+        assert _is_css_parse_error(err) is True
+        assert _is_css_parse_error("ordinary error") is False
+
+    def test_fill_timeout_detection(self):
+        err = "error: type failed: Locator.fill: Timeout 10000ms exceeded. Call log: - waiting for locator"
+        assert _is_fill_timeout(err) is True
+        assert _is_fill_timeout("error: click failed: Page.click: Timeout") is False
+
+    def test_click_timeout_detection(self):
+        err = "error: click failed: Page.click: Timeout 10000ms exceeded."
+        assert _is_click_timeout(err) is True
+        assert _is_click_timeout("error: type failed: Locator.fill: Timeout") is False
+
+    def test_role_locator_button_translation(self):
+        assert _role_locator_to_css('get_by_role("button", name="Найти")') == 'button:has-text("Найти")'
+        assert _role_locator_to_css("button \"Найти\"") == 'button:has-text("Найти")'
+
+    def test_role_locator_link_translation(self):
+        assert _role_locator_to_css('getByRole("link", {name: "товар"})') == 'a:has-text("товар")'
+
+    def test_role_locator_textbox_not_translated(self):
+        assert _role_locator_to_css('get_by_role("textbox", name="Поиск")') is None
+        assert _role_locator_to_css('textbox "Поиск"') is None
+        assert _role_locator_to_css("") is None
+
+    def test_hint_builders_contain_guidance(self):
+        assert "селектор" in _strict_mode_hint("err", "[inventory]").lower()
+        assert "Доступные поля" in _fill_timeout_hint("err", "[inventory]")
+        assert "button:has-text" in _css_parse_hint("err", 'button:has-text("Найти")')
+        assert "browser_snapshot" in _click_timeout_hint("err")
+
+
+class _InventoryServer:
+    """Фейковый сервер: на browser_evaluate отвечает инвентарём."""
+
+    def __init__(self, inventory="[{\"idx\":0,\"visible\":true,\"name\":\"search\"}]"):
+        self.name = "playwright"
+        self.session = AsyncMock()
+        self.session.call_tool = AsyncMock(
+            return_value=_FakeResult(inventory)
+        )
+
+
+class TestEnhanceError:
+    @pytest.mark.asyncio
+    async def test_non_error_unchanged(self):
+        bridge = MCPBridge()
+        srv = _InventoryServer()
+        out = await bridge._enhance_error(srv, "browser_snapshot", {}, "ok")
+        assert out == "ok"
+
+    @pytest.mark.asyncio
+    async def test_strict_mode_returns_inventory(self):
+        bridge = MCPBridge()
+        srv = _InventoryServer(inventory='[{"idx":0,"visible":true,"name":"search"}]')
+        err = 'error: type failed: Locator.fill: Error: strict mode violation: locator("input[name=\\"search\\"]") resolved to 2 elements'
+        out = await bridge._enhance_error(srv, "browser_type", {}, err)
+        assert "совпал с несколькими элементами" in out
+        assert "search" in out
+
+    @pytest.mark.asyncio
+    async def test_strict_mode_without_selector_unchanged(self):
+        bridge = MCPBridge()
+        srv = _InventoryServer()
+        out = await bridge._enhance_error(srv, "browser_type", {}, "error: strict mode violation (no selector)")
+        assert out == "error: strict mode violation (no selector)"
+
+    @pytest.mark.asyncio
+    async def test_css_parse_returns_hint_with_translation(self):
+        bridge = MCPBridge()
+        srv = _InventoryServer()
+        err = 'error: type failed: Locator.fill: Unexpected token "get_by_role(" while parsing css selector'
+        out = await bridge._enhance_error(srv, "browser_type", {"target": 'get_by_role("button", name="Найти")'}, err)
+        assert "button:has-text" in out
+        assert "Playwright-локатор" in out
+
+    @pytest.mark.asyncio
+    async def test_fill_timeout_returns_field_inventory(self):
+        bridge = MCPBridge()
+        srv = _InventoryServer(inventory='[{"idx":0,"tag":"INPUT","ph":"Что вы ищете?","visible":true}]')
+        err = "error: type failed: Locator.fill: Timeout 10000ms exceeded. Call log: - waiting for locator"
+        out = await bridge._enhance_error(srv, "browser_type", {"target": "input[name=search]"}, err)
+        assert "Доступные поля" in out
+        assert "Что вы ищете?" in out
+
+    @pytest.mark.asyncio
+    async def test_click_timeout_returns_snapshot_hint(self):
+        bridge = MCPBridge()
+        srv = _InventoryServer()
+        err = "error: click failed: Page.click: Timeout 10000ms exceeded. Call log: - waiting for locator(\"e553100\")"
+        out = await bridge._enhance_error(srv, "browser_click", {"target": "e553100"}, err)
+        assert "browser_snapshot" in out
+
+    @pytest.mark.asyncio
+    async def test_inventory_failure_falls_back_to_original(self):
+        bridge = MCPBridge()
+        srv = _InventoryServer()
+        srv.session.call_tool = AsyncMock(side_effect=RuntimeError("browser down"))
+        err = "error: type failed: Locator.fill: Timeout 10000ms exceeded."
+        out = await bridge._enhance_error(srv, "browser_type", {}, err)
+        assert out == err
 
 
 class _FakeMCPSession:

@@ -1,5 +1,7 @@
 import asyncio
+import json
 import os
+import re
 import sys
 import logging
 from pathlib import Path
@@ -11,7 +13,7 @@ from src.config_loader import get_mcp_config, load_settings
 
 logger = logging.getLogger("pricer.bridge")
 
-_HASH_REF_RE = __import__("re").compile(r"^[ef]\d+$|^f\d+e\d+$")
+_HASH_REF_RE = re.compile(r"^[ef]\d+$|^f\d+e\d+$")
 
 _BACKENDS = ("camoufox", "playwright", "nodriver")
 _DEFAULT_BACKENDS = ("camoufox", "playwright", "nodriver")
@@ -117,6 +119,113 @@ def _sanitize_js(js: str) -> str:
     if depth > 0:
         s += "}" * depth
     return s
+
+
+# --- Обратная связь по ошибкам Playwright (Фаза 2) --------------------------
+# «Слепые» ошибки (таймаут заполнения, strict mode, css-parse роль-локатора,
+# устаревший ref) превращаются в информацию, которую LLM использует за 1 раунд.
+# Скрипт НЕ принимает решение за LLM — он лишь сообщает факты о странице.
+
+
+def _is_strict_mode_error(text: str) -> bool:
+    return "strict mode violation" in text
+
+
+def _extract_strict_selector(text: str) -> str | None:
+    m = re.search(r'locator\("(.*?)"\) resolved to', text)
+    if not m:
+        return None
+    return m.group(1).replace('\\"', '"')
+
+
+def _strict_inventory_js(selector: str) -> str:
+    sel = json.dumps(selector)
+    return (
+        "() => { const sel = " + sel + ";"
+        " const els = Array.from(document.querySelectorAll(sel));"
+        " return JSON.stringify(els.map((e,i) => ({idx:i,"
+        " visible: !!(e.offsetWidth || e.offsetHeight), tag: e.tagName,"
+        " id: e.id || '', name: e.name || '', ph: e.placeholder || '',"
+        " cls: String(e.className || '').slice(0,60)}))); }"
+    )
+
+
+def _fields_inventory_js() -> str:
+    return (
+        "() => { const els = Array.from(document.querySelectorAll('input,textarea,select,[contenteditable]'));"
+        " return JSON.stringify(els.map((e,i) => ({idx:i, tag: e.tagName, type: e.type || '',"
+        " name: e.name || '', id: e.id || '', ph: e.placeholder || '',"
+        " visible: !!(e.offsetWidth || e.offsetHeight)})).slice(0,20)); }"
+    )
+
+
+def _is_css_parse_error(text: str) -> bool:
+    return "Unexpected token" in text and "parsing css selector" in text
+
+
+def _is_fill_timeout(text: str) -> bool:
+    return "type failed" in text and "Locator.fill" in text and "Timeout" in text
+
+
+def _is_click_timeout(text: str) -> bool:
+    return "click failed" in text and "Timeout" in text
+
+
+def _role_locator_to_css(target: str) -> str | None:
+    """Best-effort перевод роль-локаторов в Playwright-локаторы.
+
+    Безопасно переводим только button/link через :has-text. Для textbox и
+    прочих возвращаем None — надёжного маппинга без атрибутов нет, LLM
+    получает подсказку формата и сам выбирает селектор.
+    """
+    t = (target or "").strip()
+    if not t:
+        return None
+    m = re.search(r'get_?by_?role\(\s*["\'](\w+)["\']\s*(?:,\s*\{?\s*(?:name\s*[:=]\s*)?["\']([^"\']+)["\'])?', t, re.IGNORECASE)
+    if m:
+        role, name = m.group(1), m.group(2)
+        if role == "button":
+            return f'button:has-text("{name}")' if name else "button"
+        if role in ("link",):
+            return f'a:has-text("{name}")' if name else "a"
+        return None
+    m = re.match(r'^(button|link)\s+"([^"]+)"', t)
+    if m:
+        role, name = m.group(1), m.group(2)
+        if role == "button":
+            return f'button:has-text("{name}")'
+        return f'a:has-text("{name}")'
+    return None
+
+
+def _strict_mode_hint(result_text: str, inventory: str) -> str:
+    return (f"{result_text}\n\n"
+            f"💡 Селектор совпал с несколькими элементами. Элементы на странице: {inventory}\n"
+            f"Уточни target: по placeholder/id (input[placeholder=\"...\"]), видимости, "
+            f"или используй idx из списка через browser_evaluate.")
+
+
+def _fill_timeout_hint(result_text: str, inventory: str) -> str:
+    return (f"{result_text}\n\n"
+            f"💡 Поле по селектору не найдено на странице. Доступные поля: {inventory}\n"
+            f"Используй target вида input[placeholder=\"...\"] или id из списка.")
+
+
+def _css_parse_hint(result_text: str, translated: str | None) -> str:
+    hint = ("\n\n💡 target — Playwright-локатор, а НЕ роль-локатор из снапшота. "
+            "Пиши CSS-селектор: input[placeholder=\"...\"], button:has-text(\"Найти\"), "
+            "a:has-text(\"товар\").")
+    if translated:
+        hint += f" Для переданного target подойдёт: {translated}."
+    return result_text + hint
+
+
+def _click_timeout_hint(result_text: str) -> str:
+    return (f"{result_text}\n\n"
+            "💡 Click timeout: target/ref, скорее всего, устарел после перерисовки "
+            "страницы (SPA). Возьми свежий browser_snapshot и выбери новый target, "
+            "или кликни по тексту: a:has-text(\"...\"), или открой URL карточки "
+            "через browser_navigate.")
 
 _STEALTH_JS = str(Path(__file__).resolve().parent.parent / "config" / "stealth.js")
 _MCP_CONFIG = str(Path(__file__).resolve().parent.parent / "config" / "playwright-mcp.json")
@@ -302,7 +411,8 @@ class MCPBridge:
                     elif hasattr(content, "type") and content.type == "resource":
                         parts.append(f"[resource: {getattr(content, 'uri', '?')}]")
                 mcp_circuit.record_success()
-                return "\n".join(parts)
+                result_text = "\n".join(parts)
+                return await self._enhance_error(srv, tool_name, arguments, result_text)
             except asyncio.TimeoutError:
                 mcp_circuit.record_failure()
                 self._consecutive_timeouts += 1
@@ -317,6 +427,52 @@ class MCPBridge:
                 mcp_circuit.record_failure()
                 logger.warning("MCP tool '%s' on '%s' failed: %s", tool_name, srv.name, e)
                 return f"error: tool call failed: {e}"
+
+    async def _enhance_error(self, srv, tool_name: str, arguments: dict, result_text: str) -> str:
+        """Превращает «слепые» ошибки Playwright в информативную обратную связь.
+
+        Фолбэк-инвентаризация выполняется через тот же браузер (browser_evaluate)
+        и возвращает LLM готовый список полей/элементов — 1 раунд вместо 2–4.
+        """
+        if not result_text.startswith("error:"):
+            return result_text
+        # 2.1 strict mode violation → список совпавших элементов с видимостью
+        if _is_strict_mode_error(result_text):
+            selector = _extract_strict_selector(result_text)
+            if selector:
+                inventory = await self._run_inventory(srv, _strict_inventory_js(selector))
+                if inventory:
+                    return _strict_mode_hint(result_text, inventory)
+            return result_text
+        # 2.2 css-parse роль-локатора → подсказка формата (и перевод, если безопасно)
+        if _is_css_parse_error(result_text):
+            target = arguments.get("target") or arguments.get("element") or arguments.get("ref") or ""
+            return _css_parse_hint(result_text, _role_locator_to_css(target))
+        # 2.4 слепой fill-таймаут → инвентарь полей страницы
+        if _is_fill_timeout(result_text):
+            inventory = await self._run_inventory(srv, _fields_inventory_js())
+            if inventory:
+                return _fill_timeout_hint(result_text, inventory)
+            return result_text
+        # 2.3 устаревший ref на клике → свежий снапшот
+        if _is_click_timeout(result_text):
+            return _click_timeout_hint(result_text)
+        return result_text
+
+    async def _run_inventory(self, srv, js: str) -> str | None:
+        """browser_evaluate в текущем контексте страницы (без реентрантности lock)."""
+        try:
+            res = await asyncio.wait_for(
+                srv.session.call_tool("browser_evaluate", {"function": js}),
+                timeout=min(self._call_timeout, 15.0),
+            )
+            parts = []
+            for content in res.content:
+                if hasattr(content, "text"):
+                    parts.append(content.text)
+            return "\n".join(parts)[:1500]
+        except Exception:
+            return None
 
     async def list_tools(self) -> list[dict]:
         if self._stopped:

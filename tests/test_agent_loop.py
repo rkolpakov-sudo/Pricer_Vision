@@ -13,7 +13,9 @@ from src.agent_loop import (
     _portable_step_target, format_steps, format_steps_detailed,
     CONTEXT_TOKEN_BUDGET, EMPTY_PROBE_LIMIT,
     TEMP_EXPLORATION, TEMP_NAVIGATION, TEMP_EXTRACTION, TEMP_RECOVERY,
+    _penalize_approaches, _deprecate_site_approaches, _inject_facts_block,
 )
+from src.session_facts import RowFacts
 
 
 class TestConstants:
@@ -34,6 +36,10 @@ class TestConstants:
         assert "«для проверки полного названия»" in SYSTEM_PROMPT
         assert "фланцевый" in SYSTEM_PROMPT
         assert "максимум 1 шаг на проверку заголовка" in SYSTEM_PROMPT
+
+    def test_system_prompt_pagination_guidance(self):
+        assert "a[href*=page]" in SYSTEM_PROMPT
+        assert "НЕ извлекай одну и ту же страницу повторно" in SYSTEM_PROMPT
 
     def test_system_prompt_brand_mismatch_fallback_rule(self):
         assert "brand_mismatch=true" in SYSTEM_PROMPT
@@ -603,3 +609,79 @@ class TestFallbackResult:
         ], elapsed=5.0)
         assert result["product_type"] == "cables"
         assert result["site"] == "x.ru"
+
+
+class TestPrecisionDeprecation:
+    class FakeMM:
+        def __init__(self):
+            self.failed = []
+            self.deprecated_all = []
+
+        def record_failure(self, approach_id):
+            self.failed.append(approach_id)
+
+        def get_site_approaches(self, product_type, domain):
+            return [{"id": 10}, {"id": 11}]
+
+        def get_approaches_by_site(self, domain):
+            return [{"id": 10}, {"id": 11}]
+
+    def test_penalize_only_passed_ids(self):
+        mm = self.FakeMM()
+        _penalize_approaches(mm, [1, 2, 3], "test:")
+        assert mm.failed == [1, 2, 3]
+
+    def test_penalize_empty_noop(self):
+        mm = self.FakeMM()
+        _penalize_approaches(mm, [], "test:")
+        _penalize_approaches(mm, None, "test:")
+        assert mm.failed == []
+
+    def test_penalize_dedup_and_skip_invalid(self):
+        mm = self.FakeMM()
+        _penalize_approaches(mm, [1, "2", 1, None, "x"], "test:")
+        assert mm.failed == [1, 2]
+
+    def test_deprecate_with_ids_routes_to_penalize(self):
+        mm = self.FakeMM()
+        _deprecate_site_approaches(mm, "pt", "site.ru", "test:", approach_ids=[5, 6])
+        assert mm.failed == [5, 6]
+
+    def test_deprecate_without_ids_falls_back_to_all(self):
+        mm = self.FakeMM()
+        _deprecate_site_approaches(mm, "pt", "site.ru", "test:")
+        assert mm.failed == [10, 11]
+
+
+class TestFactsBlock:
+    def test_inject_empty_block_noop(self):
+        messages = [{"role": "system", "content": "s"}, {"role": "user", "content": "u"}]
+        assert _inject_facts_block(messages, "") == messages
+
+    def test_inject_after_system(self):
+        messages = [{"role": "system", "content": "s"}, {"role": "user", "content": "u"}]
+        out = _inject_facts_block(messages, "ФАКТЫ")
+        assert out[0] == {"role": "system", "content": "s"}
+        assert out[1] == {"role": "user", "content": "ФАКТЫ"}
+        assert out[2] == {"role": "user", "content": "u"}
+
+    def test_facts_survive_trim_and_reinject(self):
+        # имитация: огромная история обрезается trim, затем факты вставляются свежими
+        messages = [{"role": "system", "content": "sys"}]
+        for i in range(200):
+            messages.append({"role": "assistant", "content": "x" * 2000})
+            messages.append({"role": "tool", "content": "y" * 2000})
+        messages.append({"role": "user", "content": "финал"})
+        trimmed = _trim_messages_for_budget(messages, budget=2000)
+        facts = RowFacts()
+        facts.record_site_visit("satro-paladin.com")
+        out = _inject_facts_block(trimmed, facts.to_prompt_block())
+        assert any("ФАКТЫ СЕССИИ" in m.get("content", "") for m in out)
+
+    def test_facts_block_replaces_not_accumulates(self):
+        messages = [{"role": "system", "content": "s"}, {"role": "user", "content": "u"}]
+        out1 = _inject_facts_block(messages, "ФАКТЫ v1")
+        # следующий вызов строит из того же исходного списка (локальная вставка)
+        out2 = _inject_facts_block(messages, "ФАКТЫ v2")
+        assert sum(1 for m in out1 if m.get("content") == "ФАКТЫ v1") == 1
+        assert sum(1 for m in out2 if m.get("content") == "ФАКТЫ v2") == 1

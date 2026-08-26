@@ -363,7 +363,7 @@ class MCPAgentRunner(QThread):
                         # типа/бренда: штрафуем его в сессионном блэклисте, чтобы
                         # следующая строка не тратила раунды повторно.
                         if self._last_visited_site:
-                            strikes = site_blacklist.strike(self._last_visited_site)
+                            strikes = site_blacklist.strike(self._last_visited_site, reason="timeout")
                             logger.warning(
                                 "Site %s struck %d/%d (timeout feedback)",
                                 self._last_visited_site, strikes, site_blacklist.limit,
@@ -405,6 +405,11 @@ class MCPAgentRunner(QThread):
                 self._processed += 1
                 if result.get("price") is not None:
                     self._found += 1
+                    # Сайт, где в прогоне найдена цена, не штрафуется блэклистом:
+                    # иначе выбиваем единственный сайт с товаром (случай mircli 26.08).
+                    site_for_success = result.get("site") or ""
+                    if site_for_success:
+                        site_blacklist.mark_success(site_for_success)
                 self.metrics_signal.emit(self._current_metrics())
                 self.monitor_signal.emit({"type": "row_done", "idx": i + 1, "total": total})
                 self.row_done_signal.emit(row_idx, result)

@@ -72,10 +72,13 @@ class SiteBlacklist:
     """
 
     MAX_STRIKES = 2
+    REASON_LABELS = ("timeout", "force_switch", "max_rounds", "stuck")
 
     def __init__(self, limit: int | None = None):
         self._limit = limit or self.MAX_STRIKES
         self._strikes: dict[str, int] = {}
+        self._reasons: dict[str, dict[str, int]] = {}
+        self._successful: set[str] = set()
 
     @property
     def limit(self) -> int:
@@ -89,29 +92,57 @@ class SiteBlacklist:
                 key = key[len(prefix):]
         return key
 
-    def strike(self, site_id: str) -> int:
-        """Зафиксировать неудачу на сайте. Возвращает новый счётчик."""
+    def strike(self, site_id: str, reason: str | None = None) -> int:
+        """Зафиксировать неудачу на сайте. Возвращает новый счётчик.
+
+        Причина (timeout/force_switch/max_rounds/stuck) хранится для диагностики.
+        Сайт, на котором в этом прогоне УЖЕ найдена цена (mark_success),
+        не штрафуется и не блокируется — иначе выбиваем единственный сайт
+        с товаром (случай mircli в прогоне 26.08).
+        """
         key = self._normalize(site_id)
         if not key:
             return 0
+        if key in self._successful:
+            return self._strikes.get(key, 0)
         count = self._strikes.get(key, 0) + 1
         self._strikes[key] = count
+        if reason in self.REASON_LABELS:
+            reasons = self._reasons.setdefault(key, {})
+            reasons[reason] = reasons.get(reason, 0) + 1
         return count
+
+    def mark_success(self, site_id: str) -> None:
+        """Отметить сайт, где в этом прогоне найдена цена: больше не штрафуется."""
+        key = self._normalize(site_id)
+        if key:
+            self._successful.add(key)
+
+    def reasons(self, site_id: str) -> dict[str, int]:
+        key = self._normalize(site_id)
+        return dict(self._reasons.get(key, {}))
+
+    def successful_sites(self) -> set[str]:
+        return set(self._successful)
 
     def is_blocked(self, site_id: str) -> bool:
         key = self._normalize(site_id)
         if not key:
             return False
+        if key in self._successful:
+            return False
         return self._strikes.get(key, 0) >= self._limit
 
     def blocked_sites(self) -> set[str]:
-        return {s for s, c in self._strikes.items() if c >= self._limit}
+        return {s for s, c in self._strikes.items() if c >= self._limit and s not in self._successful}
 
     def count(self, site_id: str) -> int:
         return self._strikes.get(self._normalize(site_id), 0)
 
     def reset(self) -> None:
         self._strikes.clear()
+        self._reasons.clear()
+        self._successful.clear()
 
     def __len__(self) -> int:
         return len(self._strikes)

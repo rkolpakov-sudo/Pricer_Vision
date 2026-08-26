@@ -139,3 +139,44 @@ class TestSiteBlacklist:
     def test_limit_property(self):
         assert SiteBlacklist().limit == 2
         assert SiteBlacklist(limit=5).limit == 5
+
+    def test_mark_success_prevents_blocking(self):
+        bl = SiteBlacklist()
+        bl.strike("santech.ru")
+        bl.strike("santech.ru")
+        assert bl.is_blocked("santech.ru") is True
+        bl.mark_success("santech.ru")
+        assert bl.is_blocked("santech.ru") is False
+        assert "santech.ru" not in bl.blocked_sites()
+        assert "santech.ru" in bl.successful_sites()
+
+    def test_strike_after_success_is_noop(self):
+        bl = SiteBlacklist()
+        bl.mark_success("mircli.ru")
+        assert bl.strike("mircli.ru") == 0
+        assert bl.strike("mircli.ru", reason="max_rounds") == 0
+        assert bl.is_blocked("mircli.ru") is False
+
+    def test_success_keeps_count_from_before(self):
+        bl = SiteBlacklist()
+        bl.strike("mircli.ru")
+        assert bl.count("mircli.ru") == 1
+        bl.mark_success("mircli.ru")
+        bl.strike("mircli.ru")
+        assert bl.count("mircli.ru") == 1
+
+    def test_reason_tracking(self):
+        bl = SiteBlacklist()
+        bl.strike("santech.ru", reason="timeout")
+        bl.strike("santech.ru", reason="max_rounds")
+        assert bl.reasons("santech.ru") == {"timeout": 1, "max_rounds": 1}
+        assert bl.is_blocked("santech.ru") is True
+
+    def test_reset_clears_success_and_reasons(self):
+        bl = SiteBlacklist()
+        bl.strike("santech.ru", reason="timeout")
+        bl.mark_success("mircli.ru")
+        bl.reset()
+        assert bl.reasons("santech.ru") == {}
+        assert bl.successful_sites() == set()
+        assert len(bl) == 0

@@ -26,6 +26,7 @@ from src.approach_relevance import (
     approach_relevant, product_name_matches, product_name_matches_ignore_brand,
     missing_required_tokens, normalize_search_text, is_standard_reference,
 )
+from src.session_facts import RowFacts
 
 logger = logging.getLogger("pricer.agent")
 
@@ -200,7 +201,7 @@ SYSTEM_PROMPT = """Ты — опытный пользователь с дост�
 17. При вызове save_confirmed_price ВСЕГДА передавай product_name — полное наименование товара с ЗАГОЛОВКА карточки (h1), НЕ сокращай и НЕ перефразируй. Система проверит соответствие спецификации. Если она вернёт СОВЕТ («Не ошибся ли ты…») — это НЕ отказ и НЕ приговор: система лишь советует, а решение принимаешь ТЫ после перепроверки. Перепроверь заголовок h1 и соответствие товара (тип, соединение, Ду, материал). Если наименование было неполным — исправь product_name и сохрани снова. Если уверен, что товар верен — сохрани повторно с confirm=true (цена будет помечена как требующая ревью). ВАЖНО: если ты УЖЕ находишься в карточке товара и извлёк из неё цену и h1 — ПЕРВЫМ ДЕЛОМ сохрани цену (при расхождении только в описательных словах серии/комплектации — с confirm=true), и только ПОСЛЕ сохранения, если остались серьёзные сомнения, можешь перепроверить характеристики на той же карточке. НЕ уходи с карточки и НЕ проверяй серию/комплектацию на других сайтах и в Яндексе, пока цена не сохранена: уход из карточки с уже извлечённой ценой = потерянный результат. Кран шаровой и клапан балансировочный — это РАЗНЫЕ товары, воздуховод и воздухоотводчик — РАЗНЫЕ товары.
 18. Извлечение цены из карточки: цена на сайте может отображаться с любым символом — «₽», «P», «р.», «руб» или без него. НЕ ищи только символ «₽» — это самая частая ошибка. Ищи по классам: querySelectorAll('[class*="price"], [class*="price"] span, .product-price, [data-price]') и бери textContent каждого элемента. Первый элемент с классом-содержащим "price" может оказаться НЕ ценой (например, иконка «Корзина» или «В корзину») — собери ВСЕ кандидаты в массив и выбери тот, где текст похож на число с символом валюты.
 19. JS в browser_evaluate: пиши КОРОТКИЙ код, который закрывается фигурной скобкой. НИКОГДА не ставь `//`-комментарий в конце строки перед закрывающей скобкой — скобка после `//` игнорируется и JS падает с SyntaxError. Если нужен комментарий — пиши его ОТДЕЛЬНОЙ строкой перед кодом.
-20. Открывай карточку товара ТОЛЬКО если название результата поиска УЖЕ явно содержит тип товара, тип соединения и Ду/размер из спецификации (бренд в названии результата не обязателен — он может быть не указан). Если в названии результата нет типа соединения (фланцевый/резьбовой/муфтовый/Rp), нет Ду/размера или они ПРОТИВОРЕЧАТ спецификации (резьбовой вместо фланцевого, ручной вместо автоматического, латунь вместо чугуна) — НЕ открывай карточку «для проверки полного названия»: это потерянный раунд, ищи дальше в результатах или переключайся на другой сайт. Если открытая карточка оказалась неподходящей — НЕ извлекай цену и НЕ ищи «варианты» на странице, вернись к результатам или переключись на другой сайт (максимум 1 шаг на проверку заголовка).
+20. Открывай карточку товара ТОЛЬКО если название результата поиска УЖЕ явно содержит тип товара, тип соединения и Ду/размер из спецификации (бренд в названии результата не обязателен — он может быть не указан). Если в названии результата нет типа соединения (фланцевый/резьбовой/муфтовый/Rp), нет Ду/размера или они ПРОТИВОРЕЧАТ спецификации (резьбовой вместо фланцевого, ручной вместо автоматического, латунь вместо чугуна) — НЕ открывай карточку «для проверки полного названия»: это потерянный раунд, ищи дальше в результатах или переключайся на другой сайт. Если открытая карточка оказалась неподходящей — НЕ извлекай цену и НЕ ищи «варианты» на странице, вернись к результатам или переключись на другой сайт (максимум 1 шаг на проверку заголовка). Если нужный размер/тип не виден на первой странице выдачи — проверь ссылки пагинации (a[href*=page], a[href*=str], a[href*=perPage]) и открой следующую страницу; НЕ извлекай одну и ту же страницу повторно.
 21. Бренд — НЕ жёсткий атрибут. Если найден товар, который совпадает со спецификацией по ВСЕМ атрибутам КРОМЕ бренда (тип, тип соединения, материал, Ду/размер, автоматический/ручной — совпадают; бренд другой или не указан) — извлеки его цену и сохрани через save_confirmed_price с параметром brand_mismatch=true. Это КАНДИДАТ-ФОЛБЭК: не выводи его как финальную цену и НЕ прекращай поиск — продолжай искать точный товар (с нужным брендом) на других сайтах. Если по итогам поиска по всей строке точный товар так и не найден — строка автоматически заполняется лучшим таким кандидатом и помечается «не совпадает бренд». Если в спецификации бренда нет (не указан завод-изготовитель) — совпадение по типу/соединению/Ду уже является полным совпадением, сохраняй обычным способом без brand_mismatch.
 
 Ограничение — 60 шагов на один товар. У тебя полная свобода действий. Кратко поясняй свои намерения перед каждым действием."""
@@ -517,7 +518,9 @@ async def process_row(
         {"role": "user", "content": context},
     ]
 
-    response = await _query_llm(llm_client, messages, all_tools, temperature=TEMP_EXPLORATION, monitor_callback=monitor_callback)
+    facts = RowFacts()
+
+    response = await _query_llm(llm_client, messages, all_tools, temperature=TEMP_EXPLORATION, monitor_callback=monitor_callback, facts=facts)
     if "error" in response:
         return _error_result(spec_text, f"LLM: {response['error']}")
 
@@ -526,6 +529,16 @@ async def process_row(
     rounds_on_site = 0
     steps = []
     stuck_detector = StuckDetector()
+
+    def _shown_approach_ids(domain: str) -> list:
+        """Подходы, показанные агенту для текущего сайта (для точечного штрафа)."""
+        if not domain:
+            return []
+        ids = [a.get("id") for a in approaches if a.get("site_id") == domain and a.get("id")]
+        if not ids:
+            ids = [a.get("id") for a in all_flat if a.get("site_id") == domain and a.get("id")]
+        return ids
+
     yandex_reminded = False
     yandex_price_saved = False
     price_confirmed = False
@@ -597,7 +610,7 @@ async def process_row(
             messages.append({"role": "assistant", "content": content or "(no output)"})
             messages.append({"role": "user", "content": "Верни JSON с результатом поиска цены.\nФормат: {\"price\": число|null, \"confidence\": 0.0-1.0, \"url\": \"...\", \"site\": \"...\", \"reason\": \"...\", \"requires_review\": bool}"})
             _stop_check()
-            response = await _query_llm(llm_client, messages, all_tools, temperature=TEMP_EXTRACTION, monitor_callback=monitor_callback)
+            response = await _query_llm(llm_client, messages, all_tools, temperature=TEMP_EXTRACTION, monitor_callback=monitor_callback, facts=facts)
             if "error" in response:
                 return _error_result(spec_text, f"LLM: {response['error']}")
             continue
@@ -628,6 +641,9 @@ async def process_row(
                 if rate_limiter is not None:
                     await rate_limiter.wait_if_needed(current_site or "")
                 result = await mcp_bridge.call_tool(tool_name, tool_args)
+                facts.record_site_visit(_extract_domain(current_site))
+                if _is_product_card_url(current_site):
+                    facts.record_card_open()
             else:
                 # Rate limit EVERY browser action (not just navigate): клики, печать,
                 # evaluate, снапшоты идут на тот же домен и тоже ловят бан при частых
@@ -642,6 +658,7 @@ async def process_row(
                     step["url"] = tool_args.get("url", "")
                 elif tool_name in ("browser_type", "type_text"):
                     step["text"] = tool_args.get("text", "")
+                    facts.record_query(_extract_domain(current_site), tool_args.get("text", ""))
                     # Hash-рефы (e82/f2e17) — внутренние id accessibility-дерева Playwright:
                     # в Camoufox они не существуют. При записи шага сохраняем портабельный
                     # локатор (element/роль) вместо ref, чтобы подход работал на любом бэкенде.
@@ -690,6 +707,11 @@ async def process_row(
                 recent_errors.append(tool_content[:120])
                 if len(recent_errors) > 4:
                     recent_errors.pop(0)
+                facts.record_error(tool_content)
+            if tool_name == "browser_evaluate":
+                js_key = str(tool_args.get("function", ""))[:80]
+                result_hash = hashlib.md5(tool_content.encode("utf-8", "ignore")).hexdigest()[:8]
+                facts.record_browser_call(_extract_domain(current_site), "evaluate:" + js_key, result_hash)
             if tool_name == "browser_evaluate" and "SyntaxError" in tool_content:
                 tool_content += ("\n💡 JS-ошибка синтаксиса (SyntaxError). Перепиши код ПРОСТЫМ "
                                  "однострочным выражением: без // комментариев в конце строки, "
@@ -707,6 +729,9 @@ async def process_row(
                                 empty_probe_streak.clear()
                             current_site = url
                             rounds_on_site = 0
+                            facts.record_site_visit(_extract_domain(current_site))
+                            if _is_product_card_url(current_site):
+                                facts.record_card_open()
                         break
 
             # Captcha/block detection — skip site immediately
@@ -763,6 +788,7 @@ async def process_row(
                 if price_hint:
                     price_candidate_seen = True
                     empty_probe_streak.clear()
+                    facts.record_price_candidate()
             content_to_send = tool_content[:10000]
             if price_hint:
                 content_to_send = f"💰 price_candidate: {price_hint}\n" + content_to_send
@@ -777,6 +803,7 @@ async def process_row(
             if tool_name in ("browser_evaluate", "evaluate", "browser_find", "find") and current_site:
                 probe_domain = _extract_domain(current_site)
                 if _is_empty_search_result(tool_name, tool_content):
+                    facts.record_empty_result(probe_domain)
                     empty_probe_streak[probe_domain] = empty_probe_streak.get(probe_domain, 0) + 1
                     if empty_probe_streak[probe_domain] >= EMPTY_PROBE_LIMIT and probe_domain not in empty_probe_guidance_sent:
                         empty_probe_guidance_sent.add(probe_domain)
@@ -954,13 +981,13 @@ async def process_row(
                     ),
                 })
                 _stop_check()
-                response = await _query_llm(llm_client, messages, all_tools, temperature=TEMP_RECOVERY, monitor_callback=monitor_callback)
+                response = await _query_llm(llm_client, messages, all_tools, temperature=TEMP_RECOVERY, monitor_callback=monitor_callback, facts=facts)
                 if "error" in response:
                     return _error_result(spec_text, f"LLM: {response['error']}")
                 continue
             logger.warning("StuckDetector CRITICAL — diagnostic cap reached, forcing site switch")
-            if site_blacklist is not None and current_site:
-                site_blacklist.strike(_extract_domain(current_site))
+            if site_blacklist is not None and current_site and not price_candidate_seen:
+                site_blacklist.strike(_extract_domain(current_site), reason="stuck")
             current_site = ""
             rounds_on_site = site_round_limits.get(_extract_domain(current_site), MAX_ROUNDS_PER_SITE) + 1
             stuck_detector.reset()
@@ -970,13 +997,17 @@ async def process_row(
             logger.info("⚠️ Forcing site switch after %d rounds on %s", rounds_on_site, current_site or "?")
             # Track negative feedback — always, even for unknown product types
             if current_site:
-                if site_blacklist is not None:
-                    site_blacklist.strike(current_domain or current_site)
+                if site_blacklist is not None and not price_candidate_seen:
+                    site_blacklist.strike(current_domain or current_site, reason="force_switch")
                 try:
                     failed_site = current_domain
-                    if product_type != UNKNOWN_PT:
+                    if product_type != UNKNOWN_PT and not price_candidate_seen:
                         memory_manager.increment_consecutive_failures(product_type, failed_site)
-                    _deprecate_site_approaches(memory_manager, product_type, failed_site, "📉 Force switch:")
+                    if price_candidate_seen:
+                        # Товар на сайте есть (видели цену) — строка не успела. Подходы НЕ штрафуем.
+                        logger.info("Force switch: price candidate seen on %s — approaches preserved", failed_site)
+                    else:
+                        _penalize_approaches(memory_manager, _shown_approach_ids(failed_site), "📉 Force switch:")
                 except Exception as e:
                     logger.warning("Force switch deprecation failed: %s", e)
             force_msg = f"Ты сделал {rounds_on_site} шагов на текущем сайте без результата — лимит исчерпан."
@@ -992,7 +1023,7 @@ async def process_row(
             rounds_on_site = 0
             current_site = ""
             _stop_check()
-            response = await _query_llm(llm_client, messages, all_tools, temperature=TEMP_RECOVERY, monitor_callback=monitor_callback)
+            response = await _query_llm(llm_client, messages, all_tools, temperature=TEMP_RECOVERY, monitor_callback=monitor_callback, facts=facts)
             if "error" in response:
                 return _error_result(spec_text, f"LLM: {response['error']}")
             continue
@@ -1006,17 +1037,21 @@ async def process_row(
             })
 
         _stop_check()
-        response = await _query_llm(llm_client, messages, all_tools, temperature=TEMP_NAVIGATION, monitor_callback=monitor_callback)
+        response = await _query_llm(llm_client, messages, all_tools, temperature=TEMP_NAVIGATION, monitor_callback=monitor_callback, facts=facts)
         if "error" in response:
             return _error_result(spec_text, f"LLM: {response['error']}")
 
     elapsed = (datetime.now() - start_time).total_seconds()
     if current_site:
-        if site_blacklist is not None:
-            site_blacklist.strike(_extract_domain(current_site))
+        if site_blacklist is not None and not price_candidate_seen:
+            site_blacklist.strike(_extract_domain(current_site), reason="max_rounds")
         try:
             failed_domain = _extract_domain(current_site)
-            _deprecate_site_approaches(memory_manager, product_type, failed_domain, "📉 Max rounds:")
+            if price_candidate_seen:
+                # Товар на сайте есть (видели цену) — строка не успела. Подходы НЕ штрафуем.
+                logger.info("Max rounds: price candidate seen on %s — approaches preserved", failed_domain)
+            else:
+                _penalize_approaches(memory_manager, _shown_approach_ids(failed_domain), "📉 Max rounds:")
         except Exception as e:
             logger.warning("Max rounds deprecation failed: %s", e)
     if fallback_candidates:
@@ -1296,7 +1331,40 @@ def _clean_snapshot(content: str) -> str:
     return "\n".join(cleaned) if cleaned else content
 
 
-def _deprecate_site_approaches(memory_manager, product_type, domain, reason_prefix=""):
+def _penalize_approaches(memory_manager, approach_ids, reason_prefix=""):
+    """Штрафует ТОЛЬКО переданные подходы (по одному счёту на подход).
+
+    Пороги внутри graph_engine.update_approach_failure: 3 неудачи → cooldown 24ч,
+    10 → deprecate. Раньше _deprecate_site_approaches штрафовала ВСЕ подходы
+    (product_type, site) за один фейл строки — успешные подходы сгорали за 2-3
+    неудачные строки (в прогоне 26.08 уничтожено ~150 подходов).
+    """
+    if not approach_ids:
+        return
+    ids = []
+    for aid in approach_ids:
+        try:
+            aid_int = int(aid)
+        except (TypeError, ValueError):
+            continue
+        if aid_int not in ids:
+            ids.append(aid_int)
+    for aid in ids:
+        try:
+            memory_manager.record_failure(aid)
+        except Exception as e:
+            logger.warning("record_failure(%s) failed: %s", aid, e)
+    if ids:
+        logger.warning("%s penalized %d approaches", reason_prefix, len(ids))
+
+
+def _deprecate_site_approaches(memory_manager, product_type, domain, reason_prefix="", approach_ids=None):
+    """Слепая деприкация всех подходов сайта — только для captcha (сайт реально
+    заблокирован). Для force-switch/max-rounds используйте _penalize_approaches
+    с подмножеством подходов, показанных агенту."""
+    if approach_ids:
+        _penalize_approaches(memory_manager, approach_ids, reason_prefix)
+        return
     approaches = memory_manager.get_site_approaches(product_type, domain)
     if not approaches:
         approaches = memory_manager.get_approaches_by_site(domain)
@@ -1627,7 +1695,16 @@ def _trim_messages_for_budget(messages: list[dict], budget: int = CONTEXT_TOKEN_
     return system + kept + tail
 
 
-async def _query_llm(llm_client, messages, tools, temperature: float | None = None, monitor_callback: Callable[[str, object], None] | None = None):
+def _inject_facts_block(messages: list[dict], block: str) -> list[dict]:
+    """Вставляет свежий блок фактов после system (локальный список — накопления нет)."""
+    if not block:
+        return messages
+    insert_at = 1 if messages and messages[0].get("role") == "system" else 0
+    return messages[:insert_at] + [{"role": "user", "content": block}] + messages[insert_at:]
+
+
+async def _query_llm(llm_client, messages, tools, temperature: float | None = None, monitor_callback: Callable[[str, object], None] | None = None,
+                     facts: RowFacts | None = None):
     """Обёртка над llm_client.chat с Circuit Breaker и температурой фазы.
     chat() возвращает {"error": ...} вместо исключения — состояние фиксируем вручную."""
     if not llm_circuit.allow_request():
@@ -1635,6 +1712,9 @@ async def _query_llm(llm_client, messages, tools, temperature: float | None = No
         await asyncio.sleep(30)
         return {"error": "LLM circuit open"}
     messages = _trim_messages_for_budget(messages)
+    if facts is not None:
+        # Операционная память строки переживает trim: блок пересоздаётся per-call.
+        messages = _inject_facts_block(messages, facts.to_prompt_block())
     t0 = time.monotonic()
     response = await llm_client.chat(messages, tools, temperature=temperature)
     elapsed = time.monotonic() - t0

@@ -1,5 +1,103 @@
 # State Log
 
+## 2026-08-26 — ФАЗА 2 «Починить скриптовую обвязку MCP» (план docs/PLAN_AGENT_DEGRADATION.md)
+
+### Проблема (лог 26.08)
+70 явных tool-ошибок: 39 fill-таймаутов, 14 strict-mode, 13 click-таймаутов,
+2 css-parse роль-локаторов. Скриптовый слой отвечал «слепыми» таймаутами без
+полезной информации — каждая ошибка стоила LLM 2–4 раундов на повторное открытие
+страницы/полей.
+
+### Реализовано (src/mcp_bridge.py, `_enhance_error` в call_tool)
+- **2.1 strict mode violation** → фолбэк `browser_evaluate`: список совпавших
+  элементов (idx/visible/name/id/placeholder) — LLM выбирает за 1 раунд.
+- **2.2 css-parse роль-локатора** → `_role_locator_to_css` (getByRole/get_by_role/
+  «button "..."» → `:has-text`, безопасно только button/link) + подсказка формата.
+- **2.3 click-timeout по ref** → подсказка: свежий browser_snapshot / a:has-text /
+  browser_navigate по URL.
+- **2.4 fill-timeout** → инвентарь полей страницы (тот JS, что агент пишет сам).
+- **2.5 пагинация** → расширено Правило 20 промпта: «если размер не виден на
+  первой странице — открой ссылку пагинации; НЕ извлекай одну и ту же страницу
+  повторно» (информация, не скрипт).
+- При сбое фолбэк-инвентаризации возвращается исходная ошибка (graceful).
+
+### Тесты
+**919 passed, 2 skipped** (было 900; +19): test_mcp_bridge.py (+18: детекция,
+перевод роль-локаторов, JS-инвентари, `_enhance_error` ×7, фолбэк), test_agent_loop.py
+(+1: пагинация в промпте).
+
+### Заметки
+- Скрипт НЕ принимает решение за LLM: только сообщает факты о странице.
+- Не коммитилось — ждёт подтверждения пользователя.
+- Следующие: Фаза 3 (Правило 1, ключевые токены, межстрочные факты под флагами),
+  Фаза 4 (конфиг), Фаза 5 (верификация).
+
+## 2026-08-26 — ФАЗА 1 «Убрать деструктивные скрипты» (ветка fix/agent-degradation, план docs/PLAN_AGENT_DEGRADATION.md)
+
+### Контекст
+Глубокий разбор прогона 26.08 (log.md, 24 строки, 10/23, 13 max-rounds) показал
+деградацию агента: «полностью аналогичные» позиции (LEMAX C10/C20, отличается
+только размер) фейлили регулярно, время ненайденной строки выросло до 308–786 с.
+Принцип: скрипты — невидимая сантехника для LLM, а не замена его решений.
+
+### Реализовано (Фаза 1)
+
+1. **Неубиваемая память строки — `src/session_facts.py` (новый, `RowFacts`)**:
+   - Детерминированно накапливает: домены+статус, введённые запросы, счётчик
+     одинаковых извлечений (key+hash результата), price_candidate, карточка, ошибки.
+   - `_query_llm(..., facts=RowFacts|None)`: после `_trim_messages_for_budget`
+     вставляет свежее «ФАКТЫ СЕССИИ…» (пересоздаётся per-call → переживает trim,
+     лечит 15-кратные залипания строки 10).
+   - Точки записи в process_row: navigate/snapshot (site+card), browser_type (query),
+     browser_evaluate (repeat_streak), empty-result, price_candidate, error.
+   - НЕ «код-гард»: факт о повторе — информация, решение за LLM.
+
+2. **Точечная деприкация — `_penalize_approaches(ids)`** (agent_loop.py):
+   - force-switch/max-rounds штрафуют ТОЛЬКО подходы сайта, показанные агенту
+     (`_shown_approach_ids`), а не все (product_type, site).
+   - При `price_candidate_seen` (товар есть, строка не успела) подходы НЕ штрафуются
+     и `increment_consecutive_failures` гейтится.
+   - Captcha-ветка оставлена (сайт реально заблокирован).
+   - Лечит сгорание ~150 подходов за прогон.
+
+3. **Блэклист без выбивания «рабочих» сайтов — `SiteBlacklist` (session_cache.py)**:
+   - `mark_success(site_id)`: сайт с найденной в прогоне ценой не штрафуется/не
+     блокируется (mircli-кейс). Вызов из runner при `result.price is not None`.
+   - `strike(site_id, reason)` с причинами {timeout, force_switch, max_rounds, stuck}
+     (диагностика); штрафы в agent_loop гейтятся `price_candidate_seen`.
+   - Таймаут-штраф runner получает reason="timeout".
+
+### Тесты
+**900 passed, 2 skipped** (было 875; +25): test_session_facts.py (13, новый),
+test_session_cache.py (+5: mark_success, no-strike после успеха, причины),
+test_agent_loop.py (+7: точечная деприкация ×6, факт-блок ×4).
+
+### Файлы
+- новый `src/session_facts.py`, `tests/test_session_facts.py`
+- `src/agent_loop.py` (+112): RowFacts, `_penalize_approaches`, `_inject_facts_block`,
+  guard-штрафы, `facts=` в `_query_llm`
+- `src/session_cache.py` (+37): mark_success/reasons/strike(reason)
+- `src/mcp_agent_runner.py` (+7): mark_success, reason="timeout"
+- `docs/PLAN_AGENT_DEGRADATION.md` (план, статус Фазы 1 = ✅)
+
+### Заметки
+- Не коммитилось — ждёт подтверждения пользователя (регламент).
+- Фаза 2 (MCP-обвязка) и Фаза 3 (информация LLM: Правило 1, ключевые токены,
+  межстрочные факты под флагами) — следующие.
+
+## 2026-08-26 — Обновлены обязательные файлы до актуального состояния
+
+- `readme.md`: тесты «434» → «**875 passed, 2 skipped**»; файловая структура
+  актуализирована (docs/PLAN_SEARCH_MODE.md, config/matching_rules.yaml,
+  data/semantic_cache.json + site_profiles.json, src/approach_relevance.py +
+  session_cache.py, excel_writer-описание, test_main.py + test_row_idle_timeout.py,
+  панель «Режим поиска»).
+- `AGENTS.md`: убран устаревший `mineru_venv/` (единый Python 3.13 venv);
+  в архитектуру добавлены approach_relevance, session_cache, learning_loop
+  (профили `тип|бренд`, rank_sites), model_id_from_combo_text, панель «Режим
+  поиска», обновлённые тесты (875).
+- `docs/PLAN_SEARCH_MODE.md`: статус РЕАЛИЗОВАНО.
+
 ## 2026-08-26 — РЕАЛИЗОВАНА интеграция «Режим поиска» (3 флага) + рейтинг сайтов (ветка feat/search-mode)
 
 ### Что сделано (по docs/PLAN_SEARCH_MODE.md)
