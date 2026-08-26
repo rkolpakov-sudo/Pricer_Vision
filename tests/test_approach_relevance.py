@@ -380,3 +380,50 @@ class TestIgnoreSizes:
             "Кран шаровой Ду15, завод-изготовитель Пульсар",
             ignore_sizes=True,
         ) is True
+
+
+class TestCardH1LenientMatch:
+    """Регрессия: агент в карточке mircli не сохранил цену из-за ложного mismatch.
+
+    h1 сайта сокращён: серия/комплектация/подключение опущены, бренд в
+    транслитерации, размер в формате «10х500х600» (тип × высота × ширина).
+    Система НЕ решает молча — матчер остаётся строгим, а отсутствующие
+    ОПИСАТЕЛЬНЫЕ слова выносятся в advisory-совет, где LLM перепроверяет карточку.
+    """
+
+    SPEC = ("Стальной панельный радиатор с боковым подключением LEMAX Premium Compact Hygiene, "
+            "тип C10, в компл. с краном для выпуска воздуха и креплениями LEMAX Premium C10 500x600")
+
+    def test_mircli_h1_missing_only_descriptive_words(self):
+        """Матчер строгий (не решает за LLM), но отсутствуют ТОЛЬКО описательные слова —
+        размер 500x600 и ключевые атрибуты совпадают (транслит, тройной формат)."""
+        h1 = "Стальной панельный радиатор Лемакс Premium C 10х500х600"
+        missing = missing_required_tokens(self.SPEC, h1)
+        # Ключевые слова (тип/материал/бренд/размер) покрыты: стальной/панельный/радиатор есть,
+        # lemax = Лемакс (транслит), 500x600 = из 10х500х600.
+        assert "lemax" not in missing
+        assert "стальной" not in missing
+        assert "радиатор" not in missing
+        # Отсутствуют только описательные слова (серия/комплектация/подключение) — их решение
+        # передаётся LLM через advisory, а не молча игнорируется матчером.
+        assert missing and all(
+            w in {"compact", "hygiene", "компл", "краном", "креплениями",
+                  "выпуска", "воздуха", "боковым", "подключением"}
+            for w in missing
+        )
+
+    def test_wrong_width_rejected(self):
+        h1 = "Стальной панельный радиатор Лемакс Premium C 10х500х800"
+        assert product_name_matches(self.SPEC, h1) is False
+
+    def test_triple_dimension_last_pair(self):
+        """«10х500х600» → размер {500x600} (тип × высота × ширина)."""
+        assert _size_key("Лемакс Premium C 10х500х600") == {"500x600"}
+        assert _size_key("Лемакс Premium C 10х500х600 500x600") == {"500x600"}
+
+    def test_brand_transliteration_cyrillic_latin(self):
+        """«Лемакс»(кир) ≈ «lemax»(лат) — один бренд."""
+        assert product_name_matches(
+            "Радиатор стальной LEMAX C10 500x600",
+            "Радиатор стальной Лемакс C 10х500х600",
+        ) is True

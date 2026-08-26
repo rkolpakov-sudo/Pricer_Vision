@@ -39,6 +39,16 @@ _RULES_DEFAULTS = {
         "ру", "pn", "нр", "np", "kvs", "kv", "бар", "па", "атм",
         "тмакс", "макс", "мин", "max", "min", "град",
     ],
+    "optional_words": [
+        # Описательные/серийные/комплектационные слова: могут отсутствовать в
+        # названии карточки, хотя товар тот же. «Стальной панельный радиатор ...
+        # LEMAX Premium Compact Hygiene, тип C10, В КОМПЛ. С КРАНОМ для выпуска
+        # воздуха и креплениями» — h1 сайта «Радиатор панельный Лемакс Premium
+        # C 10х500х600» (серия/комплектация опущены).
+        "compact", "hygiene", "компл", "комплекте", "комплектация",
+        "краном", "креплениями", "выпуска", "воздуха", "боковым",
+        "подключением", "внутренняя", "резьба", "ручной", "автоматический",
+    ],
     "abbreviations": {"фл": "фланцевый"},
     "context_insignificant": [
         {"base": "Труба стальная водогазопроводная оцинкованная", "drop": "на грувлоках"},
@@ -50,6 +60,7 @@ _rules = dict(_RULES_DEFAULTS)
 _STOPWORDS_SET = frozenset(_RULES_DEFAULTS["stopwords"])
 _STRUCTURAL_SET = frozenset(_RULES_DEFAULTS["structural_words"])
 _PARAM_SET = frozenset(_RULES_DEFAULTS["param_words"])
+_OPTIONAL_SET = frozenset(_RULES_DEFAULTS["optional_words"])
 _CONTEXT_RULES = []  # [(base_re, drop_re)]
 _ABBR_PATTERNS = []  # [(compiled_re, full_form)]
 
@@ -63,10 +74,11 @@ def _phrase_to_regex(phrase: str) -> re.Pattern | None:
 
 
 def _compile_rules():
-    global _STOPWORDS_SET, _STRUCTURAL_SET, _PARAM_SET, _CONTEXT_RULES, _ABBR_PATTERNS
+    global _STOPWORDS_SET, _STRUCTURAL_SET, _PARAM_SET, _OPTIONAL_SET, _CONTEXT_RULES, _ABBR_PATTERNS
     _STOPWORDS_SET = frozenset(_rules.get("stopwords") or [])
     _STRUCTURAL_SET = frozenset(_rules.get("structural_words") or [])
     _PARAM_SET = frozenset(_rules.get("param_words") or [])
+    _OPTIONAL_SET = frozenset(_rules.get("optional_words") or [])
     ctx = _rules.get("context_insignificant") or []
     rules = []
     for item in ctx:
@@ -190,7 +202,7 @@ _BRAND_RE = re.compile(
 )
 
 _DU_RE = re.compile(r"(?:ду|дн|dn|dp)\s?(\d{2,3})", re.IGNORECASE)
-_DIM_RE = re.compile(r"(\d{1,3})\s?(?:х|x)\s?(\d{1,4})", re.IGNORECASE)
+_DIM_RE = re.compile(r"(\d{1,3})\s?(?:х|x)\s?(\d{1,4})(?:\s?(?:х|x)\s?(\d{1,4}))?", re.IGNORECASE)
 _MM_RE = re.compile(r"(?:[øØ⌀∅]\s?(\d{2,4})|(\d{2,4})\s?мм\b)")
 _SLASH_DIM_RE = re.compile(
     r"(?<![\d\"/])(\d{1,3}(?:\s*/\s*\d{1,3}){1,2})(?:\s*-\s*\d+)?(?![\d\"/])"
@@ -213,7 +225,12 @@ def _size_key(text: str) -> set | None:
     for m in _MM_RE.finditer(low):
         sizes.add(f"мм{m.group(1) or m.group(2)}")
     for m in _DIM_RE.finditer(low):
-        sizes.add(f"{m.group(1)}x{m.group(2)}")
+        # «500x600», «10х500х600» (тип × высота × ширина — берём последнюю пару),
+        # «20/20/16» не захватывается (слеш — отдельный паттерн).
+        if m.group(3) is not None:
+            sizes.add(f"{m.group(2)}x{m.group(3)}")
+        else:
+            sizes.add(f"{m.group(1)}x{m.group(2)}")
     for m in _SLASH_DIM_RE.finditer(low):
         sizes.add(m.group(1).replace(" ", ""))
     for m in _FRAC_RE.finditer(low):
@@ -298,12 +315,37 @@ def is_standard_reference(text: str) -> bool:
     return bool(_STANDARD_REF_RE.match((text or "").strip().lower()))
 
 
+def _translit(s: str) -> str:
+    """Приближённая транслитерация кириллицы → латинице для сравнения брендов.
+
+    «лемакс» → «lemax», «ридан» → «ridan». Используется только для смягчения
+    бренд-сравнения, когда сайт пишет бренд латиницей, а спецификация —
+    кириллицей (или наоборот).
+    """
+    _MAP = {
+        "а": "a", "б": "b", "в": "v", "г": "g", "д": "d", "е": "e", "ё": "e",
+        "ж": "zh", "з": "z", "и": "i", "й": "y", "к": "k", "л": "l", "м": "m",
+        "н": "n", "о": "o", "п": "p", "р": "r", "с": "s", "т": "t", "у": "u",
+        "ф": "f", "х": "h", "ц": "ts", "ч": "ch", "ш": "sh", "щ": "sch",
+        "ъ": "", "ы": "y", "ь": "", "э": "e", "ю": "yu", "я": "ya",
+    }
+    return "".join(_MAP.get(ch, ch) for ch in s)
+
+
 def _prefix_match(tok: str, found_tokens: set) -> bool:
     for f in found_tokens:
         if tok == f:
             return True
         n = min(len(tok), len(f))
         if n >= 3 and (tok.startswith(f) or f.startswith(tok)):
+            return True
+        # Транслитерация: «лемакс»(кир) ≈ «lemax»(лат). Сравниваем обе стороны;
+        # «Лемакс»→«lemaks» vs «lemax» — общий префикс >= 4 (k/ks различие).
+        tt = _translit(tok)
+        tf = _translit(f)
+        if n >= 4 and tt != tf and (
+            tt.startswith(tf) or tf.startswith(tt) or tt[:4] == tf[:4]
+        ):
             return True
     return False
 
@@ -313,6 +355,9 @@ def _is_optional_token(w: str) -> bool:
 
     Параметры («ру16», «kvs», «нр5-35») и значения с цифрами («220в», «1,9»,
     «b69») указываются в спецификации, но часто отсутствуют в title карточки.
+    Описательные слова (серия/комплектация) здесь НЕ игнорируются — система
+    не решает за LLM; их отсутствие выносится в advisory-совет (см.
+    _mismatch_warning_content), где LLM сам перепроверяет карточку.
     """
     if w in _PARAM_SET:
         return True

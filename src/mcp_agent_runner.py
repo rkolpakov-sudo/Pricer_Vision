@@ -1,6 +1,7 @@
 import asyncio
 import logging
 import threading
+import time
 from datetime import datetime
 from PySide6.QtCore import QThread, Signal
 
@@ -38,6 +39,57 @@ def _build_metrics(total: int, processed: int, found: int, llm_times: list,
         "stuck_events": stuck_events,
         "blocks": blocks,
     }
+
+
+async def _run_row_with_idle_timeout(coro_factory, *, idle_timeout: float,
+                                     max_seconds: float, activity: dict):
+    """Запускает корутину строки с таймаутом ПО БЕЗДЕЙСТВИЮ.
+
+    activity — изменяемый dict с ключом 'last' (monotonic-метка последнего
+    признака жизни). Колбэки агента (status/monitor/site_visit) обновляют его.
+    Строка отменяется, только если activity['last'] не менялся дольше
+    idle_timeout — то есть агент завис, а не работает. Мягкий предел
+    max_seconds — страховка от вечного цикла.
+    """
+    task = asyncio.create_task(coro_factory())
+    start = time.monotonic()
+    try:
+        while True:
+            try:
+                done, _ = await asyncio.wait({task}, timeout=1.0)
+            except asyncio.CancelledError:
+                task.cancel()
+                raise
+            if done:
+                return task.result()
+            now = time.monotonic()
+            last_activity = activity.get("last", start)
+            if now - last_activity > idle_timeout:
+                logger.warning("Row idle for %.0fs (idle timeout %.0fs) — cancelling",
+                               now - last_activity, idle_timeout)
+                task.cancel()
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass
+                except Exception:
+                    pass
+                raise asyncio.TimeoutError(f"idle {now - last_activity:.0f}s")
+            if now - start > max_seconds:
+                logger.warning("Row hard cap %.0fs reached — cancelling", max_seconds)
+                task.cancel()
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass
+                except Exception:
+                    pass
+                raise asyncio.TimeoutError(f"max {now - start:.0f}s")
+    except asyncio.TimeoutError:
+        raise
+    except Exception:
+        task.cancel()
+        raise
 
 
 class MCPAgentRunner(QThread):
@@ -150,6 +202,12 @@ class MCPAgentRunner(QThread):
                 ordered = list(self.specs)
             original_index = {id(spec): i for i, spec in enumerate(self.specs)}
             last_health_check = datetime.now()
+            # Idle-таймаут строки: строка НЕ режется по «стенам», а отменяется только
+            # если агент реально завис (ни один LLM-вызов/браузерное действие не
+            # завершился за row_idle_timeout_seconds). Идёт продуктивная работа
+            # (пусть даже 30-50с на шаг) — строка доходит до логического конца.
+            row_idle_timeout = float(get_run_config("row_idle_timeout_seconds", 180))
+            row_max_seconds = float(get_run_config("row_max_seconds", 900))
             # Сессионный отрицательный кэш «не найденных» товаров (только в памяти)
             negative_cache = NegativeCache()
             # Сессионный блэклист сайтов: сайт, где несколько строк подряд не нашли
@@ -232,11 +290,19 @@ class MCPAgentRunner(QThread):
                     self.status_signal.emit(("progress", i + 1, total, f"Обработка: {preview}..."))
                     self.monitor_signal.emit({"type": "row", "idx": i + 1, "total": total, "preview": preview})
 
+                    # Признак жизни строки: сбрасывает idle-таймер (LLM/браузер/смена сайта)
+                    row_activity = {"last": time.monotonic()}
+
+                    def _touch():
+                        row_activity["last"] = time.monotonic()
+
                     def _status(msg):
+                        _touch()
                         self.status_signal.emit(("progress", i + 1, total, str(msg)[:120]))
                         self.monitor_signal.emit({"type": "action", "text": str(msg)[:240], "idx": i + 1, "total": total})
 
                     def _monitor(event_type, value):
+                        _touch()
                         if event_type == "llm_call":
                             self._llm_times.append(float(value))
                         elif event_type == "cache_hit":
@@ -247,14 +313,18 @@ class MCPAgentRunner(QThread):
                             self._blocks += 1
                         self.metrics_signal.emit(self._current_metrics())
 
+                    def _site_visited(site_id):
+                        _touch()
+                        _on_site_visited(site_id)
+
                     spec_meta = {"article": spec.article, "brand": spec.brand,
                                  "name_raw": spec.name_raw, "uom": spec.uom,
                                  "spec": getattr(spec, "spec", ""),
                                  "headers": spec.headers} if hasattr(spec, 'article') else None
 
                     try:
-                        result = await asyncio.wait_for(
-                            process_row(
+                        result = await _run_row_with_idle_timeout(
+                            lambda: process_row(
                                 spec_text=spec_text,
                                 llm_client=self.llm_client,
                                 mcp_bridge=bridge,
@@ -268,12 +338,14 @@ class MCPAgentRunner(QThread):
                                 monitor_callback=_monitor,
                                 negative_cache=negative_cache,
                                 site_blacklist=site_blacklist,
-                                site_visit_callback=_on_site_visited,
+                                site_visit_callback=_site_visited,
                             ),
-                            timeout=300.0,
+                            idle_timeout=row_idle_timeout,
+                            max_seconds=row_max_seconds,
+                            activity=row_activity,
                         )
                     except asyncio.TimeoutError:
-                        logger.warning(f"Row {i+1} timed out after 300s")
+                        logger.warning(f"Row {i+1} timed out (idle/max)")
                         # Таймаут — сильный сигнал, что сайт «не подходит» для этого
                         # типа/бренда: штрафуем его в сессионном блэклисте, чтобы
                         # следующая строка не тратила раунды повторно.

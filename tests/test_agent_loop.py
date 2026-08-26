@@ -40,6 +40,14 @@ class TestConstants:
         assert "не совпадает бренд" in SYSTEM_PROMPT
         assert "Бренд — НЕ жёсткий атрибут" in SYSTEM_PROMPT
 
+    def test_system_prompt_no_manual_url_encoding(self):
+        """Регрессия: агент перебирал кириллические %-коды (е/к/и вместо х) при
+        ручном конструировании URL поиска. Промпт запрещает это."""
+        assert "НЕ собирай URL поиска вручную" in SYSTEM_PROMPT
+        assert "percent-кодирование кириллицы" in SYSTEM_PROMPT
+        assert "location.href" in SYSTEM_PROMPT
+        assert "Не нажимай Enter на SPA-сайтах — используй прямые URL" not in SYSTEM_PROMPT
+
     def test_tool_defs_have_descriptions(self):
         for td in GRAPH_TOOL_DEFS:
             assert len(td["function"]["description"]) > 5
@@ -448,7 +456,7 @@ class TestMismatchWarningContent:
             "Компенсатор сильфонный осевой многослойный б/кожух",
         )
         assert "приварку" in msg
-        assert "Не ошибся ли ты" in msg
+        assert "СОВЕТ" in msg
         assert "confirm=true" in msg
         assert not msg.startswith("error:")
 
@@ -457,8 +465,20 @@ class TestMismatchWarningContent:
             "Компенсатор сильфонный под приварку Ду40",
             "Компенсатор сильфонный осевой многослойный с кожухом под приварку Ду 40",
         )
-        assert "КРИТИЧЕСКОЕ ЗАМЕЧАНИЕ" in msg
+        assert "СОВЕТ" in msg
         assert "h1" in msg
+
+    def test_descriptive_words_separated_from_key(self):
+        """Система-советник НЕ решает за LLM: описательные слова (серия/комплектация)
+        выделяются отдельно от ключевых, решение остаётся за LLM."""
+        msg = _mismatch_warning_content(
+            "Стальной панельный радиатор с боковым подключением LEMAX Premium Compact Hygiene, "
+            "тип C10, в компл. с краном для выпуска воздуха и креплениями LEMAX Premium C10 500x600",
+            "Стальной панельный радиатор Лемакс Premium C 10х500х600",
+        )
+        assert "КЛЮЧЕВЫЕ слова" in msg or "Описательные/комплектационные" in msg
+        assert "Перепроверь НА КАРТОЧКЕ" in msg
+        assert "confirm=true" in msg
 
     def test_graph_tool_save_confirmed_price_is_passthrough(self, graph_engine):
         """Решение по save_confirmed_price принимает инлайн-обработчик, graph-tool — пассивный статус."""
