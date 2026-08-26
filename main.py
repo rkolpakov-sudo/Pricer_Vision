@@ -569,13 +569,6 @@ class MainWindow(QMainWindow):
         self.backend_combo.currentIndexChanged.connect(self._on_backend_change)
         top_bar.addWidget(self.backend_combo)
 
-        self.fresh_cb = QCheckBox("Не учитывать кэш цен")
-        self.fresh_cb.setToolTip("Не использовать ранее сохранённые цены")
-        from src.config_loader import get_run_config
-        self.fresh_cb.setChecked(get_run_config("fresh", True))
-        self.fresh_cb.toggled.connect(self._on_fresh_toggle)
-        top_bar.addWidget(self.fresh_cb)
-
         top_bar.addStretch()
 
         self.settings_btn = QPushButton("Настройки")
@@ -597,6 +590,44 @@ class MainWindow(QMainWindow):
         top_bar.addWidget(self.theme_btn)
 
         main_layout.addWidget(btn_frame, 0)
+
+        # Панель «Режим поиска»: три независимых флажка памяти агента.
+        run_frame = QFrame()
+        run_frame.setFrameShape(QFrame.NoFrame)
+        run_layout = QVBoxLayout(run_frame)
+        run_layout.setContentsMargins(8, 2, 8, 2)
+        run_layout.setSpacing(2)
+        run_layout.setAlignment(Qt.AlignLeft)
+        run_title = QLabel("РЕЖИМ ПОИСКА")
+        run_title.setProperty("muted", True)
+        run_layout.addWidget(run_title)
+        run_checks = QHBoxLayout()
+        run_checks.setSpacing(14)
+        from src.config_loader import get_run_flags
+        _run_flags = get_run_flags()
+        self.reuse_price_cb = QCheckBox("Цены из памяти")
+        self.reuse_price_cb.setChecked(_run_flags["reuse_price"])
+        self.reuse_price_cb.setToolTip("Переиспользовать ранее подтверждённые цены (rule-8 и кэш). Снимите для чистого поиска")
+        self.reuse_price_cb.toggled.connect(self._on_run_mode_toggle)
+        run_checks.addWidget(self.reuse_price_cb)
+        self.use_approaches_cb = QCheckBox("Подходы")
+        self.use_approaches_cb.setChecked(_run_flags["use_approaches"])
+        self.use_approaches_cb.setToolTip("Использовать сохранённые шаги поиска по сайтам (граф-память)")
+        self.use_approaches_cb.toggled.connect(self._on_run_mode_toggle)
+        run_checks.addWidget(self.use_approaches_cb)
+        self.use_site_ranking_cb = QCheckBox("Рейтинг сайтов")
+        self.use_site_ranking_cb.setChecked(_run_flags["use_site_ranking"])
+        self.use_site_ranking_cb.setToolTip("Начинать поиск с сайтов, где этот тип товара находился быстрее всего")
+        self.use_site_ranking_cb.toggled.connect(self._on_run_mode_toggle)
+        run_checks.addWidget(self.use_site_ranking_cb)
+        run_checks.addSpacing(8)
+        run_hint = QLabel("ⓘ Чистый поиск: снять все три флажка")
+        run_hint.setProperty("muted", True)
+        run_checks.addWidget(run_hint)
+        run_checks.addStretch()
+        run_layout.addLayout(run_checks)
+        run_frame.setFixedHeight(52)
+        main_layout.addWidget(run_frame, 0)
 
         fb_frame = QFrame()
         fb_frame.setFrameShape(QFrame.NoFrame)
@@ -950,9 +981,17 @@ class MainWindow(QMainWindow):
         self._runner = MCPAgentRunner(
             specs=self.excel_writer.get_specs(),
             llm_client=llm_client,
-            fresh=self.fresh_cb.isChecked(),
+            fresh=not self.reuse_price_cb.isChecked(),
+            use_approaches=self.use_approaches_cb.isChecked(),
+            use_site_ranking=self.use_site_ranking_cb.isChecked(),
             skip_registry=self._skip_registry,
         )
+        mode_str = (
+            f"цены={'вкл' if self.reuse_price_cb.isChecked() else 'выкл'}, "
+            f"подходы={'вкл' if self.use_approaches_cb.isChecked() else 'выкл'}, "
+            f"рейтинг={'вкл' if self.use_site_ranking_cb.isChecked() else 'выкл'}"
+        )
+        self.add_log("INFO", "init", f"Режим поиска: {mode_str}")
         self.monitor_panel.reset()
         self.metrics_panel.reset()
         self._runner.status_signal.connect(self._on_runner_status)
@@ -1282,13 +1321,21 @@ class MainWindow(QMainWindow):
             self._runner.trigger_bridge_backend_restart(backend)
             self.add_log("INFO", "control", f"Bridge restarting with backend={backend}")
 
-    def _on_fresh_toggle(self, checked):
-        from src.config_loader import save_fresh
-        save_fresh(checked)
+    def _on_run_mode_toggle(self, checked=False):
+        from src.config_loader import save_run_flags
+        reuse_price = self.reuse_price_cb.isChecked()
+        use_approaches = self.use_approaches_cb.isChecked()
+        use_site_ranking = self.use_site_ranking_cb.isChecked()
+        save_run_flags(reuse_price=reuse_price, use_approaches=use_approaches,
+                       use_site_ranking=use_site_ranking)
         if self._processing_active and hasattr(self, '_runner') and self._runner:
-            self._runner.set_fresh(checked)
-            mode = "игнорировать кэш цен" if checked else "учитывать кэш цен"
-            self.add_log("INFO", "control", f"Режим: {mode} (со следующей позиции)")
+            self._runner.set_fresh(not reuse_price)
+            self._runner.set_use_approaches(use_approaches)
+            self._runner.set_use_site_ranking(use_site_ranking)
+            mode = (f"цены={'вкл' if reuse_price else 'выкл'}, "
+                    f"подходы={'вкл' if use_approaches else 'выкл'}, "
+                    f"рейтинг={'вкл' if use_site_ranking else 'выкл'}")
+            self.add_log("INFO", "control", f"Режим поиска: {mode} (со следующей позиции)")
 
 
 def main():

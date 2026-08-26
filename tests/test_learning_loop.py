@@ -61,26 +61,67 @@ class TestLearningLoop:
             _result(price=None, elapsed=20.0),
             _result(price=200.0, elapsed=30.0, site="keaz.ru"),
         ])
-        prof = learning.site_profiles["tinko.ru"]
-        assert prof["total_runs"] == 1
-        assert prof["success_rate"] == 0.5
-        assert prof["avg_attempts"] == 15.0
-        assert learning.site_profiles["keaz.ru"]["success_rate"] == 1.0
+        prof = learning.site_profiles["cables"]
+        assert prof["total_runs"] == 3
+        assert prof["success_rate"] == 2 / 3
+        assert prof["avg_attempts"] == 20.0
+        # Сайт профиля — где больше всего попыток по этому типу/бренду
+        assert prof["site"] == "tinko.ru"
 
     def test_site_profiles_persisted(self, learning, tmp_path):
         learning.consolidate_after_run([_result(price=100.0)])
         data = json.loads((tmp_path / "site_profiles.json").read_text(encoding="utf-8"))
-        assert data["tinko.ru"]["success_rate"] == 1.0
+        assert data["cables"]["success_rate"] == 1.0
 
     def test_profiles_loaded_from_disk(self, learning, tmp_path):
         learning.consolidate_after_run([_result(price=100.0)])
         reloaded = LearningLoop(learning.graph, learning.memory,
                                 site_profiles_path=str(tmp_path / "site_profiles.json"))
-        assert reloaded.site_profiles["tinko.ru"]["success_rate"] == 1.0
+        assert reloaded.site_profiles["cables"]["success_rate"] == 1.0
 
     def test_block_count_from_captcha(self, learning):
         learning.consolidate_after_run([_result(price=None, reason="captcha detected")])
-        assert learning.site_profiles["tinko.ru"]["block_count"] == 1
+        assert learning.site_profiles["cables"]["block_count"] == 1
+
+    def test_profile_key_brand_granularity(self, learning):
+        """Профиль гранулярен: 'тип|бренд' отделяется от 'тип' без бренда."""
+        assert LearningLoop._profile_key("cables", "ГК Энерго") == "cables|ГК Энерго"
+        assert LearningLoop._profile_key("cables", "  ") == "cables"
+        assert LearningLoop._profile_key("cables", "") == "cables"
+
+    def test_rank_sites_requires_min_samples(self, learning):
+        learning.consolidate_after_run([
+            _result(price=100.0, elapsed=10.0),
+            _result(price=200.0, elapsed=20.0),
+        ])
+        # total_runs=2 < MIN_SAMPLES=3 → рейтинг пуст (защита от холодного старта)
+        assert learning.rank_sites("cables", "", ["tinko.ru"]) == {}
+
+    def test_rank_sites_above_min_samples(self, learning):
+        learning.consolidate_after_run([
+            _result(price=100.0, elapsed=10.0),
+            _result(price=200.0, elapsed=20.0),
+            _result(price=300.0, elapsed=30.0),
+        ])
+        scores = learning.rank_sites("cables", "", ["tinko.ru"])
+        assert "tinko.ru" in scores
+        assert scores["tinko.ru"] > 0
+
+    def test_rank_sites_blocked_lower(self, learning):
+        learning.consolidate_after_run([
+            _result(price=100.0, elapsed=10.0),
+            _result(price=200.0, elapsed=20.0),
+            _result(price=None, reason="captcha detected", elapsed=30.0),
+        ])
+        clean = LearningLoop(learning.graph, learning.memory)
+        clean.consolidate_after_run([
+            _result(price=100.0, elapsed=10.0),
+            _result(price=200.0, elapsed=20.0),
+            _result(price=300.0, elapsed=30.0),
+        ])
+        blocked = learning.rank_sites("cables", "", ["tinko.ru"])["tinko.ru"]
+        ok = clean.rank_sites("cables", "", ["tinko.ru"])["tinko.ru"]
+        assert blocked < ok
 
     def test_run_statistics(self, learning):
         learning.consolidate_after_run([_result(price=100.0), _result(price=None)])

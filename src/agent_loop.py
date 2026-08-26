@@ -368,6 +368,9 @@ async def process_row(
     stop_event: threading.Event | None = None,
     status_callback: Callable[[str], None] | None = None,
     fresh: bool = True,
+    use_approaches: bool = True,
+    use_site_ranking: bool = True,
+    site_ranking: dict | None = None,
     spec_meta: dict | None = None,
     semantic_cache=None,
     monitor_callback: Callable[[str, object], None] | None = None,
@@ -397,7 +400,9 @@ async def process_row(
     if search_text != spec_text:
         logger.info("Search text normalized: '%s' -> '%s' (незначимые фразы убраны из поиска)",
                     spec_text[:60], search_text[:60])
-    approaches = memory_manager.get_all_approaches(product_type) if product_type != UNKNOWN_PT else memory_manager.get_all_approaches_flat()
+    approaches = [] if not use_approaches else (
+        memory_manager.get_all_approaches(product_type) if product_type != UNKNOWN_PT else memory_manager.get_all_approaches_flat()
+    )
     # Строгие кандидаты на РЕЮЗ (rule 8): тот же типоразмер обязателен.
     confirmed_prices = [] if fresh else memory_manager.get_relevant_prices(spec_text, strict_sizes=True)
 
@@ -467,7 +472,8 @@ async def process_row(
         hints += memory_manager.get_hints(UNKNOWN_PT)
     product_data = graph_engine._all_products.get(product_type)
 
-    all_flat = memory_manager.get_all_approaches_flat()
+    # Подходы-подсказки «как работать на сайтах» — скрыты при use_approaches=False.
+    all_flat = [] if not use_approaches else memory_manager.get_all_approaches_flat()
     site_guides = {}
     for a in all_flat:
         sid = a.get("site_id", "")
@@ -486,7 +492,8 @@ async def process_row(
         except Exception:
             pass
 
-    context = _build_context(search_text, product_type, approaches, guide_prices, sites, hints, product_data, site_guides, concepts, spec_meta)
+    context = _build_context(search_text, product_type, approaches, guide_prices, sites, hints, product_data, site_guides, concepts, spec_meta,
+                             use_site_ranking=use_site_ranking, site_ranking=site_ranking)
 
     mcp_tools = await mcp_bridge.list_tools()
     # Close previous page to avoid tab accumulation
@@ -1029,7 +1036,8 @@ def _is_standard_reference(spec: str) -> bool:
     return is_standard_reference(spec)
 
 
-def _build_context(spec_text, product_type, approaches, confirmed_prices, sites, hints, product_data=None, site_guides=None, concepts=None, spec_meta=None):
+def _build_context(spec_text, product_type, approaches, confirmed_prices, sites, hints, product_data=None, site_guides=None, concepts=None, spec_meta=None,
+                   use_site_ranking: bool = True, site_ranking: dict | None = None):
     # фильтр релевантности: подходы, обученные на ДРУГИХ товарах того же типа
     # (например регуляторы скорости для воздуховодов), не показываются
     extra = (spec_meta or {}).get("article", "")
@@ -1075,6 +1083,19 @@ def _build_context(spec_text, product_type, approaches, confirmed_prices, sites,
             # самый сильный сигнал «сюда идти» (обучение на соседних позициях).
             if sid in price_sites:
                 return 0
+            if not use_site_ranking:
+                # Чистый поиск без памяти: порядок по белому списку (priority),
+                # успешность подходов НЕ влияет.
+                if priority == 0:
+                    return 3
+                if priority == 1:
+                    return 4
+                if sid in failed_sites:
+                    return 6
+                return 5
+            # Рейтинг по профилю (тип, бренд) → сайт: выше подходов, но ниже цен.
+            if site_ranking and sid in site_ranking:
+                return 0.5 + min(max(site_ranking[sid], -0.5), 0.5) * 0.4
             if sid in success_sites:
                 return 1
             if sid in approach_sites:

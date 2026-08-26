@@ -101,12 +101,14 @@ class MCPAgentRunner(QThread):
     metrics_signal = Signal(object)
 
     def __init__(self, specs: list, llm_client, db_path: str = DB_PATH, parent=None, fresh: bool = True,
-                 skip_registry=None):
+                 skip_registry=None, use_approaches: bool = True, use_site_ranking: bool = True):
         super().__init__(parent)
         self.specs = specs
         self.llm_client = llm_client
         self.db_path = db_path
         self._fresh = fresh
+        self._use_approaches = use_approaches
+        self._use_site_ranking = use_site_ranking
         self._skip_registry = skip_registry
         self._stop_event = threading.Event()
         self._restart_bridge = threading.Event()
@@ -193,6 +195,14 @@ class MCPAgentRunner(QThread):
             results = []
             total = len(self.specs)
             scheduler = TaskScheduler(mm, site_profiles=learning_loop.site_profiles)
+            # Рейтинг сайтов по профилю (тип, бренд) — вычисляется per-row по бренду товара.
+            def _site_ranking_for(spec_item) -> dict:
+                if not self._use_site_ranking:
+                    return {}
+                pt = engine.classify_product_type(spec_item.text)
+                brand = getattr(spec_item, "brand", "") or ""
+                site_ids = [s.get("id") for s in mm.get_sites(pt)]
+                return learning_loop.rank_sites(pt, brand, site_ids)
             from src.config_loader import get_run_config
             # Построчная обработка по умолчанию (порядок файла). Группировка
             # по сайтам — опция group_by_site (переупорядочивает строки).
@@ -333,6 +343,9 @@ class MCPAgentRunner(QThread):
                                 stop_event=self._stop_event,
                                 status_callback=_status,
                                 fresh=self._fresh,
+                                use_approaches=self._use_approaches,
+                                use_site_ranking=self._use_site_ranking,
+                                site_ranking=_site_ranking_for(spec),
                                 spec_meta=spec_meta,
                                 semantic_cache=semantic_cache,
                                 monitor_callback=_monitor,
@@ -387,6 +400,8 @@ class MCPAgentRunner(QThread):
                 audit.log_extraction(spec_text, result.get("price") is not None, result.get("price"))
                 row_idx = original_index.get(id(spec), i)
                 result["excel_row"] = getattr(spec, "row", 0) or (row_idx + 2)
+                if hasattr(spec, "brand"):
+                    result["brand"] = spec.brand or ""
                 self._processed += 1
                 if result.get("price") is not None:
                     self._found += 1
@@ -434,6 +449,16 @@ class MCPAgentRunner(QThread):
         """Update fresh flag live; applies from the next row."""
         self._fresh = fresh
         logger.info("Fresh flag updated to %s", fresh)
+
+    def set_use_approaches(self, value: bool):
+        """Update use_approaches live; applies from the next row."""
+        self._use_approaches = value
+        logger.info("Use approaches updated to %s", value)
+
+    def set_use_site_ranking(self, value: bool):
+        """Update use_site_ranking live; applies from the next row."""
+        self._use_site_ranking = value
+        logger.info("Use site ranking updated to %s", value)
 
     def stop(self):
         self._stop_event.set()

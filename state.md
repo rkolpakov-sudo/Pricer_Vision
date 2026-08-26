@@ -1,5 +1,38 @@
 # State Log
 
+## 2026-08-26 — РЕАЛИЗОВАНА интеграция «Режим поиска» (3 флага) + рейтинг сайтов (ветка feat/search-mode)
+
+### Что сделано (по docs/PLAN_SEARCH_MODE.md)
+1. **UI-панель «Режим поиска»** (main.py, строка между тулбаром и спиннером):
+   - ☑ Цены из памяти (`run.reuse_price`, инверсия legacy `fresh`)
+   - ☑ Подходы (`run.use_approaches`)
+   - ☑ Рейтинг сайтов (`run.use_site_ranking`)
+   - Подсказка «ⓘ Чистый поиск: снять все три флажка»; изменение на лету (со след. позиции).
+2. **config_loader**: `get_run_flags()` (legacy-fallback: `reuse_price` отсутствует →
+   `not fresh`; ничего нет → True), `save_run_flags()` (None = ключ не трогаем),
+   `save_fresh` → legacy (пишет инверсию в `reuse_price`).
+3. **agent_loop.process_row**: `use_approaches=False` → `approaches=[]` и `site_guides=[]`
+   (подходы скрыты); `_build_context(use_site_ranking, site_ranking)` — при False порядок
+   по белому списку, при True сайт из профиля рейтинга идёт выше успешных подходов.
+4. **mcp_agent_runner**: конструктор `use_approaches/use_site_ranking`, live-`set_*`,
+   `_site_ranking_for(spec)` (вычисляет рейтинг `(тип, бренд)` per-row), `result["brand"]`.
+5. **learning_loop**: профиль гранулярный `(тип|бренд)` → сайт, учёт НЕУДАЧ (price=None),
+   `site` = сайт с большинством попыток, `MIN_SAMPLES=3`, `rank_sites()` скор
+   `sr*0.5 − avg/300*0.3 − blocks*0.2`.
+6. **settings.yaml run.**: добавлены `reuse_price/use_approaches/use_site_ranking`.
+
+### Тесты
+**875 passed, 2 skipped** (+15): config_loader (save_run_flags round-trip, partial,
+legacy fresh fallback), learning_loop (агрегация по типу+бренд, site по большинству,
+MIN_SAMPLES, rank_sites), agent_loop (_build_context рейтинг вкл/выкл, профиль),
+integration (use_approaches False/True), test_main.py (панель инициализация из конфига,
+дефолты, toggle→reuse_price).
+
+### Ручной смоук / A/B — НЕ выполнены (критерии плана 2-4)
+- Запуск приложения — панель на месте, три флажка из конфига.
+- A/B на vtk_spec_v2: все вкл / все выкл / только рейтинг.
+- Live-переключение во время прогона.
+
 ## 2026-08-26 — Система-советник: матчер строгий, отсутствующие слова — СОВЕТ LLM, не молчание
 
 ### Указание пользователя

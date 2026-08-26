@@ -117,29 +117,69 @@ class LearningLoop:
                 logger.warning("Hint generation failed: %s", e)
         return new_hints
 
+    MIN_SAMPLES = 3
+
+    @staticmethod
+    def _profile_key(product_type: str, brand: str) -> str:
+        """Ключ профиля: 'тип|бренд' (бренд может быть пустым)."""
+        brand = (brand or "").strip()
+        return f"{product_type}|{brand}" if brand else product_type
+
     def _update_site_profiles(self, results: list):
-        """Обновляет профили сайтов на основе фактических результатов прогона."""
+        """Обновляет профили сайтов по гранулярности (тип, бренд) → сайт.
+
+        Учитываются и УСПЕХИ (цена найдена), и НЕУДАЧИ (цена не найдена) —
+        профиль накапливает total_runs, success, total_attempts, blocks.
+        Порог достоверности MIN_SAMPLES применяется при ранжировании.
+        """
+        from src.approach_relevance import _brand_of
         stats = {}
         for result in results:
             site_id = result.get("site") or result.get("site_id")
             if not site_id:
                 continue
-            s = stats.setdefault(site_id, {"total": 0, "success": 0, "total_attempts": 0, "blocks": 0})
+            product_type = result.get("product_type") or "unknown"
+            brand = result.get("brand") or _brand_of(result.get("spec_text") or "") or ""
+            key = self._profile_key(product_type, brand)
+            s = stats.setdefault(key, {"total": 0, "success": 0, "total_attempts": 0, "blocks": 0,
+                                       "sites": {}})
             s["total"] += 1
             s["total_attempts"] += result.get("elapsed") or 0
+            s["sites"][site_id] = s["sites"].get(site_id, 0) + 1
             if result.get("price") is not None:
                 s["success"] += 1
             if "captcha" in str(result.get("reason", "")).lower():
                 s["blocks"] += 1
 
-        for site_id, st in stats.items():
-            profile = dict(self.site_profiles.get(site_id, {}))
+        for key, st in stats.items():
+            profile = dict(self.site_profiles.get(key, {}))
+            # Сайт профиля — тот, где было больше всего попыток по этому типу/бренду.
+            profile["site"] = max(st["sites"], key=st["sites"].get) if st["sites"] else ""
             profile["success_rate"] = st["success"] / max(st["total"], 1)
             profile["avg_attempts"] = st["total_attempts"] / max(st["total"], 1)
             profile["block_count"] = st["blocks"]
-            profile["total_runs"] = profile.get("total_runs", 0) + 1
+            profile["total_runs"] = profile.get("total_runs", 0) + st["total"]
             profile["last_updated"] = datetime.now().isoformat()
-            self.site_profiles[site_id] = profile
+            self.site_profiles[key] = profile
+
+    def rank_sites(self, product_type: str, brand: str, site_ids: list[str]) -> dict[str, float]:
+        """Скоринг сайтов по профилю (тип, бренд). Только профили с total_runs >= MIN_SAMPLES.
+
+        score = success_rate*0.5 − avg_attempts/300*0.3 − block_count*0.2.
+        Возвращает {site_id: score}. Сайты без достоверного профиля не входят.
+        """
+        key = self._profile_key(product_type, brand)
+        profile = self.site_profiles.get(key, {})
+        scores: dict[str, float] = {}
+        if profile.get("total_runs", 0) >= self.MIN_SAMPLES:
+            sr = profile.get("success_rate", 0.0)
+            avg = profile.get("avg_attempts", 0.0)
+            blocks = profile.get("block_count", 0)
+            score = sr * 0.5 - (avg / 300.0) * 0.3 - blocks * 0.2
+            sid = profile.get("site", "")
+            if sid in site_ids:
+                scores[sid] = score
+        return scores
 
     def _save_run_statistics(self, results: list):
         total = len(results)

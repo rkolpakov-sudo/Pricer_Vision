@@ -142,6 +142,31 @@ class TestBuildContext:
         ctx = _build_context("test", "unknown", [], [], [], [])
         assert "Yandex" in ctx or "известных сайтов нет" in ctx
 
+    def test_use_site_ranking_false_ignores_success_approaches(self):
+        """Рейтинг выкл: сайт с успешными подходами НЕ получает приоритет над белым списком."""
+        sites = [{"id": "prio1.ru", "priority": 0}, {"id": "succ.ru", "priority": 2}]
+        approaches = [{"site_id": "succ.ru", "success_count": 5}]
+        ctx = _build_context("test", "cables", approaches, [], sites, [],
+                             use_site_ranking=False)
+        # succ.ru не поднимается выше prio1.ru: первым назван prio1.ru
+        assert ctx.find("prio1.ru") < ctx.find("succ.ru")
+
+    def test_use_site_ranking_true_keeps_success_priority(self):
+        sites = [{"id": "prio1.ru", "priority": 0}, {"id": "succ.ru", "priority": 2}]
+        approaches = [{"site_id": "succ.ru", "success_count": 5}]
+        ctx = _build_context("test", "cables", approaches, [], sites, [],
+                             use_site_ranking=True)
+        assert ctx.find("succ.ru") < ctx.find("prio1.ru")
+
+    def test_site_ranking_profile_beats_plain_priority(self):
+        """Сайт из рейтинг-профиля идёт выше успешных подходов (но ниже цен)."""
+        sites = [{"id": "succ.ru", "priority": 2}, {"id": "rank.ru", "priority": 2}]
+        approaches = [{"site_id": "succ.ru", "success_count": 5}]
+        ranking = {"rank.ru": 0.5}
+        ctx = _build_context("test", "cables", approaches, [], sites, [],
+                             use_site_ranking=True, site_ranking=ranking)
+        assert ctx.find("rank.ru") < ctx.find("succ.ru")
+
 
 class TestErrorResult:
     def test_returns_error_dict(self):

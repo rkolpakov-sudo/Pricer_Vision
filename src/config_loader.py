@@ -25,6 +25,52 @@ def get_run_config(key: str, default):
     cfg = load_settings()
     return cfg.get("run", {}).get(key, default)
 
+
+def get_run_flags() -> dict:
+    """Режим поиска (память агента): reuse_price / use_approaches / use_site_ranking.
+
+    reuse_price — legacy-совместимость: если ключ `run.reuse_price` отсутствует,
+    используется инверсия старого `run.fresh` (fresh=True = НЕ переиспользовать).
+    """
+    cfg = load_settings()
+    run = cfg.get("run", {}) or {}
+    if "reuse_price" in run:
+        reuse_price = bool(run["reuse_price"])
+    elif "fresh" in run:
+        # Legacy: fresh ЯВНО задан → инверсия.
+        reuse_price = not bool(run["fresh"])
+    else:
+        # Ничего не задано — дефолт: переиспользовать цены.
+        reuse_price = True
+    return {
+        "reuse_price": reuse_price,
+        "use_approaches": bool(run.get("use_approaches", True)),
+        "use_site_ranking": bool(run.get("use_site_ranking", True)),
+    }
+
+
+def _write_run(cfg: dict):
+    path = Path(os.path.dirname(os.path.abspath(__file__))).parent / "config" / "settings.yaml"
+    with open(path, "w", encoding="utf-8") as f:
+        yaml.dump(cfg, f, default_flow_style=False, allow_unicode=True)
+    global _SETTINGS_CACHE
+    _SETTINGS_CACHE = cfg
+
+
+def save_run_flags(reuse_price: bool | None = None,
+                   use_approaches: bool | None = None,
+                   use_site_ranking: bool | None = None):
+    """Сохраняет флажки режима поиска. None = ключ не трогаем."""
+    cfg = load_settings()
+    run = cfg.setdefault("run", {})
+    if reuse_price is not None:
+        run["reuse_price"] = bool(reuse_price)
+    if use_approaches is not None:
+        run["use_approaches"] = bool(use_approaches)
+    if use_site_ranking is not None:
+        run["use_site_ranking"] = bool(use_site_ranking)
+    _write_run(cfg)
+
 def get_price_config(key: str, default):
     cfg = load_settings()
     return cfg.get("price", {}).get(key, default)
@@ -106,13 +152,8 @@ def save_browser_backend(backend: str):
     _SETTINGS_CACHE = cfg
 
 def save_fresh(fresh: bool):
-    cfg = load_settings()
-    cfg.setdefault("run", {})["fresh"] = fresh
-    path = Path(os.path.dirname(os.path.abspath(__file__))).parent / "config" / "settings.yaml"
-    with open(path, "w", encoding="utf-8") as f:
-        yaml.dump(cfg, f, default_flow_style=False, allow_unicode=True)
-    global _SETTINGS_CACHE
-    _SETTINGS_CACHE = cfg
+    """Legacy: инверсия флажка «Цены из памяти». Пишет в run.reuse_price."""
+    save_run_flags(reuse_price=not fresh)
 
 def save_theme(theme: str):
     cfg = load_settings()

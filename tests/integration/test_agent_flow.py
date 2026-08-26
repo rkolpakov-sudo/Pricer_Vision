@@ -66,12 +66,16 @@ class FakeMemoryManager:
         self.saved_prices = []
         self.saved_approaches = []
         self.prices = []
+        self.approaches = []
+        self.get_all_approaches_calls = 0
 
     def get_all_approaches(self, pt):
-        return []
+        self.get_all_approaches_calls += 1
+        return self.approaches
 
     def get_all_approaches_flat(self):
-        return []
+        self.get_all_approaches_calls += 1
+        return self.approaches
 
     def get_relevant_prices(self, spec, strict_sizes=True, ignore_sizes=False):
         return self.prices
@@ -197,6 +201,36 @@ class TestAgentFlow:
         assert not result.get("error")
         assert ("llm_call", events[0][1]) == ("llm_call", events[0][1])  # llm_call был репортнут
         assert any(t == "llm_call" for t, _ in events)
+
+    async def test_use_approaches_false_skips_graph_fetch(self):
+        """use_approaches=False: подходы не запрашиваются у графа."""
+        llm, bridge, engine, mm, cache = make_env(responses=[llm_final(100.0)])
+        await process_row(
+            spec_text="Кабель ВВГ 3x2.5",
+            llm_client=llm,
+            mcp_bridge=bridge,
+            graph_engine=engine,
+            memory_manager=mm,
+            fresh=True,
+            use_approaches=False,
+            semantic_cache=cache,
+        )
+        assert mm.get_all_approaches_calls == 0
+
+    async def test_use_approaches_true_fetches_graph(self):
+        llm, bridge, engine, mm, cache = make_env(responses=[llm_final(100.0)])
+        mm.approaches = [{"site_id": "site.ru", "success_count": 1}]
+        await process_row(
+            spec_text="Кабель ВВГ 3x2.5",
+            llm_client=llm,
+            mcp_bridge=bridge,
+            graph_engine=engine,
+            memory_manager=mm,
+            fresh=True,
+            use_approaches=True,
+            semantic_cache=cache,
+        )
+        assert mm.get_all_approaches_calls >= 1
 
     async def test_tool_call_then_final(self):
         """LLM вызывает browser_navigate, затем возвращает финальную цену."""

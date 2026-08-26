@@ -86,12 +86,47 @@ class TestSave:
         assert cl.load_settings()["browser"]["backend"] == "nodriver"
 
     def test_save_fresh(self, tmp_path, monkeypatch):
+        """Legacy save_fresh пишет инверсию в run.reuse_price."""
         target = tmp_path / "config" / "settings.yaml"
         target.parent.mkdir(parents=True)
         _redirect_config(tmp_path, monkeypatch, {"run": {"fresh": False}})
         cl.save_fresh(True)
         written = yaml.safe_load(target.read_text(encoding="utf-8"))
-        assert written["run"]["fresh"] is True
+        assert written["run"]["reuse_price"] is False
+
+    def test_save_run_flags_roundtrip(self, tmp_path, monkeypatch):
+        target = tmp_path / "config" / "settings.yaml"
+        target.parent.mkdir(parents=True)
+        _redirect_config(tmp_path, monkeypatch, {"run": {}})
+        cl.save_run_flags(reuse_price=False, use_approaches=False, use_site_ranking=True)
+        written = yaml.safe_load(target.read_text(encoding="utf-8"))
+        assert written["run"]["reuse_price"] is False
+        assert written["run"]["use_approaches"] is False
+        assert written["run"]["use_site_ranking"] is True
+
+    def test_save_run_flags_partial_preserves_others(self, tmp_path, monkeypatch):
+        target = tmp_path / "config" / "settings.yaml"
+        target.parent.mkdir(parents=True)
+        _redirect_config(tmp_path, monkeypatch, {"run": {"use_approaches": True, "reuse_price": True}})
+        cl.save_run_flags(use_approaches=False)
+        written = yaml.safe_load(target.read_text(encoding="utf-8"))
+        assert written["run"]["use_approaches"] is False
+        assert written["run"]["reuse_price"] is True
+
+    def test_get_run_flags_defaults_and_legacy_fresh(self, tmp_path, monkeypatch):
+        # Нет ключей — дефолты: всё включено.
+        _redirect_config(tmp_path, monkeypatch, {"run": {}})
+        assert cl.get_run_flags() == {"reuse_price": True, "use_approaches": True, "use_site_ranking": True}
+
+        # Legacy: есть только fresh (без reuse_price) → reuse_price = not fresh.
+        _redirect_config(tmp_path, monkeypatch, {"run": {"fresh": True}})
+        assert cl.get_run_flags()["reuse_price"] is False
+        _redirect_config(tmp_path, monkeypatch, {"run": {"fresh": False}})
+        assert cl.get_run_flags()["reuse_price"] is True
+
+        # Новый ключ reuse_price приоритетнее legacy fresh.
+        _redirect_config(tmp_path, monkeypatch, {"run": {"fresh": True, "reuse_price": True}})
+        assert cl.get_run_flags()["reuse_price"] is True
 
     def test_save_theme(self, tmp_path, monkeypatch):
         target = tmp_path / "config" / "settings.yaml"
