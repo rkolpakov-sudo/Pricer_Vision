@@ -1,5 +1,39 @@
 # State Log
 
+## 2026-08-26 — БАГ: модель в settings.yaml подменялась на устаревшую (very-high вместо выбранной very-low)
+
+### Симптом
+«Агент открывает сайт и не производит никаких действий»: локальная модель very-high
+(65–93 с на вызов) не укладывалась в 300-с таймаут строки. Пользователь УВЕРЕН, что в
+настройках выбрал very-low (которая отвечает за 4.8 с), но прогон использовал very-high.
+
+### Диагноз (воспроизведено кодом)
+Хардкода модели в коде НЕТ (grep пуст). Причина — баг сохранения в
+`SettingsDialog.save_and_accept` (main.py): 
+```python
+model_id = (self.model_combo.currentData() or self.model_combo.currentText() or "").strip()
+```
+Комбобокс **editable**. `currentData()` возвращает данные ТЕКУЩЕГО ИНДЕКСА, а не
+введённого текста. При ручном вводе модели (или асинхронном populate) currentIndex
+не меняется → currentData() отдаёт СТАРУЮ модель (very-high), и `or currentText()`
+не срабатывает. В settings.yaml записывался НЕ выбор пользователя, а устаревший индекс.
+Воспроизведение: `setCurrentText(very-high)` → fetch populate (index=1) →
+`lineEdit().setText(very-low)` → `currentData()==very-high`, сохранялось very-high.
+Время модификации settings.yaml (14:58:58) совпадает с сессией настроек перед прогоном 15:18.
+
+### Исправление
+1. `save_and_accept` берёт id из ОТОБРАЖАЕМОГО текста (`_current_model_id` →
+   `llm_providers.model_id_from_combo_text`): `'id · имя'` → id, введённый текст — как есть.
+   `currentData()` только как запасной вариант при пустом тексте.
+2. Стартовый лог LLM теперь включает имя модели
+   (`llm_providers.create_llm_client`: «provider=… model=…»), чтобы расхождение
+   конфиг↔ожидание было видно сразу.
+3. Тесты: `test_llm_providers.py::TestModelIdFromComboText` — label→id, ручной ввод
+   при устаревшем currentData() → сохраняется введённая модель, пустой текст.
+
+### Тесты
+**849 passed, 2 skipped** (+4).
+
 ## 2026-08-26 — ИСПРАВЛЕН «перенос обучения между позициями» (ветка fix/session-site-learn)
 
 ### Жалоба пользователя

@@ -406,9 +406,24 @@ class SettingsDialog(QDialog):
         self.status_label.setText(text)
         self.status_label.setStyleSheet(f"color:{color};")
 
+    def _current_model_id(self) -> str:
+        """id модели из editable-комбобокса.
+
+        ВАЖНО: currentData() в editable-комбобоксе хранит данные ТЕКУЩЕГО
+        ИНДЕКСА, а не введённого текста. Если пользователь ввёл модель вручную
+        (или пришёл асинхронный populate), currentData() может отдавать СТАРУЮ
+        модель — тогда в settings.yaml сохранялся бы не выбор пользователя,
+        а устаревший индекс (very-high вместо very-low). Надёжный источник —
+        отображаемый текст: либо 'id · имя' (выбран пункт), либо введённый id.
+        """
+        return llm_providers.model_id_from_combo_text(self.model_combo.currentText())
+
     def save_and_accept(self):
         prov = self._current_provider()
-        model_id = (self.model_combo.currentData() or self.model_combo.currentText() or "").strip()
+        model_id = self._current_model_id()
+        if not model_id:
+            # Запасной вариант, если текст пуст (например, чистый data).
+            model_id = (self.model_combo.currentData() or "").strip()
         if not model_id:
             self._set_status("Укажите модель", danger=True)
             return

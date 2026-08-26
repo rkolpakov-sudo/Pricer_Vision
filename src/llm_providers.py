@@ -111,6 +111,26 @@ def get_provider(provider_id: str) -> Provider:
 # ── Пути к системным конфигам ────────────────────────────────────────────
 
 
+MODEL_LABEL_SEP = "   ·   "
+
+
+def model_id_from_combo_text(text: str) -> str:
+    """id модели из текста editable-комбобокса.
+
+    Пункты списка моделей имеют label 'id · имя' (_populate_models). При
+    выборе пункта Qt отдаёт в currentText() весь label; при ручном вводе —
+    введённый текст. Идентификатор модели = часть ДО разделителя (или весь
+    текст, если разделителя нет). Берётся именно отображаемый текст, а не
+    currentData(): в editable-комбобоксе currentData() хранит данные ТЕКУЩЕГО
+    ИНДЕКСА и при ручном вводе может указывать на СТАРУЮ модель (регрессия:
+    в settings.yaml сохранялся very-high вместо выбранного very-low).
+    """
+    raw = (text or "").strip()
+    if MODEL_LABEL_SEP in raw:
+        return raw.split(MODEL_LABEL_SEP)[0].strip()
+    return raw
+
+
 def opencode_auth_candidates() -> list[Path]:
     home = Path.home()
     roots = []
@@ -423,7 +443,8 @@ def create_llm_client(config: dict, temperature: float | None = None):
     if not prov.requires_key:
         client.set_fallbacks(FALLBACK_URLS)
     logger.info(
-        "LLM provider=%s base=%s key_source=%s fingerprint=%s",
-        prov.id, base_url, source or "нет", key_fingerprint(api_key),
+        "LLM provider=%s base=%s model=%s key_source=%s fingerprint=%s",
+        prov.id, base_url, lm.get("model", "") or "(авто-детект)", source or "нет",
+        key_fingerprint(api_key),
     )
     return client

@@ -246,3 +246,44 @@ class TestCreateLLMClient:
         assert client.headers.get("HTTP-Referer") == "https://opencode.ai"
         assert client.headers.get("X-Title") == "Pricer Vision"
         assert client.headers.get("User-Agent") == lp.USER_AGENT
+
+
+class TestModelIdFromComboText:
+    """Регрессия: в editable-комбобоксе currentData() хранит данные ТЕКУЩЕГО
+    ИНДЕКСА, а не введённого текста. При ручном вводе модели (или асинхронном
+    populate) currentData() может отдавать СТАРУЮ модель — и в settings.yaml
+    сохранялся бы very-high вместо выбранного very-low. Идентификатор берём
+    из отображаемого текста: 'id · имя' → id.
+    """
+
+    VERY_LOW = "esatapedico/qwen3.8-27b-nvfp4-mtp-gguf/qwen3.8-27b-nvfp4-mtp-very-low.gguf"
+    VERY_HIGH = "esatapedico/qwen3.8-27b-nvfp4-mtp-gguf/qwen3.8-27b-nvfp4-mtp-very-high.gguf"
+
+    def test_label_with_name_returns_id(self):
+        assert lp.model_id_from_combo_text(
+            f"{self.VERY_LOW}{lp.MODEL_LABEL_SEP}Very Low"
+        ) == self.VERY_LOW
+
+    def test_plain_id_unchanged(self):
+        assert lp.model_id_from_combo_text(self.VERY_LOW) == self.VERY_LOW
+
+    def test_handles_stale_index_data_not_text(self):
+        """Симуляция бага: currentData() = very-high (старый индекс),
+        но отображаемый текст = very-low → сохраняется very-low."""
+        from PySide6.QtWidgets import QApplication, QComboBox
+        app = QApplication.instance() or QApplication([])
+        cb = QComboBox()
+        cb.setEditable(True)
+        cb.setInsertPolicy(QComboBox.NoInsert)
+        cb.addItem(self.VERY_HIGH, self.VERY_HIGH)
+        cb.addItem(self.VERY_LOW, self.VERY_LOW)
+        cb.setCurrentIndex(0)  # выбран very-high
+        cb.lineEdit().setText(self.VERY_LOW)  # пользователь ввёл very-low
+        # currentData() всё ещё указывает на старый индекс (very-high) —
+        # именно поэтому брать его нельзя.
+        assert cb.currentData() == self.VERY_HIGH
+        assert lp.model_id_from_combo_text(cb.currentText()) == self.VERY_LOW
+
+    def test_blank_returns_blank(self):
+        assert lp.model_id_from_combo_text("") == ""
+        assert lp.model_id_from_combo_text("   ") == ""
