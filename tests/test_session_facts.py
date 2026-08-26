@@ -81,6 +81,16 @@ class TestRowFacts:
         f.record_query("x.ru", "   ")
         assert f.to_prompt_block() == ""
 
+    def test_progress_in_block(self):
+        f = RowFacts()
+        f.set_progress(5, 40)
+        block = f.to_prompt_block()
+        assert "Раундов: 5 из 40" in block
+
+    def test_progress_without_set_no_line(self):
+        f = RowFacts()
+        assert "Раундов:" not in f.to_prompt_block()
+
 class TestSessionFacts:
     PT = 'plumbing_heating_radiators'
     BRAND = 'Лемакс'

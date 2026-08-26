@@ -33,6 +33,8 @@ class RowFacts:
         self._price_candidate_seen = False
         self._card_open = False
         self._recent_errors: list[str] = []
+        self._rounds_used: int | None = None
+        self._rounds_total: int | None = None
 
     # --- запись фактов (детерминированно) ---
 
@@ -81,6 +83,11 @@ class RowFacts:
             self._recent_errors.append(m[:120])
             self._recent_errors = self._recent_errors[-MAX_ERRORS:]
 
+    def set_progress(self, rounds_used: int, rounds_total: int) -> None:
+        """Бюджет раундов строки — LLM сам решает, когда сохранить кандидата раньше."""
+        self._rounds_used = rounds_used
+        self._rounds_total = rounds_total
+
     @property
     def price_candidate_seen(self) -> bool:
         return self._price_candidate_seen
@@ -89,6 +96,8 @@ class RowFacts:
 
     def to_prompt_block(self) -> str:
         parts = []
+        if self._rounds_total is not None and self._rounds_used is not None:
+            parts.append(f"  Раундов: {self._rounds_used} из {self._rounds_total} (если цена найдена — сохраняй сразу, не жди конца)")
         for domain, site in list(self._sites.items())[:MAX_SITES_IN_BLOCK]:
             line = f"  {domain}: {site['status']}"
             if site["queries"]:

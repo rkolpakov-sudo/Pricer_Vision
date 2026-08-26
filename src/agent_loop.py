@@ -534,6 +534,8 @@ async def process_row(
     else:
         all_tools = mcp_tools + GRAPH_TOOL_DEFS
         system_prompt = SYSTEM_PROMPT
+    system_prompt = system_prompt.replace("Ограничение — 60 шагов на один товар",
+                                          f"Ограничение — {MAX_ROUNDS} шагов на один товар")
     if not use_approaches:
         # «Чистый поиск»: скрываем инструменты памяти-подсказок (подходы, хинты).
         all_tools = [t for t in all_tools if t["function"]["name"] not in ("get_approaches", "get_hints")]
@@ -545,12 +547,18 @@ async def process_row(
     ]
 
     facts = RowFacts()
+    rounds = 0
+    facts.set_progress(0, MAX_ROUNDS)
 
-    response = await _query_llm(llm_client, messages, all_tools, temperature=TEMP_EXPLORATION, monitor_callback=monitor_callback, facts=facts)
+    async def _llm_call(messages, temperature):
+        facts.set_progress(rounds, MAX_ROUNDS)
+        return await _query_llm(llm_client, messages, all_tools, temperature=temperature,
+                                monitor_callback=monitor_callback, facts=facts)
+
+    response = await _llm_call(messages, TEMP_EXPLORATION)
     if "error" in response:
         return _error_result(spec_text, f"LLM: {response['error']}")
 
-    rounds = 0
     current_site = ""
     rounds_on_site = 0
     steps = []
@@ -637,7 +645,7 @@ async def process_row(
             messages.append({"role": "assistant", "content": content or "(no output)"})
             messages.append({"role": "user", "content": "Верни JSON с результатом поиска цены.\nФормат: {\"price\": число|null, \"confidence\": 0.0-1.0, \"url\": \"...\", \"site\": \"...\", \"reason\": \"...\", \"requires_review\": bool}"})
             _stop_check()
-            response = await _query_llm(llm_client, messages, all_tools, temperature=TEMP_EXTRACTION, monitor_callback=monitor_callback, facts=facts)
+            response = await _llm_call(messages, TEMP_EXTRACTION)
             if "error" in response:
                 return _error_result(spec_text, f"LLM: {response['error']}")
             continue
@@ -1011,7 +1019,7 @@ async def process_row(
                     ),
                 })
                 _stop_check()
-                response = await _query_llm(llm_client, messages, all_tools, temperature=TEMP_RECOVERY, monitor_callback=monitor_callback, facts=facts)
+                response = await _llm_call(messages, TEMP_RECOVERY)
                 if "error" in response:
                     return _error_result(spec_text, f"LLM: {response['error']}")
                 continue
@@ -1054,7 +1062,7 @@ async def process_row(
             rounds_on_site = 0
             current_site = ""
             _stop_check()
-            response = await _query_llm(llm_client, messages, all_tools, temperature=TEMP_RECOVERY, monitor_callback=monitor_callback, facts=facts)
+            response = await _llm_call(messages, TEMP_RECOVERY)
             if "error" in response:
                 return _error_result(spec_text, f"LLM: {response['error']}")
             continue
@@ -1068,7 +1076,7 @@ async def process_row(
             })
 
         _stop_check()
-        response = await _query_llm(llm_client, messages, all_tools, temperature=TEMP_NAVIGATION, monitor_callback=monitor_callback, facts=facts)
+        response = await _llm_call(messages, TEMP_NAVIGATION)
         if "error" in response:
             return _error_result(spec_text, f"LLM: {response['error']}")
 
