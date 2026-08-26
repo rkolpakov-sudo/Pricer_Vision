@@ -186,6 +186,7 @@ class MCPAgentRunner(QThread):
                               "requires_review": True, "error": "skipped_by_user", "elapsed": 0.0}
                     logger.info("Row %d: user skip — '%s' (аналог '%s')", i + 1, spec_text[:40], matched[:40])
                     self.status_signal.emit(("progress", i + 1, total, f"Пропуск (пользователь): {spec_text[:60]}..."))
+                    result["excel_row"] = getattr(spec, "row", 0) or (original_index.get(id(spec), i) + 2)
                     results.append(result)
                     audit.log_extraction(spec_text, False, None)
                     row_idx = original_index.get(id(spec), i)
@@ -201,6 +202,7 @@ class MCPAgentRunner(QThread):
                               "requires_review": True, "error": "not_found_cached", "elapsed": 0.0}
                     logger.info("Row %d: negative cache — '%s' not found earlier, skipping", i + 1, spec_text[:40])
                     self.status_signal.emit(("progress", i + 1, total, f"Пропуск (не найдено ранее): {spec_text[:60]}..."))
+                    result["excel_row"] = getattr(spec, "row", 0) or (original_index.get(id(spec), i) + 2)
                     results.append(result)
                     audit.log_extraction(spec_text, False, None)
                     row_idx = original_index.get(id(spec), i)
@@ -292,6 +294,7 @@ class MCPAgentRunner(QThread):
                 results.append(result)
                 audit.log_extraction(spec_text, result.get("price") is not None, result.get("price"))
                 row_idx = original_index.get(id(spec), i)
+                result["excel_row"] = getattr(spec, "row", 0) or (row_idx + 2)
                 self._processed += 1
                 if result.get("price") is not None:
                     self._found += 1

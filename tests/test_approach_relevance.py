@@ -4,6 +4,7 @@ import pytest
 
 from src.approach_relevance import (
     tokenize, approach_relevant, product_name_matches, product_name_matches_ignore_brand,
+    _size_key,
     missing_required_tokens, normalize_search_text,
 )
 
@@ -286,3 +287,67 @@ class TestNormalizeSearchText:
     def test_empty_and_none(self):
         assert normalize_search_text("") == ""
         assert normalize_search_text(None) is None
+
+
+class TestSizeKeySlashDimensions:
+    """Слэш-типоразмеры («60/40-2», «28/32», «20/20/16») — размеры, а не мусор.
+
+    Регрессия: цена изоляции Ø25 переиспользовалась на трубки ENERGOFLEX
+    всех диаметров, т.к. формат «60/40-2» не извлекался как размер.
+    """
+
+    def test_slash_pair_extracted(self):
+        assert _size_key("Трубка ENERGOFLEX Super SK 60/40-2") == {"60/40"}
+
+    def test_slash_single_extracted(self):
+        assert _size_key("Теплоизоляция Energomax 06/6-2") == {"06/6"}
+
+    def test_triple_slash_extracted(self):
+        assert _size_key("Тройник полипропиленовый 20/20/16") == {"20/20/16"}
+
+    def test_inch_fraction_not_slash_dim(self):
+        sizes = _size_key('Труба стальная водогазопроводная 1/2"')
+        assert "1/2" not in {s for s in sizes if "/" in s and '"' not in s}
+
+    def test_isolation_vs_tube_rejected_default(self):
+        spec = "Трубка ENERGOFLEX Super SK 60/40-2"
+        cached = "Изоляция 13 мм для труб Ø25, ENERGOFLEX SUPER"
+        assert product_name_matches(spec, cached) is False
+
+
+class TestStrictSizes:
+    """strict_sizes=True: расхождение/отсутствие размеров с одной стороны — отказ.
+
+    Для авто-реюза (rule 8, semantic cache): историческая запись без размера
+    в наименовании не должна переиспользоваться для позиции с размером.
+    """
+
+    def test_one_sided_size_strict_rejects(self):
+        stored = "Кран шаровой полнопроходной латунный никелированный с накидной гайкой"
+        query = stored + " DN15"
+        assert product_name_matches(query, stored) is True
+        assert product_name_matches(query, stored, strict_sizes=True) is False
+
+    def test_both_empty_sizes_pass_strict(self):
+        assert product_name_matches(
+            "Клей Energopro", "Клей Energopro", strict_sizes=True
+        ) is True
+
+    def test_equal_sizes_pass_strict(self):
+        assert product_name_matches(
+            "Кран шаровой Ду15 Ридан",
+            "Кран шаровой Ду15, завод-изготовитель Ридан",
+            strict_sizes=True,
+        ) is True
+
+    def test_different_sizes_rejected_in_any_mode(self):
+        assert product_name_matches(
+            "Трубка ENERGOFLEX Super SK 28/32-2",
+            "Изоляция 13 мм для труб Ø25, ENERGOFLEX SUPER",
+            strict_sizes=True,
+        ) is False
+
+    def test_ignore_brand_accepts_strict_flag(self):
+        stored = "Кран шаровой полнопроходной никелированный"
+        query = stored + " DN25"
+        assert product_name_matches_ignore_brand(query, stored, strict_sizes=True) is False

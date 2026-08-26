@@ -441,7 +441,7 @@ class GraphEngine:
         scored = []
         for pid, info in candidates.items():
             if info["overlap"] >= 2 and product_name_matches(
-                spec_text, info["price"].get("spec_text", "")
+                spec_text, info["price"].get("spec_text", ""), strict_sizes=True
             ):
                 price = dict(info["price"])
                 url = price.get("url") or ""

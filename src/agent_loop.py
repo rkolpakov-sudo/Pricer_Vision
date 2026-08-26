@@ -24,7 +24,7 @@ from src.rate_limiter import DomainRateLimiter
 from src.captcha_detector import CaptchaDetector, CaptchaType
 from src.approach_relevance import (
     approach_relevant, product_name_matches, product_name_matches_ignore_brand,
-    missing_required_tokens, normalize_search_text,
+    missing_required_tokens, normalize_search_text, is_standard_reference,
 )
 
 logger = logging.getLogger("pricer.agent")
@@ -998,17 +998,10 @@ async def process_row(
     return _error_result(spec_text, f"Max rounds ({MAX_ROUNDS}) reached", elapsed=elapsed)
 
 
-_STANDARD_REF_RE = re.compile(
-    r"^(гост|ту|снип|сп |iso|din|en |astm|фнп|пнст|мто|рм|сбн|гос[тт] р)\b",
-    re.IGNORECASE,
-)
-
-
 def _is_standard_reference(spec: str) -> bool:
     """True, если «Тип/обозначение» — это ссылка на стандарт (ГОСТ/ТУ/СНиП/ISO...),
     а не модель товара. Такие значения не полезны для поиска."""
-    s = spec.strip().lower()
-    return bool(_STANDARD_REF_RE.match(s))
+    return is_standard_reference(spec)
 
 
 def _build_context(spec_text, product_type, approaches, confirmed_prices, sites, hints, product_data=None, site_guides=None, concepts=None, spec_meta=None):

@@ -1054,7 +1054,7 @@ class MainWindow(QMainWindow):
         ws = self.excel_writer.ws
         hm = self.excel_writer.header_map
         if ws and hm:
-            excel_row = idx + 2
+            excel_row = result.get("excel_row") or (idx + 2)
             ws.cell(excel_row, hm["price"], price)
             ws.cell(excel_row, hm["url"], url or "")
             ws.cell(excel_row, hm["category"], pt or "")

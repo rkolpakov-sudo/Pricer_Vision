@@ -43,6 +43,17 @@ def test_no_hit_for_other_size(cache):
     assert hit is not None and hit["price"] == 1193.2
 
 
+def test_no_hit_when_size_only_on_query_side(cache):
+    """Строгие размеры: запись без размера не отдаётся позиции с размером.
+
+    Регрессия vtk_spec_v2: изоляция Ø25 из кэша улетала на трубки
+    ENERGOFLEX всех диаметров.
+    """
+    cache.store("Изоляция для труб, ENERGOFLEX SUPER",
+                {"price": 49.9, "confidence": 0.95, "url": "https://www.santech.ru/catalog/407/408/i23728/v43932/", "site": "santech.ru"})
+    assert cache.get_similar("Трубка ENERGOFLEX Super SK 60/40-2", threshold=0.25) is None
+
+
 def test_no_hit_for_other_brand(cache):
     """Разный бренд не даёт cache hit (Ридан ≠ Пульсар), даже при низком пороге."""
     cache.store("Кран шаровой Ду15, завод-изготовитель Ридан",

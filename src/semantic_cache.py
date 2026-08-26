@@ -53,7 +53,7 @@ class SemanticCache:
                 normalized, cached_data.get("normalized_name", "")
             )
             if similarity >= threshold and product_name_matches(
-                product_name, cached_data.get("original_name", "")
+                product_name, cached_data.get("original_name", ""), strict_sizes=True
             ):
                 return {
                     **result,

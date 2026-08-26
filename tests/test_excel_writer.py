@@ -101,8 +101,9 @@ class TestBuildItemName:
     def test_combines_brand_and_name(self, writer):
         mapping = writer.detect_columns(writer.headers)
         name, uom, article = writer.build_item_name(2, mapping)
-        # производитель НЕ конкатенируется в имя (держится отдельно)
-        assert name == "Кабель ВВГ"
+        # производитель НЕ конкатенируется в имя (держится отдельно);
+        # артикул (ВВГ-3x2.5) — участвует наравне
+        assert name == "Кабель ВВГ ВВГ-3x2.5"
         assert uom == "м"
         assert article == "ВВГ-3x2.5"
         brand = writer._concat_cells(2, mapping.get("brand", []))
@@ -111,6 +112,110 @@ class TestBuildItemName:
     def test_no_ws(self):
         w = ExcelWriter({})
         assert w.build_item_name(1, {"article": [], "brand": [], "name": [], "uom": None}) == ("", "шт", None)
+
+    def test_spec_column_appended_to_name(self, tmp_path):
+        """«Тип, марка» — различитель типоразмеров — обязана попасть в имя."""
+        path = make_spec_xlsx(
+            tmp_path,
+            ["Наименование", "Тип, марка, обозначение документа", "Кол-во", "Ед."],
+            [["Стальной панельный радиатор LEMAX", "LEMAX Premium C10 500x400", 3, "шт."]],
+        )
+        w = ExcelWriter({})
+        w.load_spec(path)
+        mapping = w.detect_columns(w.headers)
+        name, _, _ = w.build_item_name(2, mapping)
+        assert name == "Стальной панельный радиатор LEMAX LEMAX Premium C10 500x400"
+
+    def test_standard_reference_not_appended(self, tmp_path):
+        """ГОСТ/ТУ/СТО — не модель товара, в поисковое имя не добавляется."""
+        path = make_spec_xlsx(
+            tmp_path,
+            ["Наименование", "Тип, марка, обозначение документа", "Кол-во", "Ед."],
+            [["Трубка ENERGOFLEX Super SK 60/40-2", "ГОСТ Р 56729-2015", 40, "м"]],
+        )
+        w = ExcelWriter({})
+        w.load_spec(path)
+        mapping = w.detect_columns(w.headers)
+        name, _, _ = w.build_item_name(2, mapping)
+        assert name == "Трубка ENERGOFLEX Super SK 60/40-2"
+
+    def test_duplicate_value_not_appended(self, tmp_path):
+        path = make_spec_xlsx(
+            tmp_path,
+            ["Наименование", "Марка", "Кол-во", "Ед."],
+            [["Клапан RTR-G угловой", "RTR-G угловой", 27, "шт."]],
+        )
+        w = ExcelWriter({})
+        w.load_spec(path)
+        # «Марка» здесь классифицируется как brand; проверяем защиту от дублей напрямую
+        name, _, _ = w.build_item_name(2, {"article": [], "brand": [], "name": [0], "spec": [1], "uom": 3})
+        assert name.count("RTR-G") == 1
+
+    def test_article_participates_in_name(self, tmp_path):
+        """«Код оборудования» — идентификатор товара — входит в spec_text наравне с типом."""
+        path = make_spec_xlsx(
+            tmp_path,
+            ["Наименование", "Тип, марка, обозначение документа", "Код оборудования", "Кол-во", "Ед."],
+            [["Кран шаровой полнопроходной латунный никелированный с накидной гайкой",
+              "DN15", "065B8203R", 196, "шт."]],
+        )
+        w = ExcelWriter({})
+        w.load_spec(path)
+        mapping = w.detect_columns(w.headers)
+        name, _, article = w.build_item_name(2, mapping)
+        assert name == "Кран шаровой полнопроходной латунный никелированный с накидной гайкой DN15 065B8203R"
+        assert article == "065B8203R"
+
+    def test_energoflex_triple_column_absorbed(self, tmp_path):
+        """ENERGOFLEX в имени + ГОСТ в типе + ENERGOFLEX в коде — одно упоминание (скриншот)."""
+        path = make_spec_xlsx(
+            tmp_path,
+            ["Наименование", "Тип, марка, обозначение документа", "Код оборудования", "Кол-во", "Ед."],
+            [["Трубка ENERGOFLEX Super SK 60/40-2", "ГОСТ Р 56729-2015", "ENERGOFLEX", 40.7, "м"]],
+        )
+        w = ExcelWriter({})
+        w.load_spec(path)
+        mapping = w.detect_columns(w.headers)
+        name, _, _ = w.build_item_name(2, mapping)
+        assert name.lower().count("energoflex") == 1
+
+    def test_tr84_vs_tr_84_normalized_absorbed(self, tmp_path):
+        """«TR 84» в типе поглощается «TR84» из имени несмотря на пробел."""
+        path = make_spec_xlsx(
+            tmp_path,
+            ["Наименование", "Тип, марка, обозначение документа", "Кол-во", "Ед."],
+            [["Термостатический элемент TR84 с датчиком", "TR 84", 196, "шт."]],
+        )
+        w = ExcelWriter({})
+        w.load_spec(path)
+        mapping = w.detect_columns(w.headers)
+        name, _, _ = w.build_item_name(2, mapping)
+        assert name == "Термостатический элемент TR84 с датчиком"
+        assert name.lower().count("tr84") == 1
+
+
+class TestIdentAbsorption:
+    """Нормализованное поглощение повторяющихся данных из разных колонок."""
+
+    def test_short_numeric_not_absorbed_in_number(self):
+        # «100» не поглощается внутри «500x1000»
+        from src.excel_writer import _value_absorbed
+        assert _value_absorbed("Труба 500x1000", "100") is False
+
+    def test_long_code_substring_absorbed(self):
+        from src.excel_writer import _value_absorbed
+        assert _value_absorbed("Кабель ВВГ 3x1.5", "ВВГ 3x1.5") is True
+
+    def test_separator_variant_absorbed(self):
+        from src.excel_writer import _value_absorbed
+        assert _value_absorbed("Трубка ENERGOFLEX Super SK 60/40-2", "ENERGOFLEX") is True
+
+    def test_partial_overlap_not_absorbed(self):
+        from src.excel_writer import _value_absorbed
+        assert _value_absorbed(
+            "Стальной панельный радиатор LEMAX Premium Compact Hygiene",
+            "LEMAX Premium C10 500x400",
+        ) is False
 
 
 class TestGetSpecs:
@@ -143,6 +248,30 @@ class TestGetSpecs:
         specs = w.get_specs()
         assert [s.text for s in specs] == ["Воздухоотводчик", "Кран шаровой"]
 
+    def test_row_points_to_real_sheet_row(self, tmp_path):
+        """SpecItem.row — фактический ряд листа, даже после пропущенных строк-заголовков.
+
+        Регрессия: запись результатов по «индекс в отфильтрованном списке + 2»
+        смещала все цены на чужие строки (файл vtk_spec_v2.xlsx).
+        """
+        path = make_spec_xlsx(
+            tmp_path,
+            ["Позиция", "Наименование", "Кол-во"],
+            [
+                ["", "Отопление", ""],          # sheet row 2 — заголовок, пропускается
+                ["1.", "Воздухоотводчик", "48"],  # sheet row 3
+                ["", "Вентиляция", ""],          # sheet row 4 — заголовок
+                ["2.", "Кран шаровой", "18"],     # sheet row 5
+            ],
+        )
+        w = ExcelWriter({})
+        w.load_spec(path)
+        specs = w.get_specs()
+        assert [(s.text, s.row) for s in specs] == [
+            ("Воздухоотводчик", 3),
+            ("Кран шаровой", 5),
+        ]
+
     def test_no_qty_column_keeps_all(self, tmp_path):
         path = make_spec_xlsx(tmp_path, ["Наименование"], [["Кабель"], ["Труба"]])
         w = ExcelWriter({})
@@ -169,7 +298,7 @@ class TestSpecForRow:
         row2 = w.spec_for_row(2)
         row3 = w.spec_for_row(3)
         assert row2 is not None and row3 is not None
-        assert row2.text == specs[0].text == "Кабель ВВГ"
+        assert row2.text == specs[0].text == "Кабель ВВГ ВВГ-3x2.5"
         assert row2.brand == specs[0].brand == "Спецкабель"
         assert row3.text == specs[1].text == "Труба ПНД"
         assert row3.article == specs[1].article == ""

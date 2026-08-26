@@ -192,13 +192,16 @@ _BRAND_RE = re.compile(
 _DU_RE = re.compile(r"(?:ду|дн|dn|dp)\s?(\d{2,3})", re.IGNORECASE)
 _DIM_RE = re.compile(r"(\d{1,3})\s?(?:х|x)\s?(\d{1,4})", re.IGNORECASE)
 _MM_RE = re.compile(r"(?:[øØ⌀∅]\s?(\d{2,4})|(\d{2,4})\s?мм\b)")
+_SLASH_DIM_RE = re.compile(
+    r"(?<![\d\"/])(\d{1,3}(?:\s*/\s*\d{1,3}){1,2})(?:\s*-\s*\d+)?(?![\d\"/])"
+)
 _FRAC_RE = re.compile(r"(\d+(?:\s+\d+)?\s*/\s*\d+)\s*\"")
 _INCH_RE = re.compile(r"\b(\d+)\"")
 _OUTLET_RE = re.compile(r"на\s+(\d+)\s+выход\w*", re.IGNORECASE)
 
 
 def _size_key(text: str) -> set | None:
-    """Канонические размеры в тексте: «ду15», «500x1000», «1/2"», «Ø100», «на 4 выхода».
+    """Канонические размеры в тексте: «ду15», «500x1000», «1/2"», «Ø100», «60/40-2», «на 4 выхода».
 
     Если размеры присутствуют в обоих сравниваемых наименованиях, но различаются —
     это разные типоразмеры («Кран шаровой Ду15» ≠ «Кран шаровой Ду20»).
@@ -211,6 +214,8 @@ def _size_key(text: str) -> set | None:
         sizes.add(f"мм{m.group(1) or m.group(2)}")
     for m in _DIM_RE.finditer(low):
         sizes.add(f"{m.group(1)}x{m.group(2)}")
+    for m in _SLASH_DIM_RE.finditer(low):
+        sizes.add(m.group(1).replace(" ", ""))
     for m in _FRAC_RE.finditer(low):
         sizes.add(f"\"{m.group(1).replace(' ', '')}")
     for m in _INCH_RE.finditer(low):
@@ -280,6 +285,19 @@ def _product_tokens(text: str) -> set:
     return tokens
 
 
+_STANDARD_REF_RE = re.compile(
+    r"^\s*(гост\s*р?\b|ту\b|снип\b|сп\b|iso\b|din\b|en\b|astm\b|фнп\b|пнст\b"
+    r"|мто\b|рм\b|сбн\b|сто\b|тр\s*тс\b)",
+    re.IGNORECASE,
+)
+
+
+def is_standard_reference(text: str) -> bool:
+    """True, если значение — ссылка на стандарт (ГОСТ/ТУ/СНиП/ISO/DIN/СТО...),
+    а не модель товара. Такие значения не добавляются в поисковое наименование."""
+    return bool(_STANDARD_REF_RE.match((text or "").strip().lower()))
+
+
 def _prefix_match(tok: str, found_tokens: set) -> bool:
     for f in found_tokens:
         if tok == f:
@@ -331,12 +349,20 @@ def _expand_conn_abbrev(text: str) -> str:
     return text
 
 
-def product_name_matches(spec_text: str, found_name: str) -> bool:
-    """Проверка: найденный товар соответствует позиции спецификации (с брендом)."""
-    return _product_matches_core(spec_text, found_name, check_brand=True)
+def product_name_matches(spec_text: str, found_name: str,
+                         strict_sizes: bool = False) -> bool:
+    """Проверка: найденный товар соответствует позиции спецификации (с брендом).
+
+    strict_sizes=True — расхождение размеров отклоняет совпадение, даже если
+    размер указан только с одной стороны. Для авто-реюза цен (rule 8, кэш),
+    где ошибка дороже пропуска.
+    """
+    return _product_matches_core(spec_text, found_name, check_brand=True,
+                                 strict_sizes=strict_sizes)
 
 
-def product_name_matches_ignore_brand(spec_text: str, found_name: str) -> bool:
+def product_name_matches_ignore_brand(spec_text: str, found_name: str,
+                                      strict_sizes: bool = False) -> bool:
     """Совпадение по всем атрибутам, кроме бренда.
 
     Для кандидатов-фолбэков: товар того же типа/размера/соединения, но другого
@@ -347,10 +373,12 @@ def product_name_matches_ignore_brand(spec_text: str, found_name: str) -> bool:
         _expand_conn_abbrev(spec_text),
         _expand_conn_abbrev(found_name),
         check_brand=False,
+        strict_sizes=strict_sizes,
     )
 
 
-def _product_matches_core(spec_text: str, found_name: str, check_brand: bool = True) -> bool:
+def _product_matches_core(spec_text: str, found_name: str, check_brand: bool = True,
+                          strict_sizes: bool = False) -> bool:
     """Проверка: найденный товар соответствует позиции спецификации.
 
     Три измерения совпадения:
@@ -397,7 +425,10 @@ def _product_matches_core(spec_text: str, found_name: str, check_brand: bool = T
 
     spec_sizes = _size_key(spec_text)
     found_sizes = _size_key(found_name)
-    if spec_sizes and found_sizes and spec_sizes != found_sizes:
+    if strict_sizes:
+        if (spec_sizes or found_sizes) and spec_sizes != found_sizes:
+            return False
+    elif spec_sizes and found_sizes and spec_sizes != found_sizes:
         return False
 
     if check_brand:

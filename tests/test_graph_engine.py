@@ -113,6 +113,40 @@ class TestGraphEngine:
         assert graph_engine.get_confirmed_prices("Кран шаровой Ду20") == []
         assert graph_engine.get_confirmed_prices("Кран шаровой Ду15")[0]["price"] == 1193.2
 
+    def test_get_confirmed_prices_strict_one_sided_size(self, graph_engine):
+        """Историческая запись БЕЗ размера не переиспользуется для позиции С размером.
+
+        Регрессия vtk_spec_v2: цена «Изоляция Ø25» (conf 0.95) мгновенно
+        уходила на трубки ENERGOFLEX 28…110 мм.
+        """
+        graph_engine.save_confirmed_price({
+            "spec_text": "Изоляция 13 мм для труб Ø25, ENERGOFLEX SUPER",
+            "product_type_id": "insulation",
+            "site_id": "santech.ru",
+            "price": 49.9,
+            "url": "https://www.santech.ru/catalog/407/408/i23728/v43932/",
+        })
+        # размер есть только у запроса — строгий режим запрещает реюз
+        assert graph_engine.get_confirmed_prices(
+            "Трубка ENERGOFLEX Super SK 60/40-2"
+        ) == []
+        # тот же товар — реюз работает
+        same = graph_engine.get_confirmed_prices("Изоляция 13 мм для труб Ø25, ENERGOFLEX SUPER")
+        assert len(same) == 1 and same[0]["price"] == 49.9
+
+    def test_get_confirmed_prices_rejects_slash_size_mismatch(self, graph_engine):
+        """Слэш-типоразмер 60/40 ≠ изоляция мм13/ø25 — разные размеры, отказ."""
+        graph_engine.save_confirmed_price({
+            "spec_text": "Трубка ENERGOFLEX Super SK 60/40-2",
+            "product_type_id": "insulation",
+            "site_id": "santech.ru",
+            "price": 512.8,
+            "url": "https://www.santech.ru/catalog/407/408/i23728/v43931/",
+        })
+        assert graph_engine.get_confirmed_prices(
+            "Трубка ENERGOFLEX Super SK 110/40-2"
+        ) == []
+
     def test_get_confirmed_prices_rejects_other_product(self, graph_engine):
         """Теплосчетчик ≠ Кран шаровой: общие структурные слова не дают совпадения."""
         graph_engine.save_confirmed_price({

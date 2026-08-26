@@ -11,6 +11,7 @@ ExcelWriter — единый класс для всей работы с Excel.
 """
 
 import logging
+import re
 import threading
 from pathlib import Path
 from datetime import datetime
@@ -22,10 +23,53 @@ import openpyxl
 logger = logging.getLogger(__name__)
 
 
+_IDENT_SEP_RE = re.compile(r"[\s\-–—_/\\.,;:()«»\"'№]+")
+
+
+def _norm_ident(s: str) -> str:
+    """Нижний регистр без разделителей: «TR 84»→«tr84», «60/40-2»→«60402»."""
+    return _IDENT_SEP_RE.sub("", (s or "").lower())
+
+
+def _ident_words(s: str) -> list[str]:
+    out = []
+    for w in (s or "").split():
+        w = _IDENT_SEP_RE.sub("", w.lower())
+        if len(w) >= 2:
+            out.append(w)
+    return out
+
+
+def _value_absorbed(base: str, value: str) -> bool:
+    """True, если значение уже представлено в накопленном наименовании.
+
+    Требование: одинаковые данные из разных колонок не должны дублироваться
+    в поисковом запросе («ENERGOFLEX» в имени и в колонке «Код оборудования» —
+    одно упоминание). Два уровня сравнения с нормализацией разделителей:
+    1. norm(значение) — подстрока norm(накопленного): «TR 84» ⊆ «…TR84…»,
+       «ENERGOFLEX» ⊆ «Трубка ENERGOFLEX Super SK…». Чисто числовые короткие
+       значения (<5 цифр) через подстроку не проверяются, чтобы «100» не
+       поглотилось внутри «500x1000»;
+    2. каждое слово значения (≥2 символов) есть среди слов накопленного.
+    Частичное пересечение (LEMAX-имя содержит бренд, но тип несёт размер)
+    поглощением НЕ считается — значение добавляется целиком.
+    """
+    nv = _norm_ident(value)
+    if not nv:
+        return True
+    nb = _norm_ident(base)
+    if not (nv.isdigit() and len(nv) < 5) and nv in nb:
+        return True
+    bw = set(_ident_words(base))
+    vw = _ident_words(value)
+    return bool(vw) and all(w in bw for w in vw)
+
+
 class SpecItem:
     """Структурированное описание товара из Excel."""
     def __init__(self, text: str, article: str = "", brand: str = "", name_raw: str = "",
-                 uom: str = "шт", headers: list | None = None, spec: str = ""):
+                 uom: str = "шт", headers: list | None = None, spec: str = "",
+                 row: int = 0):
         self.text = text
         self.article = article
         self.brand = brand
@@ -33,10 +77,12 @@ class SpecItem:
         self.uom = uom
         self.headers = headers or []
         self.spec = spec
+        self.row = row
 
 
 from src._labels import _CAT_RU_LABELS, _SUBCAT_RU_LABELS
 from src.column_classifier import classify_columns
+from src.approach_relevance import is_standard_reference
 
 
 logger = logging.getLogger(__name__)
@@ -170,7 +216,15 @@ class ExcelWriter:
         return header_map
 
     def build_item_name(self, row: int, mapping: dict) -> tuple:
-        """Собирает наименование из name-колонок (БЕЗ производителя).
+        """Собирает наименование из name-, spec- и article-колонок (БЕЗ производителя).
+
+        Все колонки с данными о товаре участвуют в поиске на равных:
+        «Наименование» → «Тип, марка» (LEMAX Premium C10 500x400, DN15,
+        МС-140-0,9-2) → «Код оборудования» (065B8203R). Значения, уже
+        представленные в накопленном тексте, поглощаются с нормализацией
+        разделителей (_value_absorbed): одинаковые данные из разных колонок
+        попадают в запрос одним упоминанием. Ссылки на стандарты
+        (ГОСТ/ТУ/СТО...) не добавляются.
 
         Завод-изготовитель держится отдельно (SpecItem.brand) — он важен
         для выбора правильного товара агентом, а не как часть поискового
@@ -194,6 +248,27 @@ class ExcelWriter:
                 parts.append(val)
 
         full_name = " ".join(parts)
+
+        for idx in mapping.get("spec", []):
+            val = str(ws.cell(row, idx + 1).value or "").strip()
+            if not val or val in ("None", ""):
+                continue
+            if is_standard_reference(val):
+                continue
+            if _value_absorbed(full_name, val):
+                continue
+            full_name = f"{full_name} {val}".strip() if full_name else val
+
+        for idx in mapping.get("article", []):
+            val = str(ws.cell(row, idx + 1).value or "").strip()
+            if not val or val in ("None", ""):
+                continue
+            if is_standard_reference(val):
+                continue
+            if _value_absorbed(full_name, val):
+                continue
+            full_name = f"{full_name} {val}".strip() if full_name else val
+
         uom = str(ws.cell(row, mapping["uom"] + 1).value or "шт") if mapping.get("uom") is not None else "шт"
         return full_name, uom, article
 
@@ -284,6 +359,7 @@ class ExcelWriter:
             uom=uom,
             spec=spec_raw,
             headers=self._headers,
+            row=excel_row,
         )
 
     def get_specs(self) -> list[SpecItem]:
