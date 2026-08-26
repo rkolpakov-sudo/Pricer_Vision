@@ -134,6 +134,31 @@ class TestGraphEngine:
         same = graph_engine.get_confirmed_prices("Изоляция 13 мм для труб Ø25, ENERGOFLEX SUPER")
         assert len(same) == 1 and same[0]["price"] == 49.9
 
+    def test_get_confirmed_prices_guidance_lenient(self, graph_engine):
+        """Щадящий режим (ignore_sizes=True) для ГИДА: цена семьи с ДРУГИМ размером
+        показывается агенту как «куда идти», но в реюз (строгий) не попадает.
+
+        Регрессия обучения: тренировка на C10 500x400 сохранила цену на
+        mircli.ru/satro-paladin.com, но соседние размеры (500x600...) получали
+        «Нет похожих цен» и начинали поиск с santech.ru заново.
+        """
+        graph_engine.save_confirmed_price({
+            "spec_text": "Стальной панельный радиатор LEMAX Premium Compact Hygiene LEMAX Premium C10 500x400",
+            "product_type_id": "plumbing_heating_radiators",
+            "site_id": "mircli.ru",
+            "price": 3580.0,
+            "url": "https://mircli.ru/product/lemaks-premium-c-10h500h400/",
+        })
+        query = ("Стальной панельный радиатор LEMAX Premium Compact Hygiene "
+                 "LEMAX Premium C10 500x600")
+        # строгий реюз — НЕ переиспользуем цену другого размера
+        assert graph_engine.get_confirmed_prices(query, strict_sizes=True) == []
+        # щадящий гид — сайт с ценой семьи виден
+        guide = graph_engine.get_confirmed_prices(query, strict_sizes=False, ignore_sizes=True)
+        assert len(guide) == 1
+        assert guide[0]["site_id"] == "mircli.ru"
+        assert guide[0]["price"] == 3580.0
+
     def test_get_confirmed_prices_rejects_slash_size_mismatch(self, graph_engine):
         """Слэш-типоразмер 60/40 ≠ изоляция мм13/ø25 — разные размеры, отказ."""
         graph_engine.save_confirmed_price({

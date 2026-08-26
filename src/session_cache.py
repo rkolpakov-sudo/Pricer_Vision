@@ -57,3 +57,61 @@ class NegativeCache:
 
     def __len__(self) -> int:
         return len(self._counts)
+
+
+class SiteBlacklist:
+    """Сессионный блэклист сайтов.
+
+    Если агент несколько раз (лимит) безуспешно искал товар данного типа/бренда
+    на сайте (таймаут, force-switch, max rounds) — сайт исключается из поиска
+    на оставшийся прогон. Память живёт только в текущей сессии (объект в runner).
+
+    Это решает проблему «каждая строка заново открывает, что на santech.ru нет
+    радиаторов LEMAX и тратит 8–12 раундов впустую»: вторая строка уже не
+    получит santech.ru в списке сайтов.
+    """
+
+    MAX_STRIKES = 2
+
+    def __init__(self, limit: int | None = None):
+        self._limit = limit or self.MAX_STRIKES
+        self._strikes: dict[str, int] = {}
+
+    @property
+    def limit(self) -> int:
+        return self._limit
+
+    @staticmethod
+    def _normalize(site_id: str) -> str:
+        key = (site_id or "").strip().lower().rstrip("/")
+        for prefix in ("https://", "http://", "www."):
+            if key.startswith(prefix):
+                key = key[len(prefix):]
+        return key
+
+    def strike(self, site_id: str) -> int:
+        """Зафиксировать неудачу на сайте. Возвращает новый счётчик."""
+        key = self._normalize(site_id)
+        if not key:
+            return 0
+        count = self._strikes.get(key, 0) + 1
+        self._strikes[key] = count
+        return count
+
+    def is_blocked(self, site_id: str) -> bool:
+        key = self._normalize(site_id)
+        if not key:
+            return False
+        return self._strikes.get(key, 0) >= self._limit
+
+    def blocked_sites(self) -> set[str]:
+        return {s for s, c in self._strikes.items() if c >= self._limit}
+
+    def count(self, site_id: str) -> int:
+        return self._strikes.get(self._normalize(site_id), 0)
+
+    def reset(self) -> None:
+        self._strikes.clear()
+
+    def __len__(self) -> int:
+        return len(self._strikes)

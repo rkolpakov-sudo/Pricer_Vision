@@ -73,7 +73,7 @@ class FakeMemoryManager:
     def get_all_approaches_flat(self):
         return []
 
-    def get_relevant_prices(self, spec):
+    def get_relevant_prices(self, spec, strict_sizes=True, ignore_sizes=False):
         return self.prices
 
     def get_sites(self, pt):

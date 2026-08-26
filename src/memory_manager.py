@@ -191,8 +191,12 @@ class MemoryManager:
 
     # ── Confirmed prices ──
 
-    def get_relevant_prices(self, spec_text: str, max_results: int = 5) -> list[dict]:
-        return self._engine.get_confirmed_prices(spec_text, max_results)
+    def get_relevant_prices(self, spec_text: str, max_results: int = 5,
+                            strict_sizes: bool = True,
+                            ignore_sizes: bool = False) -> list[dict]:
+        return self._engine.get_confirmed_prices(spec_text, max_results,
+                                                 strict_sizes=strict_sizes,
+                                                 ignore_sizes=ignore_sizes)
 
     def deduplicate_prices(self, spec_text: str, site: str) -> list[dict]:
         existing = self._engine.get_confirmed_prices(spec_text, 20)

@@ -350,19 +350,25 @@ def _expand_conn_abbrev(text: str) -> str:
 
 
 def product_name_matches(spec_text: str, found_name: str,
-                         strict_sizes: bool = False) -> bool:
+                         strict_sizes: bool = False,
+                         ignore_sizes: bool = False) -> bool:
     """Проверка: найденный товар соответствует позиции спецификации (с брендом).
 
     strict_sizes=True — расхождение размеров отклоняет совпадение, даже если
     размер указан только с одной стороны. Для авто-реюза цен (rule 8, кэш),
     где ошибка дороже пропуска.
+    ignore_sizes=True — размеры в сравнении не участвуют вовсе. Для ГИДА
+    («похожие цены семьи», переупорядочивание сайтов): соседний типоразмер
+    того же товара — сигнал «сюда идти», но не кандидат на реюз.
     """
     return _product_matches_core(spec_text, found_name, check_brand=True,
-                                 strict_sizes=strict_sizes)
+                                 strict_sizes=strict_sizes,
+                                 ignore_sizes=ignore_sizes)
 
 
 def product_name_matches_ignore_brand(spec_text: str, found_name: str,
-                                      strict_sizes: bool = False) -> bool:
+                                      strict_sizes: bool = False,
+                                      ignore_sizes: bool = False) -> bool:
     """Совпадение по всем атрибутам, кроме бренда.
 
     Для кандидатов-фолбэков: товар того же типа/размера/соединения, но другого
@@ -374,11 +380,12 @@ def product_name_matches_ignore_brand(spec_text: str, found_name: str,
         _expand_conn_abbrev(found_name),
         check_brand=False,
         strict_sizes=strict_sizes,
+        ignore_sizes=ignore_sizes,
     )
 
 
 def _product_matches_core(spec_text: str, found_name: str, check_brand: bool = True,
-                          strict_sizes: bool = False) -> bool:
+                          strict_sizes: bool = False, ignore_sizes: bool = False) -> bool:
     """Проверка: найденный товар соответствует позиции спецификации.
 
     Три измерения совпадения:
@@ -425,7 +432,9 @@ def _product_matches_core(spec_text: str, found_name: str, check_brand: bool = T
 
     spec_sizes = _size_key(spec_text)
     found_sizes = _size_key(found_name)
-    if strict_sizes:
+    if ignore_sizes:
+        pass
+    elif strict_sizes:
         if (spec_sizes or found_sizes) and spec_sizes != found_sizes:
             return False
     elif spec_sizes and found_sizes and spec_sizes != found_sizes:

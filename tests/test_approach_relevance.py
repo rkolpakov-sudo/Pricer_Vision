@@ -351,3 +351,32 @@ class TestStrictSizes:
         stored = "Кран шаровой полнопроходной никелированный"
         query = stored + " DN25"
         assert product_name_matches_ignore_brand(query, stored, strict_sizes=True) is False
+
+
+class TestIgnoreSizes:
+    """ignore_sizes=True — размер не участвует в сравнении (гид/переупорядочивание)."""
+
+    def test_different_sizes_ignored(self):
+        query = "Стальной панельный радиатор LEMAX Premium C10 500x600"
+        stored = "Стальной панельный радиатор LEMAX Premium C10 500x400"
+        assert product_name_matches(query, stored) is False
+        assert product_name_matches(query, stored, ignore_sizes=True) is True
+
+    def test_ignored_with_one_sided_size(self):
+        assert product_name_matches(
+            "Кран шаровой Ду15",
+            "Кран шаровой",
+            ignore_sizes=True,
+        ) is True
+
+    def test_strict_and_ignore_conflict_resolves_to_ignore(self):
+        query = "Кран шаровой Ду20"
+        stored = "Кран шаровой Ду15"
+        assert product_name_matches(query, stored, strict_sizes=True, ignore_sizes=True) is True
+
+    def test_ignore_brand_also_ignores_sizes(self):
+        assert product_name_matches_ignore_brand(
+            "Кран шаровой Ду20, завод-изготовитель Ридан",
+            "Кран шаровой Ду15, завод-изготовитель Пульсар",
+            ignore_sizes=True,
+        ) is True

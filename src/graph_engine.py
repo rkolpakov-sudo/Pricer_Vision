@@ -423,7 +423,9 @@ class GraphEngine:
 
     # ── Confirmed price operations ──
 
-    def get_confirmed_prices(self, spec_text: str, max_results: int = 5) -> list[dict]:
+    def get_confirmed_prices(self, spec_text: str, max_results: int = 5,
+                             strict_sizes: bool = True,
+                             ignore_sizes: bool = False) -> list[dict]:
         self.build()
         spec_tokens = {t.lower() for t in re.findall(r'\w+', spec_text) if len(t) > 2}
         if not spec_tokens:
@@ -441,7 +443,8 @@ class GraphEngine:
         scored = []
         for pid, info in candidates.items():
             if info["overlap"] >= 2 and product_name_matches(
-                spec_text, info["price"].get("spec_text", ""), strict_sizes=True
+                spec_text, info["price"].get("spec_text", ""),
+                strict_sizes=strict_sizes, ignore_sizes=ignore_sizes,
             ):
                 price = dict(info["price"])
                 url = price.get("url") or ""

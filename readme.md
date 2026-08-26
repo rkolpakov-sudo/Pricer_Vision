@@ -497,6 +497,22 @@ pdf_parser:
   указан только с одной стороны. Включён для `graph_engine.get_confirmed_prices`
   (rule 8) и `semantic_cache.get_similar`; интерактивный матчинг агента — щадящий.
 
+### Гид цен и перенос обучения между позициями
+- `get_confirmed_prices(..., strict_sizes=True, ignore_sizes=False)`. Режим ГИДА
+  (`ignore_sizes=True`): цены той же семьи с ДРУГИМ типоразмером показываются агенту
+  как «куда идти» (похожие цены + переупорядочивание сайтов), но НЕ переиспользуются
+  как цена товара (реюз остаётся строгим).
+- В `_build_context` сайты с ценами семьи (price_sites) — первые в приоритете.
+  Эффект: обучение на «LEMAX C10 500x400» поднимает mircli/satro-paladin для
+  соседних размеров 500x600… и строка не стартует с santech.ru заново.
+
+### Сессионный блэклист сайтов
+- `src/session_cache.SiteBlacklist` (MAX_STRIKES=2): сайт штрафуется при таймауте
+  строки (runner штрафует последний посещённый сайт через `site_visit_callback`),
+  force-switch, max rounds, StuckDetector CRITICAL. После 2 штрафов сайт исключается
+  из `get_sites` до конца прогона — «santech.ru не продаёт LEMAX» не открывается
+  заново в каждой строке.
+
 ### Запись цен в лист Excel
 - `SpecItem.row` несёт фактический ряд листа; runner прокидывает
   `result["excel_row"]`, GUI пишет по нему. Писать «индекс отфильтрованного списка + 2»

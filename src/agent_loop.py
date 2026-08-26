@@ -367,6 +367,8 @@ async def process_row(
     semantic_cache=None,
     monitor_callback: Callable[[str, object], None] | None = None,
     negative_cache=None,
+    site_blacklist=None,
+    site_visit_callback: Callable[[str], None] | None = None,
 ) -> dict:
     start_time = datetime.now()
 
@@ -391,7 +393,8 @@ async def process_row(
         logger.info("Search text normalized: '%s' -> '%s' (незначимые фразы убраны из поиска)",
                     spec_text[:60], search_text[:60])
     approaches = memory_manager.get_all_approaches(product_type) if product_type != UNKNOWN_PT else memory_manager.get_all_approaches_flat()
-    confirmed_prices = [] if fresh else memory_manager.get_relevant_prices(spec_text)
+    # Строгие кандидаты на РЕЮЗ (rule 8): тот же типоразмер обязателен.
+    confirmed_prices = [] if fresh else memory_manager.get_relevant_prices(spec_text, strict_sizes=True)
 
     # code-enforced rule 8: reuse high-confidence prices without LLM
     if not fresh and confirmed_prices:
@@ -442,6 +445,15 @@ async def process_row(
             return _result_to_schema(result)
 
     sites = memory_manager.get_sites(product_type)
+    if site_blacklist is not None:
+        blocked = site_blacklist.blocked_sites()
+        if blocked:
+            sites = [s for s in sites if s.get("id") not in blocked]
+            logger.info("Sites filtered by session blacklist: %s", sorted(blocked))
+    # Щадящие кандидаты для ГИДА (контекст, переупорядочивание сайтов):
+    # похожие цены семьи (другие типоразмеры) показываются агенту и поднимают
+    # сайты в приоритете, НО не попадают в rule-8 реюз (см. confirmed_prices выше).
+    guide_prices = [] if fresh else memory_manager.get_relevant_prices(spec_text, strict_sizes=False, ignore_sizes=True)
     # Adaptive rounds per-site: reduce for high-failure sites
     adaptive_limits = AdaptiveRoundManager(base_rounds=MAX_ROUNDS_PER_SITE)
     site_round_limits = adaptive_limits.per_site_limits(sites) if sites else {}
@@ -469,7 +481,7 @@ async def process_row(
         except Exception:
             pass
 
-    context = _build_context(search_text, product_type, approaches, confirmed_prices, sites, hints, product_data, site_guides, concepts, spec_meta)
+    context = _build_context(search_text, product_type, approaches, guide_prices, sites, hints, product_data, site_guides, concepts, spec_meta)
 
     mcp_tools = await mcp_bridge.list_tools()
     # Close previous page to avoid tab accumulation
@@ -597,6 +609,8 @@ async def process_row(
                         price_candidate_seen = False
                         recent_errors = []
                         empty_probe_streak.clear()
+                        if site_visit_callback:
+                            site_visit_callback(_extract_domain(new_site))
                     current_site = new_site
                     rounds_on_site = 0
                 if rate_limiter is not None:
@@ -933,6 +947,8 @@ async def process_row(
                     return _error_result(spec_text, f"LLM: {response['error']}")
                 continue
             logger.warning("StuckDetector CRITICAL — diagnostic cap reached, forcing site switch")
+            if site_blacklist is not None and current_site:
+                site_blacklist.strike(_extract_domain(current_site))
             current_site = ""
             rounds_on_site = site_round_limits.get(_extract_domain(current_site), MAX_ROUNDS_PER_SITE) + 1
             stuck_detector.reset()
@@ -942,6 +958,8 @@ async def process_row(
             logger.info("⚠️ Forcing site switch after %d rounds on %s", rounds_on_site, current_site or "?")
             # Track negative feedback — always, even for unknown product types
             if current_site:
+                if site_blacklist is not None:
+                    site_blacklist.strike(current_domain or current_site)
                 try:
                     failed_site = current_domain
                     if product_type != UNKNOWN_PT:
@@ -982,6 +1000,8 @@ async def process_row(
 
     elapsed = (datetime.now() - start_time).total_seconds()
     if current_site:
+        if site_blacklist is not None:
+            site_blacklist.strike(_extract_domain(current_site))
         try:
             failed_domain = _extract_domain(current_site)
             _deprecate_site_approaches(memory_manager, product_type, failed_domain, "📉 Max rounds:")
@@ -1046,11 +1066,13 @@ def _build_context(spec_text, product_type, approaches, confirmed_prices, sites,
         def _sort_key(s):
             sid = s['id']
             priority = s.get("priority", 2)
-            if sid in success_sites:
-                return 0
-            if sid in approach_sites:
-                return 1
+            # Сайты, где УЖЕ есть цены этого товара/семьи (даже другого типоразмера) —
+            # самый сильный сигнал «сюда идти» (обучение на соседних позициях).
             if sid in price_sites:
+                return 0
+            if sid in success_sites:
+                return 1
+            if sid in approach_sites:
                 return 2
             if priority == 0:
                 return 3

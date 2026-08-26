@@ -12,7 +12,7 @@ from src.audit_logger import AuditLogger
 from src.task_scheduler import TaskScheduler
 from src.semantic_cache import SemanticCache
 from src.learning_loop import LearningLoop
-from src.session_cache import NegativeCache
+from src.session_cache import NegativeCache, SiteBlacklist
 
 logger = logging.getLogger("pricer.runner")
 
@@ -99,6 +99,7 @@ class MCPAgentRunner(QThread):
         self._blocks = 0
         self._processed = 0
         self._found = 0
+        self._last_visited_site = ""
         reset_usage = getattr(self.llm_client, "reset_usage", None)
         if reset_usage:
             reset_usage()
@@ -151,6 +152,13 @@ class MCPAgentRunner(QThread):
             last_health_check = datetime.now()
             # Сессионный отрицательный кэш «не найденных» товаров (только в памяти)
             negative_cache = NegativeCache()
+            # Сессионный блэклист сайтов: сайт, где несколько строк подряд не нашли
+            # товар (таймаут/force-switch/макс. раундов), исключается из поиска.
+            site_blacklist = SiteBlacklist()
+
+            def _on_site_visited(site_id: str):
+                self._last_visited_site = site_id
+
             for i, spec in enumerate(ordered):
                 if self._restart_bridge.is_set():
                     self._restart_bridge.clear()
@@ -259,11 +267,23 @@ class MCPAgentRunner(QThread):
                                 semantic_cache=semantic_cache,
                                 monitor_callback=_monitor,
                                 negative_cache=negative_cache,
+                                site_blacklist=site_blacklist,
+                                site_visit_callback=_on_site_visited,
                             ),
                             timeout=300.0,
                         )
                     except asyncio.TimeoutError:
                         logger.warning(f"Row {i+1} timed out after 300s")
+                        # Таймаут — сильный сигнал, что сайт «не подходит» для этого
+                        # типа/бренда: штрафуем его в сессионном блэклисте, чтобы
+                        # следующая строка не тратила раунды повторно.
+                        if self._last_visited_site:
+                            strikes = site_blacklist.strike(self._last_visited_site)
+                            logger.warning(
+                                "Site %s struck %d/%d (timeout feedback)",
+                                self._last_visited_site, strikes, site_blacklist.limit,
+                            )
+                        self._last_visited_site = ""
                         result = {"spec_text": spec_text, "price": None, "confidence": 0.0,
                                   "reason": "Timeout after 300s", "requires_review": True, "error": "timeout",
                                   "elapsed": 300.0}

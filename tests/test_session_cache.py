@@ -1,8 +1,8 @@
-"""Тесты сессионного отрицательного кэша не найденных товаров."""
+"""Тесты сессионного отрицательного кэша не найденных товаров и блэклиста сайтов."""
 
 import pytest
 
-from src.session_cache import NegativeCache
+from src.session_cache import NegativeCache, SiteBlacklist
 
 
 class TestNegativeCache:
@@ -79,3 +79,63 @@ class TestNegativeCache:
         cache = NegativeCache()
         assert cache.record("Кран шаровой Ду15") == 1
         assert cache.record("Кран шаровой Ду15") == 2
+
+
+class TestSiteBlacklist:
+    def test_not_blocked_initially(self):
+        bl = SiteBlacklist()
+        assert bl.is_blocked("santech.ru") is False
+
+    def test_one_strike_not_enough(self):
+        bl = SiteBlacklist()
+        assert bl.strike("santech.ru") == 1
+        assert bl.is_blocked("santech.ru") is False
+        assert bl.count("santech.ru") == 1
+
+    def test_two_strikes_blocks(self):
+        bl = SiteBlacklist()
+        bl.strike("santech.ru")
+        bl.strike("santech.ru")
+        assert bl.is_blocked("santech.ru") is True
+        assert "santech.ru" in bl.blocked_sites()
+
+    def test_different_sites_independent(self):
+        bl = SiteBlacklist()
+        bl.strike("santech.ru")
+        bl.strike("santech.ru")
+        bl.strike("mircli.ru")
+        assert bl.is_blocked("santech.ru") is True
+        assert bl.is_blocked("mircli.ru") is False
+
+    def test_normalization_trailing_slash_case(self):
+        bl = SiteBlacklist()
+        bl.strike("https://www.Santech.ru/")
+        bl.strike("santech.ru")
+        assert bl.is_blocked("www.santech.ru") is True
+
+    def test_empty_site_never_blocks(self):
+        bl = SiteBlacklist()
+        bl.strike("")
+        assert bl.is_blocked("") is False
+        assert bl.count("") == 0
+
+    def test_custom_limit(self):
+        bl = SiteBlacklist(limit=3)
+        bl.strike("santech.ru")
+        bl.strike("santech.ru")
+        assert bl.is_blocked("santech.ru") is False
+        bl.strike("santech.ru")
+        assert bl.is_blocked("santech.ru") is True
+
+    def test_reset(self):
+        bl = SiteBlacklist()
+        bl.strike("santech.ru")
+        bl.strike("santech.ru")
+        assert bl.is_blocked("santech.ru") is True
+        bl.reset()
+        assert bl.is_blocked("santech.ru") is False
+        assert len(bl) == 0
+
+    def test_limit_property(self):
+        assert SiteBlacklist().limit == 2
+        assert SiteBlacklist(limit=5).limit == 5
