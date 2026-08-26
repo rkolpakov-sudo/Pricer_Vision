@@ -10,6 +10,7 @@ import json
 import pytest
 
 from src.agent_loop import process_row, _error_result, MAX_ROUNDS
+from src.session_facts import SessionFacts
 
 
 def llm_final(price, confidence=0.95, url="https://site.ru/p", site="site.ru"):
@@ -651,3 +652,67 @@ class TestErrorResultContract:
         assert err["error"] == "boom"
         assert err["elapsed"] == 1.5
         assert err["requires_review"] is True
+
+
+def _all_message_text(messages):
+    return "\n".join(str(m.get("content", "")) for m in messages)
+
+
+@pytest.mark.asyncio
+class TestPhase5Verification:
+    """Верификация фикса деградации на уровне интеграции (Фаза 5)."""
+
+    async def test_session_fact_transferred_to_next_row(self):
+        """Успех строки 1 → положительный факт виден в контексте строки 2."""
+        sf = SessionFacts()
+        env1 = make_env(responses=[llm_final(100.0, url="https://mircli.ru/p/x", site="mircli.ru")])
+        await process_row(
+            spec_text="Стальной панельный радиатор LEMAX Premium C10 500x600",
+            llm_client=env1[0], mcp_bridge=env1[1], graph_engine=env1[2],
+            memory_manager=env1[3], fresh=True, semantic_cache=env1[4],
+            session_facts=sf,
+        )
+        env2 = make_env(responses=[llm_final(110.0)])
+        await process_row(
+            spec_text="Стальной панельный радиатор LEMAX Premium C10 500x700",
+            llm_client=env2[0], mcp_bridge=env2[1], graph_engine=env2[2],
+            memory_manager=env2[3], fresh=True, semantic_cache=env2[4],
+            session_facts=sf,
+        )
+        text = _all_message_text(env2[0].calls[0])
+        assert "Сессионные факты прогона (положительные)" in text
+        assert "mircli.ru" in text
+        assert "рабочий запрос" in text
+
+    async def test_repeated_evaluate_noticed_in_context(self):
+        """3 одинаковых извлечения → в контексте LLM появляется факт о повторе."""
+        env = make_env(evaluate_result="[1,2,3] same", responses=[
+            llm_tool_call("browser_navigate", {"url": "https://site.ru"}),
+            llm_tool_call("browser_evaluate", {"function": "() => { return document.title; }"}),
+            llm_tool_call("browser_evaluate", {"function": "() => { return document.title; }"}),
+            llm_tool_call("browser_evaluate", {"function": "() => { return document.title; }"}),
+            llm_final(10.0),
+        ])
+        llm, bridge, engine, mm, cache = env
+        await process_row(
+            spec_text="Труба ПНД 32",
+            llm_client=llm, mcp_bridge=bridge, graph_engine=engine,
+            memory_manager=mm, fresh=True, semantic_cache=cache,
+        )
+        # последний вызов LLM (финальный) содержит факт-блок с повтором
+        last_text = _all_message_text(llm.calls[-1])
+        assert "извлечение страницы повторено 3 раз подряд" in last_text
+
+    async def test_clean_search_hides_session_facts(self):
+        """Все флажки сняты — сессионные факты не подмешиваются."""
+        sf = SessionFacts()
+        sf.record_success("unknown", "", "mircli.ru", url="https://mircli.ru/p/x", query="q")
+        env = make_env(responses=[llm_final(10.0)])
+        await process_row(
+            spec_text="Товар",
+            llm_client=env[0], mcp_bridge=env[1], graph_engine=env[2],
+            memory_manager=env[3], fresh=True, semantic_cache=env[4],
+            session_facts=sf, use_approaches=False, use_site_ranking=False,
+        )
+        text = _all_message_text(env[0].calls[0])
+        assert "Сессионные факты" not in text
