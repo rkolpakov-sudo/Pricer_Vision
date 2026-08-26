@@ -692,6 +692,8 @@ class MainWindow(QMainWindow):
         self.metrics_panel = MetricsPanel()
         monitor_layout.addWidget(self.metrics_panel, 1)
         right_tabs.addTab(monitor_widget, "Мониторинг")
+        # По умолчанию правая панель открывается на «Мониторинге»
+        right_tabs.setCurrentIndex(right_tabs.count() - 1)
 
         splitter.addWidget(right_tabs)
 
