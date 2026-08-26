@@ -1,20 +1,20 @@
 antidetect:
+  cooldown_seconds: 300
+  jitter: 1.0
   rate_limit_max_requests_per_minute: 20
   rate_limit_min_interval: 1.5
-  jitter: 1.0
-  cooldown_seconds: 300
   site_overrides:
     vseinstrumenti.ru:
-      min_interval: 6.0
-      max_requests_per_minute: 6
       cooldown_seconds: 900
+      max_requests_per_minute: 6
+      min_interval: 6.0
 browser:
   backend: camoufox
   backends:
   - camoufox
   - playwright
   - nodriver
-  headless: false
+  headless: true
   no_sandbox: true
 deps:
   playwright_mcp:
@@ -28,11 +28,23 @@ limits:
 llm:
   llama_cpp_url: http://localhost:8080/v1/chat/completions
   lm_studio_url: http://localhost:1234/v1/chat/completions
-  model: local-model
+  model: hy3-free
   ollama_url: http://localhost:11434/api/chat
+  provider: opencode
+  providers:
+    llamacpp:
+      base_url: http://localhost:8080/v1
+    lmstudio:
+      base_url: http://localhost:1234/v1
+    ollama:
+      base_url: http://localhost:11434/v1
+    opencode:
+      base_url: https://opencode.ai/zen/v1
+    routerai:
+      base_url: https://routerai.ru/api/v1
   retry:
-    backoff_seconds: 1.0
-    max_attempts: 2
+    backoff_seconds: 1.5
+    max_attempts: 3
     rate_limit_seconds: 0.05
   temperature: 0.3
   timeout: 150
@@ -46,8 +58,8 @@ paths:
   logs: logs
   state: state.json
 pdf_parser:
-  lang: east_slavic
   fast_path: true
+  lang: east_slavic
   llm_max_chars: 3000
   llm_max_tokens: 1024
   llm_temperature: 0.0

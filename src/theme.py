@@ -299,8 +299,12 @@ def build_stylesheet(theme_name: str) -> str:
         width: 24px;
     }}
     QComboBox::down-arrow {{
-        width: 8px;
-        height: 8px;
+        width: 0px;
+        height: 0px;
+        border-left: 4px solid transparent;
+        border-right: 4px solid transparent;
+        border-top: 5px solid {t["text-secondary"]};
+        margin-right: 7px;
     }}
     QComboBox QAbstractItemView {{
         background-color: {t["bg-surface"]};

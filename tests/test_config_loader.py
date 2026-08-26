@@ -108,3 +108,44 @@ class TestSave:
         cl.save_deps_config({"playwright_mcp": {"version": "0.0.79"}})
         written = yaml.safe_load(target.read_text(encoding="utf-8"))
         assert written["deps"]["playwright_mcp"]["version"] == "0.0.79"
+
+    def test_get_llm_config(self, monkeypatch):
+        lm = {"provider": "routerai", "model": "m1"}
+        monkeypatch.setattr(cl, "load_settings", lambda: {"llm": lm})
+        assert cl.get_llm_config() == lm
+        monkeypatch.setattr(cl, "load_settings", lambda: {})
+        assert cl.get_llm_config() == {}
+
+    def test_save_llm_settings_roundtrip(self, tmp_path, monkeypatch):
+        target = tmp_path / "config" / "settings.yaml"
+        target.parent.mkdir(parents=True)
+        _redirect_config(tmp_path, monkeypatch, {"llm": {"temperature": 0.3}})
+        cl.save_llm_settings(
+            provider="opencode",
+            model="deepseek-v4-flash-free",
+            temperature=0.25,
+            timeout=180,
+            base_urls={"opencode": "https://opencode.ai/zen/v1"},
+        )
+        written = yaml.safe_load(target.read_text(encoding="utf-8"))
+        assert written["llm"]["provider"] == "opencode"
+        assert written["llm"]["model"] == "deepseek-v4-flash-free"
+        assert abs(written["llm"]["temperature"] - 0.25) < 1e-9
+        assert written["llm"]["timeout"] == 180
+        assert written["llm"]["providers"]["opencode"]["base_url"] == "https://opencode.ai/zen/v1"
+        assert "api_key" not in written["llm"]
+
+    def test_save_llm_settings_preserves_other_providers(self, tmp_path, monkeypatch):
+        target = tmp_path / "config" / "settings.yaml"
+        target.parent.mkdir(parents=True)
+        existing = {"llm": {"providers": {
+            "lmstudio": {"base_url": "http://localhost:1234/v1"},
+            "routerai": {"base_url": "https://routerai.ru/api/v1"},
+        }}}
+        _redirect_config(tmp_path, monkeypatch, existing)
+        cl.save_llm_settings("routerai", "deepseek/deepseek-v4-flash", 0.3, 150,
+                             base_urls={"routerai": "https://mirror.routerai.ru/api/v1"})
+        written = yaml.safe_load(target.read_text(encoding="utf-8"))
+        providers = written["llm"]["providers"]
+        assert providers["lmstudio"]["base_url"] == "http://localhost:1234/v1"
+        assert providers["routerai"]["base_url"] == "https://mirror.routerai.ru/api/v1"

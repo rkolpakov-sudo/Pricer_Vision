@@ -39,6 +39,7 @@
   - `mcp_bridge.py` — мультибэкенд-клиент браузерной автоматизации: выбор бэкенда из `config/settings.yaml → browser.backend/backends` (`camoufox` по умолчанию, `playwright`, `nodriver`), автофейловер по цепочке, `mcp_circuit`. Python-бэкенды (`camoufox`/`nodriver`) запускаются через свой venv проекта (`mcp_servers/browser_server.py`), `playwright` — через `npx @playwright/mcp` (пин версии из `deps.playwright_mcp.version`).
   - `graph_engine.py` + `memory_manager.py` — граф знаний (SQLite `data/pricer.db`, seed из `config/categories_and_sites.yaml`).
   - `llm_client.py` — HTTP-клиент к локальному LLM (LM Studio/Ollama/llama.cpp), retry с backoff из `llm.retry`, per-call `temperature`/`max_tokens`.
+  - `llm_providers.py` — реестр провайдеров (opencode/routerai/локальные); креденшиалы парсятся из системы при каждом запуске (env → opencode auth.json → hermes .env, без хранения секретов в проекте); `create_llm_client()` — фабрика клиента из конфига; списки моделей через `/models` + кэш.
   - `study_runner.py` — принудительное обучение (StudyRunner QThread).
   - `resilience.py` — CircuitBreaker (`llm_circuit`/`mcp_circuit`), `retry_with_backoff` (Фаза 1).
   - `models/schemas.py` — Pydantic-схемы: `ExtractionResult`, `AgentDecision`, `ExtractedPrice` (Фаза 1).

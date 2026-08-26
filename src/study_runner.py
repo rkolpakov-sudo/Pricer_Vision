@@ -9,7 +9,6 @@ from datetime import datetime
 
 from PySide6.QtCore import QThread, Signal
 
-from src.llm_client import LLMClient, FALLBACK_URLS
 from src.tool_parser import parse_tool_calls, parse_final_response, parse_text_tools, parse_text_result
 from src.mcp_bridge import MCPBridge
 from src.graph_engine import GraphEngine
@@ -290,14 +289,9 @@ class StudyRunner(QThread):
         engine.build()
         mm = MemoryManager(engine)
 
-        lm = self._llm_config
-        llm = LLMClient(
-            url=lm.get("url", "http://localhost:1234/v1/chat/completions"),
-            model=lm.get("model", ""),
-            temperature=get_run_config("study_temperature", 0.5),
-            timeout=int(lm.get("timeout", 120)),
-        )
-        llm.set_fallbacks(FALLBACK_URLS)
+        from src.llm_providers import create_llm_client
+        llm = create_llm_client({"llm": self._llm_config},
+                                temperature=get_run_config("study_temperature", 0.5))
 
         cfg = load_settings()
         headless = cfg.get("browser", {}).get("headless", True)

@@ -4,23 +4,23 @@ import logging
 from pathlib import Path
 from datetime import datetime
 from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
-                                 QHBoxLayout, QSplitter, QTableWidget, QTableWidgetItem,
+                                 QHBoxLayout, QGridLayout, QSplitter, QTableWidget, QTableWidgetItem,
                                    QPushButton, QLabel, QFileDialog, QProgressBar,
-                                   QComboBox, QLineEdit, QTextBrowser,
-                                   QDialog, QDialogButtonBox, QMessageBox,
-                                   QStyleFactory, QCheckBox, QHeaderView, QDoubleSpinBox,
-                                   QTabWidget, QSizePolicy, QFrame, QLayout)
-from PySide6.QtCore import QObject, Signal, Qt, QTimer, QUrl
+                                    QComboBox, QLineEdit, QTextBrowser,
+                                    QDialog, QDialogButtonBox, QMessageBox,
+                                    QStyleFactory, QCheckBox, QHeaderView, QDoubleSpinBox,
+                                    QTabWidget, QSizePolicy, QFrame, QLayout, QGroupBox)
+from PySide6.QtCore import QObject, Signal, Qt, QTimer, QUrl, QThread, QEvent
 from PySide6.QtGui import QDesktopServices, QColor, QPainter
 
 from src.theme import Theme, TOKENS, apply_theme, detect_system_theme
+from src import llm_providers
 from src.pdf_parser.runner import PdfParserRunner
 from src.pdf_parser.review_dialog import ReviewDialog
 from src.pdf_parser.feedback import FeedbackCollector
 from src.toast import ToastManager
 from src.widget_base import paint_styled_background, setup_shadow
 from src.excel_writer import ExcelWriter
-from src.llm_client import LLMClient
 from src.mcp_agent_runner import MCPAgentRunner
 from gui.graph_assistant import AssistantToolPanel
 from gui.graph_explorer import GraphExplorerWidget
@@ -64,77 +64,386 @@ for noisy in ['websockets', 'asyncio', 'urllib3', 'httpx', 'httpcore', 'httpcore
 logger = logging.getLogger(__name__)
 
 
+class ModelsFetchWorker(QThread):
+    fetched = Signal(int, str, list, str)
+
+    def __init__(self, generation, provider_id, base_url, api_key):
+        super().__init__()
+        self._generation = generation
+        self._provider_id = provider_id
+        self._base_url = base_url
+        self._api_key = api_key
+
+    def run(self):
+        try:
+            models = llm_providers.get_models_refreshed(
+                self._base_url, self._provider_id, self._api_key
+            )
+            self.fetched.emit(self._generation, self._provider_id, models, "")
+        except Exception as e:
+            self.fetched.emit(self._generation, self._provider_id, [], str(e))
+
+
 class SettingsDialog(QDialog):
     def __init__(self, config, parent=None, theme_name=Theme.DARK):
         super().__init__(parent)
-        self.setWindowTitle("Настройки")
+        self.setWindowTitle("Настройки LLM")
         self.config = config
         self._theme_name = theme_name
         self._tokens = TOKENS.get(theme_name, TOKENS[Theme.DARK])
+        self._workers: set = set()
+        self._fetch_generation = 0
+        self._pending_models = None
+        self._expected_model = ""
         setup_shadow(self, self._tokens)
 
-        layout = QVBoxLayout(self)
-        layout.setSpacing(10)
-        layout.setContentsMargins(16, 16, 16, 16)
+        lm = config.get("llm", {}) or {}
+        root = QVBoxLayout(self)
+        root.setSpacing(10)
+        root.setContentsMargins(16, 16, 16, 16)
 
         title = QLabel("Настройки LLM")
-        layout.addWidget(title)
+        title.setProperty("heading", True)
+        root.addWidget(title)
 
-        self.fields = {}
-        lm = config.get("llm", {})
+        prov_group = QGroupBox("Провайдер")
+        prov_layout = QVBoxLayout(prov_group)
+        prov_layout.setSpacing(6)
+        self.provider_combo = QComboBox()
+        saved_pid = str(lm.get("provider") or "lmstudio")
+        for pid, prov in llm_providers.PROVIDERS.items():
+            suffix = "" if prov.requires_key else "   ·   локальный"
+            self.provider_combo.addItem(f"{prov.name}{suffix}", pid)
+        idx = self.provider_combo.findData(saved_pid)
+        self.provider_combo.setCurrentIndex(idx if idx >= 0 else 0)
+        prov_layout.addWidget(self.provider_combo)
+        self.provider_desc = QLabel()
+        self.provider_desc.setProperty("muted", True)
+        self.provider_desc.setWordWrap(True)
+        prov_layout.addWidget(self.provider_desc)
+        root.addWidget(prov_group)
 
-        def add_field(label, widget):
-            row = QHBoxLayout()
-            lbl = QLabel(label)
-            lbl.setFixedWidth(140)
-            row.addWidget(lbl)
-            row.addWidget(widget)
-            layout.addLayout(row)
+        conn_group = QGroupBox("Подключение")
+        grid = QGridLayout(conn_group)
+        grid.setVerticalSpacing(6)
+        grid.setHorizontalSpacing(8)
+        grid.setColumnStretch(1, 1)
 
-        self.fields["url"] = QLineEdit(str(lm.get("url", "http://localhost:1234/v1/chat/completions")))
-        add_field("URL:", self.fields["url"])
+        lbl_base = QLabel("Base URL:")
+        lbl_base.setMinimumWidth(90)
+        self.base_url_edit = QLineEdit()
+        self.btn_url_default = QPushButton("Сбросить")
+        self.btn_url_default.setObjectName("ghost")
+        self.btn_url_default.setToolTip("Вернуть Base URL провайдера по умолчанию")
+        grid.addWidget(lbl_base, 0, 0)
+        grid.addWidget(self.base_url_edit, 0, 1)
+        grid.addWidget(self.btn_url_default, 0, 2)
 
-        self.fields["model"] = QLineEdit(str(lm.get("model", "")))
-        add_field("Модель:", self.fields["model"])
+        lbl_key = QLabel("API-ключ:")
+        lbl_key.setMinimumWidth(90)
+        self.api_key_edit = QLineEdit()
+        self.api_key_edit.setEchoMode(QLineEdit.Password)
+        self.api_key_edit.setPlaceholderText("пусто → парсится из системы при каждом запуске")
+        self.btn_key_system = QPushButton("🔑 Из системы")
+        self.btn_key_system.setToolTip("Подставить ключ из env / opencode auth.json / hermes .env")
+        grid.addWidget(lbl_key, 1, 0)
+        grid.addWidget(self.api_key_edit, 1, 1)
+        grid.addWidget(self.btn_key_system, 1, 2)
 
-        temp = QDoubleSpinBox()
-        temp.setRange(0.0, 2.0); temp.setSingleStep(0.05)
-        temp.setValue(float(lm.get("temperature", 0.1)))
-        self.fields["temperature"] = temp
-        add_field("Температура:", temp)
+        self.key_source_label = QLabel()
+        self.key_source_label.setProperty("muted", True)
+        self.key_source_label.setWordWrap(True)
+        grid.addWidget(self.key_source_label, 2, 1, 1, 2)
 
-        timeout = QDoubleSpinBox()
-        timeout.setRange(10, 600); timeout.setSingleStep(10)
-        timeout.setValue(int(lm.get("timeout", 120)))
-        self.fields["timeout"] = timeout
-        add_field("Таймаут (с):", timeout)
+        lbl_model = QLabel("Модель:")
+        lbl_model.setMinimumWidth(90)
+        self.model_combo = QComboBox()
+        self.model_combo.setEditable(True)
+        self.model_combo.setInsertPolicy(QComboBox.NoInsert)
+        self.model_combo.setMaxVisibleItems(20)
+        self.model_combo.lineEdit().installEventFilter(self)
+        self.model_combo.view().installEventFilter(self)
+        self.btn_refresh_models = QPushButton("🔄 Обновить")
+        self.btn_refresh_models.setToolTip("Получить актуальный список моделей с сервера")
+        grid.addWidget(lbl_model, 3, 0)
+        grid.addWidget(self.model_combo, 3, 1)
+        grid.addWidget(self.btn_refresh_models, 3, 2)
+        root.addWidget(conn_group)
+
+        gen_group = QGroupBox("Параметры генерации")
+        gen_grid = QGridLayout(gen_group)
+        gen_grid.setVerticalSpacing(6)
+        gen_grid.setHorizontalSpacing(8)
+        lbl_temp = QLabel("Температура:")
+        self.temperature_spin = QDoubleSpinBox()
+        self.temperature_spin.setRange(0.0, 2.0)
+        self.temperature_spin.setSingleStep(0.05)
+        self.temperature_spin.setDecimals(2)
+        self.temperature_spin.setValue(float(lm.get("temperature", 0.3)))
+        lbl_timeout = QLabel("Таймаут (с):")
+        self.timeout_spin = QDoubleSpinBox()
+        self.timeout_spin.setRange(10, 600)
+        self.timeout_spin.setSingleStep(10)
+        self.timeout_spin.setDecimals(0)
+        self.timeout_spin.setValue(int(lm.get("timeout", 150)))
+        gen_grid.addWidget(lbl_temp, 0, 0)
+        gen_grid.addWidget(self.temperature_spin, 0, 1)
+        gen_grid.addWidget(lbl_timeout, 0, 2)
+        gen_grid.addWidget(self.timeout_spin, 0, 3)
+        gen_grid.setColumnStretch(1, 1)
+        gen_grid.setColumnStretch(3, 1)
+        root.addWidget(gen_group)
+
+        test_row = QHBoxLayout()
+        self.btn_test = QPushButton("🔌 Проверить подключение")
+        self.status_label = QLabel("")
+        self.status_label.setWordWrap(True)
+        test_row.addWidget(self.btn_test)
+        test_row.addWidget(self.status_label, 1)
+        root.addLayout(test_row)
 
         btns = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        ok_btn = btns.button(QDialogButtonBox.Ok)
+        if ok_btn:
+            ok_btn.setObjectName("primary")
         btns.accepted.connect(self.save_and_accept)
         btns.rejected.connect(self.reject)
-        layout.addWidget(btns)
+        root.addWidget(btns)
 
-        self.setFixedSize(self.sizeHint())
+        self.provider_combo.currentIndexChanged.connect(self._on_provider_changed)
+        self.btn_url_default.clicked.connect(self._reset_base_url)
+        self.btn_key_system.clicked.connect(self._use_system_key)
+        self.api_key_edit.textChanged.connect(self._refresh_key_badge)
+        self.btn_refresh_models.clicked.connect(self._start_fetch)
+        self.btn_test.clicked.connect(self._test_connection)
+
+        self.setMinimumWidth(540)
+        self._apply_provider(initial=True)
 
     def paintEvent(self, event):
         painter = QPainter(self)
         paint_styled_background(self, painter, self._tokens)
 
+    def _current_provider(self):
+        return llm_providers.get_provider(self.provider_combo.currentData())
+
+    def _saved_base_url(self, provider_id):
+        providers_cfg = ((self.config.get("llm", {}) or {}).get("providers")) or {}
+        pcfg = providers_cfg.get(provider_id) or {}
+        return (
+            (pcfg.get("base_url") or "").strip()
+            or llm_providers.resolve_base_url_override(provider_id)
+            or llm_providers.get_provider(provider_id).base_url
+        )
+
+    def _effective_api_key(self):
+        key = self.api_key_edit.text().strip()
+        if key:
+            return key
+        key, _src = llm_providers.resolve_api_key(self.provider_combo.currentData())
+        return key
+
+    def _refresh_key_badge(self):
+        if not self._current_provider().requires_key:
+            self.key_source_label.setText("Ключ не требуется — локальный сервер")
+            return
+        manual = self.api_key_edit.text().strip()
+        if manual:
+            source = llm_providers.SOURCE_OVERRIDE
+            fingerprint = llm_providers.key_fingerprint(manual)
+        else:
+            key, source = llm_providers.resolve_api_key(self.provider_combo.currentData())
+            fingerprint = llm_providers.key_fingerprint(key)
+            if not key:
+                self.key_source_label.setText(
+                    "⚠ Ключ не найден в системе (env / opencode auth.json / hermes .env)"
+                )
+                return
+        self.key_source_label.setText(f"Ключ: {source} · {fingerprint}")
+
+    def _apply_provider(self, initial=False):
+        prov = self._current_provider()
+        self.provider_desc.setText(prov.description)
+        self.base_url_edit.setText(self._saved_base_url(prov.id))
+        if not initial:
+            self.api_key_edit.clear()
+        model = prov.default_model
+        if initial:
+            configured = str((self.config.get("llm", {}) or {}).get("model") or "").strip()
+            cached = llm_providers.cached_models(prov.id) or []
+            known_ids = {m.get("id") for m in cached}
+            if configured and configured != "local-model" and (
+                not known_ids or configured in known_ids
+            ):
+                model = configured
+        self._expected_model = model
+        self.model_combo.setCurrentText(model)
+        self._refresh_key_badge()
+        cached = llm_providers.cached_models(prov.id)
+        if cached is not None and not self.model_combo.view().isVisible():
+            self._populate_models(cached, select=model)
+            self._reconcile_expected_model(cached)
+        self._start_fetch()
+
+    def _reconcile_expected_model(self, models):
+        """Модель из конфига чужому провайдеру не достаётся: если ожидаемый
+        выбор отсутствует в актуальном списке — откат к дефолту провайдера."""
+        ids = {m.get("id") for m in models}
+        current = (self.model_combo.currentData() or self.model_combo.currentText() or "").strip()
+        if current and ids and current not in ids:
+            fallback = self._expected_model or self._current_provider().default_model
+            self.model_combo.setCurrentText(fallback)
+
+    def _event_target_is_model_combo(self, obj):
+        line_edit = self.model_combo.lineEdit()
+        return obj is line_edit or obj is self.model_combo.view()
+
+    def eventFilter(self, obj, event):
+        # Клик по полю editable-комбобокса открывает попап (как у не-editable).
+        if self._event_target_is_model_combo(obj):
+            if event.type() == QEvent.MouseButtonPress:
+                if obj is self.model_combo.lineEdit() and not self.model_combo.view().isVisible():
+                    self.model_combo.showPopup()
+                    return False
+            elif event.type() == QEvent.Hide and self._pending_models is not None:
+                models, select = self._pending_models
+                self._pending_models = None
+                self._populate_models(models, select=select)
+        return super().eventFilter(obj, event)
+
+    def _on_provider_changed(self):
+        self._apply_provider(initial=False)
+
+    def _reset_base_url(self):
+        pid = self.provider_combo.currentData()
+        override = llm_providers.resolve_base_url_override(pid)
+        self.base_url_edit.setText(override or self._current_provider().base_url)
+
+    def _use_system_key(self):
+        pid = self.provider_combo.currentData()
+        llm_providers.set_manual_key(pid, "")
+        self.api_key_edit.clear()
+        key, src = llm_providers.resolve_api_key(pid)
+        if not key:
+            self._set_status("Ключ не найден ни в env, ни в opencode auth.json, ни в hermes .env", danger=True)
+            self._refresh_key_badge()
+            return
+        self.api_key_edit.setText(key)
+        self._set_status(f"Ключ подставлен из системы ({src})", success=True)
+        self._refresh_key_badge()
+
+    def _populate_models(self, models, select=""):
+        # Репопуляция при открытом попапе заставляет Qt его закрыть — откладываем.
+        if self.model_combo.view().isVisible():
+            self._pending_models = ([dict(m) for m in models], select)
+            return
+        current = select or (self.model_combo.currentData() or self.model_combo.currentText() or "").strip()
+        self.model_combo.clear()
+        for m in models:
+            mid = m.get("id", "")
+            name = m.get("name") or ""
+            label = mid if not name else f"{mid}   ·   {name}"
+            self.model_combo.addItem(label, mid)
+        if current:
+            i = self.model_combo.findData(current)
+            if i >= 0:
+                self.model_combo.setCurrentIndex(i)
+            else:
+                self.model_combo.setCurrentText(current)
+
+    def _start_fetch(self):
+        """Живой запрос /models при каждом открытии/переключении (как в opencode/hermes).
+
+        Кэш используется только для мгновенной подстановки до ответа и как
+        fallback при ошибке сети. Ответы устаревших поколений отбрасываются.
+        """
+        pid = self.provider_combo.currentData()
+        base = self.base_url_edit.text().strip()
+        if not base:
+            self._set_status("Base URL не задан", danger=True)
+            return
+        self._fetch_generation += 1
+        self.btn_refresh_models.setEnabled(False)
+        self.btn_test.setEnabled(False)
+        self._set_status("Обновление списка моделей…")
+        worker = ModelsFetchWorker(
+            self._fetch_generation, pid, base, self._effective_api_key()
+        )
+        worker.fetched.connect(self._on_models_fetched)
+        worker.finished.connect(lambda w=worker: self._discard_worker(w))
+        self._workers.add(worker)
+        worker.start()
+
+    def _discard_worker(self, worker):
+        self._workers.discard(worker)
+        worker.deleteLater()
+
+    def _test_connection(self):
+        self._start_fetch()
+
+    def _on_models_fetched(self, generation, provider_id, models, error):
+        if generation != self._fetch_generation or provider_id != self.provider_combo.currentData():
+            return
+        self.btn_refresh_models.setEnabled(True)
+        self.btn_test.setEnabled(True)
+        if error:
+            cached = llm_providers.cached_models(provider_id)
+            if cached:
+                self._populate_models(cached)
+                self._reconcile_expected_model(cached)
+                self._set_status(f"Сервер недоступен ({error}); показан сохранённый список", danger=True)
+            else:
+                self._set_status(f"Ошибка: {error}", danger=True)
+            return
+        self._populate_models(models)
+        self._reconcile_expected_model(models)
+        count = self.model_combo.count()
+        self._set_status(f"Подключение OK · {count} моделей", success=True)
+
+    def _set_status(self, text, success=False, danger=False):
+        t = self._tokens
+        color = t["success"] if success else t["danger"] if danger else t["text-muted"]
+        self.status_label.setText(text)
+        self.status_label.setStyleSheet(f"color:{color};")
+
     def save_and_accept(self):
-        settings_path = Path(__file__).parent / "config" / "settings.yaml"
-        try:
-            with open(settings_path, "r", encoding="utf-8") as f:
-                cfg = yaml.safe_load(f) or {}
-        except Exception:
-            cfg = {}
-        cfg.setdefault("llm", {})
-        cfg["llm"]["url"] = self.fields["url"].text().strip() or "http://localhost:1234/v1/chat/completions"
-        cfg["llm"]["model"] = self.fields["model"].text().strip()
-        cfg["llm"]["temperature"] = self.fields["temperature"].value()
-        cfg["llm"]["timeout"] = int(self.fields["timeout"].value())
-        with open(settings_path, "w", encoding="utf-8") as f:
-            yaml.dump(cfg, f, allow_unicode=True, default_flow_style=False)
+        prov = self._current_provider()
+        model_id = (self.model_combo.currentData() or self.model_combo.currentText() or "").strip()
+        if not model_id:
+            self._set_status("Укажите модель", danger=True)
+            return
+        base_url = self.base_url_edit.text().strip() or prov.base_url
+        typed_key = self.api_key_edit.text().strip()
+        system_key, _src = llm_providers.resolve_api_key(prov)
+        # Ручной ключ фиксируем только если он реально отличается от системного,
+        # иначе диагностика источника ключа вводит в заблуждение.
+        llm_providers.set_manual_key(
+            prov.id, typed_key if typed_key and typed_key != system_key else ""
+        )
+        from src.config_loader import save_llm_settings
+        save_llm_settings(
+            provider=prov.id,
+            model=model_id,
+            temperature=float(self.temperature_spin.value()),
+            timeout=int(self.timeout_spin.value()),
+            base_urls={prov.id: base_url},
+        )
+        logger.info("LLM settings saved: provider=%s model=%s base=%s", prov.id, model_id, base_url)
         self.accept()
+
+    def _wait_workers(self):
+        for worker in list(self._workers):
+            if worker.isRunning():
+                worker.wait(5000)
+        self._workers.clear()
+
+    def reject(self):
+        self._wait_workers()
+        super().reject()
+
+    def closeEvent(self, event):
+        self._wait_workers()
+        super().closeEvent(event)
 
 
 class MainWindow(QMainWindow):
@@ -425,6 +734,7 @@ class MainWindow(QMainWindow):
         dlg = SettingsDialog(self.config, self, theme_name=self._current_theme)
         dlg.exec()
         self.config = self._load_config()
+        self.assistant_panel.llm_config = self.config.get("llm", {})
 
     def open_dependency_manager(self):
         from src.dependency_manager.dialog import DependencyManagerDialog
@@ -618,15 +928,7 @@ class MainWindow(QMainWindow):
         self._spinner.tick()
         self._spinner_timer.start()
 
-        lm = self.config.get("llm", {})
-        llm_client = LLMClient(
-            url=lm.get("url", "http://localhost:1234/v1/chat/completions"),
-            model=lm.get("model", ""),
-            temperature=float(lm.get("temperature", 0.3)),
-            timeout=int(lm.get("timeout", 120)),
-        )
-        from src.llm_client import FALLBACK_URLS
-        llm_client.set_fallbacks(FALLBACK_URLS)
+        llm_client = llm_providers.create_llm_client(self.config)
 
         self._runner = MCPAgentRunner(
             specs=self.excel_writer.get_specs(),
@@ -794,15 +1096,7 @@ class MainWindow(QMainWindow):
         self._spinner_timer.start()
         self._spinner.setFixedSize(20, 20)
 
-        lm = self.config.get("llm", {})
-        llm_client = LLMClient(
-            url=lm.get("url", "http://localhost:1234/v1/chat/completions"),
-            model=lm.get("model", ""),
-            temperature=0.1,
-            timeout=int(lm.get("timeout", 120)),
-        )
-        from src.llm_client import FALLBACK_URLS
-        llm_client.set_fallbacks(FALLBACK_URLS)
+        llm_client = llm_providers.create_llm_client(self.config, temperature=0.1)
 
         self._pdf_runner = PdfParserRunner(
             pdf_path=path,

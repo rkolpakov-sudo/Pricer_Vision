@@ -120,7 +120,8 @@ C:\Projects\Pricer_Vision\
 │   ├── graph_engine.py          # SQLite + in-memory (inc кэш, unknown excluded, TTL hints, pragmas)
 │   ├── _labels.py
 │   ├── learning_loop.py         # LearningLoop — автообучение из результатов прогона (Фаза 4)
-│   ├── llm_client.py            # HTTP клиент для LM Studio (+ retry с backoff из llm.retry, per-call temperature/max_tokens)
+│   ├── llm_client.py            # HTTP клиент для LM Studio (+ retry с backoff из llm.retry, per-call temperature/max_tokens, Bearer-авторизация)
+│   ├── llm_providers.py         # Провайдеры LLM: opencode/routerai/локальные; креденшиалы парсятся из системы при каждом запуске; /models + кэш
 │   ├── mcp_agent_runner.py      # QThread обёртка (+ AuditLogger, TaskScheduler, SemanticCache, LearningLoop)
 │   ├── mcp_bridge.py            # MCP клиент (мультибэкенд camoufox/playwright/nodriver, ref→target, mcp_circuit)
 │   ├── memory_manager.py        # CRUD графа (+ intent, dedup, SOLD_AT, HintManager, ApproachVersioning)
@@ -226,6 +227,29 @@ C:\Projects\Pricer_Vision\
 - Высота 21px (было 16)
 - Gradient chunk (solid → 87% opacity → solid)
 - Border с `t["border"]`, border-radius 6px, inset margin 1px
+
+## LLM-провайдеры и креденшиалы
+
+`src/llm_providers.py` — реестр провайдеров и динамическая конфигурация (Qt-free, тестируемо):
+
+| Провайдер | Base URL | Источник ключа |
+|---|---|---|
+| OpenCode Zen | `https://opencode.ai/zen/v1` | `OPENCODE_ZEN_API_KEY` / `~/.local/share/opencode/auth.json` / `~/.hermes/.env` |
+| RouterAI | `https://routerai.ru/api/v1` | `ROUTERAI_API_KEY` / opencode auth.json / hermes .env |
+| LM Studio / Ollama / llama.cpp | localhost | не требуется |
+
+Принципы:
+- **Креденшиалы парсятся при каждом запуске из системы** (env → opencode auth.json → hermes .env).
+  В коде/конфиге/git секретов нет; перенос проекта на другую систему подхватывает новые ключи.
+  В логах — только отпечаток (`sk-L_8W…pJo`).
+- Списки моделей: `GET <base_url>/models`, кэш памяти + `data/llm_providers_cache.json` (TTL 6 ч);
+  в диалоге настроек комбобокс моделей заполняется живым списком.
+- `baseURL` можно переопределить в `~/.config/opencode/opencode.jsonc`
+  (`provider.<id>.options.baseURL`) или в settings.yaml (`llm.providers.<id>.base_url`).
+- Активный провайдер/модель: `settings.yaml → llm.provider/model`; выбор через «Настройки»
+  (комбобокс провайдера, комбобокс моделей, проверка подключения через QThread-воркер).
+- Fallback на локальные серверы включается только для локальных провайдеров;
+  ручной ключ вводится на сессию и не персистится.
 
 ## PDF Parser
 

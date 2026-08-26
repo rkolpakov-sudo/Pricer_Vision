@@ -33,6 +33,36 @@ def get_llm_retry_config(key: str, default):
     cfg = load_settings()
     return cfg.get("llm", {}).get("retry", {}).get(key, default)
 
+
+def get_llm_config() -> dict:
+    cfg = load_settings()
+    return cfg.get("llm", {}) or {}
+
+
+def save_llm_settings(provider: str, model: str, temperature: float, timeout: int,
+                      base_urls: dict | None = None):
+    """Сохраняет выбор провайдера/модели. API-ключи НЕ персистятся — они
+    каждый запуск парсятся из системы (см. src/llm_providers.py)."""
+    cfg = load_settings()
+    llm = cfg.setdefault("llm", {})
+    llm["provider"] = provider
+    llm["model"] = model
+    llm["temperature"] = float(temperature)
+    llm["timeout"] = int(timeout)
+    providers = llm.setdefault("providers", {})
+    for pid, base_url in (base_urls or {}).items():
+        if not pid or not base_url:
+            continue
+        entry = providers.get(pid) or {}
+        if entry.get("base_url") != base_url:
+            entry["base_url"] = base_url
+            providers[pid] = entry
+    path = Path(os.path.dirname(os.path.abspath(__file__))).parent / "config" / "settings.yaml"
+    with open(path, "w", encoding="utf-8") as f:
+        yaml.dump(cfg, f, default_flow_style=False, allow_unicode=True)
+    global _SETTINGS_CACHE
+    _SETTINGS_CACHE = cfg
+
 def get_antidetect_config(key: str, default):
     cfg = load_settings()
     return cfg.get("antidetect", {}).get(key, default)
