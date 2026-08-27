@@ -5,7 +5,7 @@
 ## Команды
 
 - **Запуск приложения:** `python main.py`
-- **Тесты:** `python -m pytest -q` (ожидается полный зелёный набор: **960 passed, 2 skipped**; async-тесты mcp_bridge/pdf_parser могут падать, если в `venv` нет `pytest-asyncio`).
+- **Тесты:** `python -m pytest -q` (ожидается полный зелёный набор: **996 passed, 2 skipped**; async-тесты mcp_bridge/pdf_parser могут падать, если в `venv` нет `pytest-asyncio`).
 - **Проверка синтаксиса:** `python -m py_compile <files>` (либо запуск pytest).
 - Окружение: `venv/` (единый, Python 3.13; MinerU 3.4 установлен в нём же).
 
@@ -51,6 +51,7 @@
   - `audit_logger.py` — Audit-лог JSONL в `data/audit/` (Фаза 1).
   - `dependency_manager/` — инструмент «Зависимости» (Qt-free логика в `manager.py`/`npm.py`/`pypi.py`, UI в `dialog.py`). Проверка версий pip+npm и ревизии chromium (`BrowserInfo`) для `@playwright/mcp`.
   - `pdf_parser/` — парсер PDF (MinerU → fallback structurer, LLM отключён).
+  - `radiator_section_pricer.py` — расчёт цены радиатора по секциям при ненахождении точного количества (ТОЛЬКО для радиаторов, ТОЛЬКО после полного перебора сайтов, на основе confirmed_prices).
 - `gui/` — `graph_assistant.py` (панели: HelpPage, StudyPage, CRUD), `graph_explorer.py` (визуализация графа), `agent_monitor.py` (мониторинг), `metrics_panel.py`, `spinner_widget.py`.
 - `mcp_servers/` — `browser_server.py` (MCP-сервер бэкендов camoufox/nodriver, используется), `pricer_server.py` (**не используется**).
 - `config/` — YAML-конфиги (`settings.yaml` → `browser.backend/backends`, `run.reuse_price/use_approaches/use_site_ranking`), `matching_rules.yaml`, `stealth.js` (антидетект), `playwright-mcp.json`.
