@@ -742,6 +742,19 @@ async def process_row(
                             logger.info("🧹 Поле поиска очищено перед вводом (JS)")
                         except Exception:
                             logger.debug("Field clear failed (ignored)")
+                # Совет перед кликом по карточке: если в названии элемента явно указана
+                # ДРУГАЯ модель, чем в спецификации — не открывай «для проверки».
+                # (система-советник: LLM решает, но предупреждение жёсткое)
+                if tool_name in ("browser_click", "click"):
+                    click_hint = _model_mismatch_hint(tool_args, spec_text)
+                    if click_hint:
+                        logger.warning("⚠️ %s", click_hint)
+                        messages.append({
+                            "role": "tool",
+                            "tool_call_id": tc.get("id", ""),
+                            "content": click_hint,
+                        })
+                        continue
                 result = await mcp_bridge.call_tool(tool_name, tool_args)
 
             if tool_name not in GRAPH_TOOL_NAMES:
@@ -1711,6 +1724,39 @@ def _price_is_relevant(spec_text: str, spec_meta: dict | None, tool_content: str
     toks = [t for t in _product_tokens(spec_text)
             if t not in _OPTIONAL_SET and t not in _GENERIC_PRODUCT_WORDS and len(t) >= 4]
     return any(t in low for t in toks)
+
+
+def _model_mismatch_hint(tool_args: dict, spec_text: str) -> str | None:
+    """Совет перед кликом по карточке: если название элемента содержит модель,
+    отличную от модели спецификации — не открывай «для проверки».
+
+    Регрессия 27.08: агент открыл карточку «ЦМО МС-40» (полка для шкафа) как
+    «лучший аналог» МС-140. Система-советник: НЕ блокирует, но жёстко предупреждает,
+    что модель не совпадает — LLM решает, но видит риск.
+    """
+    spec_models = model_designators(spec_text)
+    if not spec_models:
+        return None
+    # Название элемента/цели клика — источник текста карточки из выдачи.
+    elem = str(tool_args.get("element") or tool_args.get("target") or tool_args.get("text") or "").strip()
+    if not elem:
+        return None
+    elem_models = model_designators(elem)
+    if not elem_models:
+        return None
+    foreign = elem_models - spec_models
+    if not foreign:
+        return None
+    # Если модели пересекаются (МС-140 и МС-140х500) — допустимо; отсекаем только
+    # ПОЛНОСТЬЮ чужие (МС-40, LEMAX VC).
+    if elem_models & spec_models:
+        return None
+    return (
+        f"⚠️ ВНИМАНИЕ: модель «{', '.join(sorted(elem_models))}» в названии элемента "
+        f"НЕ совпадает с моделью спецификации «{', '.join(sorted(spec_models))}». "
+        "Это, вероятно, ДРУГОЙ товар. НЕ открывай карточку «для проверки» — это "
+        "потерянный раунд. Продолжай поиск в выдаче или переключись на другой сайт."
+    )
 
 
 def _stuck_target(tool_name: str, tool_args: dict) -> str:

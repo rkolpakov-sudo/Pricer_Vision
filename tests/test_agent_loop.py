@@ -7,7 +7,7 @@ from src.agent_loop import (
     _apply_approach, _is_standard_reference,
     _stuck_target, _is_product_card_url,
     _extract_price_candidate, _build_diagnostic_message,
-    _price_is_relevant, _clear_field_js,
+    _price_is_relevant, _clear_field_js, _model_mismatch_hint,
     _is_family_page, _is_empty_search_result,
     _pick_best_fallback, _fallback_result,
     _mismatch_warning_content,
@@ -329,6 +329,35 @@ class TestClearFieldJs:
     def test_empty_target_returns_none(self):
         assert _clear_field_js({"target": ""}) is None
         assert _clear_field_js({}) is None
+
+
+class TestModelMismatchHint:
+    """Совет перед кликом по карточке с чужой моделью (регрессия: «ЦМО МС-40»=полка)."""
+
+    SPEC = "Чугунный секционный радиатор с боковым подключением, тип МС-140 Мx500 МС-140 Мх500-0,9-2"
+
+    def test_foreign_shelf_card_warns(self):
+        hint = _model_mismatch_hint({"element": "Полка для шкафа ЦМО МС-40"}, self.SPEC)
+        assert hint is not None
+        assert "НЕ совпадает" in hint
+        assert "НЕ открывай карточку" in hint
+
+    def test_foreign_lemax_warns(self):
+        hint = _model_mismatch_hint({"element": "Радиатор панельный ЛЕМАКС Premium VC 22х400х1400"}, self.SPEC)
+        assert hint is not None
+
+    def test_same_model_no_warning(self):
+        assert _model_mismatch_hint({"element": "Радиатор чугунный МС-140х500 4 секции"}, self.SPEC) is None
+
+    def test_no_model_in_elem_no_warning(self):
+        assert _model_mismatch_hint({"element": "Радиатор панельный"}, self.SPEC) is None
+
+    def test_empty_elem_no_warning(self):
+        assert _model_mismatch_hint({"element": ""}, self.SPEC) is None
+        assert _model_mismatch_hint({}, self.SPEC) is None
+
+    def test_spec_without_model_no_warning(self):
+        assert _model_mismatch_hint({"element": "ЦМО МС-40"}, "Клей Energopro") is None
 
 
 class TestFormatStepsPortable:
