@@ -615,7 +615,7 @@ def _product_matches_core(spec_text: str, found_name: str, check_brand: bool = T
     # Модель/тип — дифференциатор на путях РЕЮЗА/ГИДА (strict_sizes/ignore_sizes):
     # «LEMAX Premium C20 500x600» ≠ «LEMAX Premium C10 500x600». Сравнение на
     # сыром тексте (h1 «C 10х500х600» токенизатор не разбивает на «c10»).
-    if strict_sizes or ignore_sizes:
+    if strict_sizes:
         spec_models = model_designators(spec_text)
         if spec_models and model_designators(found_name) != spec_models:
             return False

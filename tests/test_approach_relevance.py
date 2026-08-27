@@ -502,7 +502,9 @@ class TestPhase0ModelProtection:
     def test_reuse_blocks_different_model(self):
         spec_c20 = self.SPEC_C10.replace('C10', 'C20')
         assert product_name_matches(spec_c20, self.SPEC_C10, strict_sizes=True) is False
-        assert product_name_matches(spec_c20, self.SPEC_C10, ignore_sizes=True) is False
+        # ignore_sizes — семейный гид: разные модели того же типа (C10/C20)
+        # показываются как «куда идти», но не для реюза (строгий путь блокирует).
+        assert product_name_matches(spec_c20, self.SPEC_C10, ignore_sizes=True) is True
 
     def test_reuse_allows_same_model(self):
         assert product_name_matches(self.SPEC_C10, self.SPEC_C10, strict_sizes=True) is True
