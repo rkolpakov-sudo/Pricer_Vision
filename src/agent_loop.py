@@ -866,7 +866,7 @@ async def process_row(
             price_hint = None
             if tool_name not in GRAPH_TOOL_NAMES:
                 price_hint = _extract_price_candidate(tool_content)
-                if price_hint:
+                if price_hint and _price_is_relevant(spec_text, spec_meta, tool_content):
                     price_candidate_seen = True
                     empty_probe_streak.clear()
                     facts.record_price_candidate()
@@ -1655,6 +1655,43 @@ def _extract_price_candidate(text: str) -> str | None:
         return None
     m = _PRICE_RE.search(text)
     return m.group(0)[:30] if m else None
+
+
+_GENERIC_PRODUCT_WORDS = {
+    "радиатор", "кран", "клапан", "вентиль", "задвижка", "труба", "трубка", "кабель",
+    "насос", "фитинг", "отвод", "тройник", "переход", "муфта", "устройство", "аппарат",
+    "смеситель", "батарея", "изделие", "элемент", "деталь", "арматура",
+}
+
+
+def _price_is_relevant(spec_text: str, spec_meta: dict | None, tool_content: str) -> bool:
+    """Цена-кандидат релевантна спецификации, если рядом с ней в контенте есть
+    ключевой токен товара: тип/обозначение или артикул из spec_meta, либо специфичное
+    значимое слово спецификации (МС-140, чугунный, гигиенический и т.п.).
+
+    Защита от ложного срабатывания: цена в ВЫДАЧЕ поиска от чужого товара
+    (например, электрический щиток 3 555 ₽ рядом с запросом «МС-140») не должна
+    считаться кандидатом — иначе гейт блокирует уход с сайта, где точного товара
+    нет, и агент в отчаянии сохраняет чужой товар (регрессия 27.08).
+
+    Родовые слова («радиатор», «кран») НЕ считаются достаточными: они есть у любого
+    товара категории, и цена соседнего радиатора (LEMAX VC) не должна быть принята
+    за кандидата МС-140.
+    """
+    from src.approach_relevance import is_standard_reference
+    low = (tool_content or "").lower()
+    if not low:
+        return False
+    meta = spec_meta or {}
+    for key in ("spec", "article"):
+        val = str(meta.get(key) or "").strip()
+        if val and not is_standard_reference(val) and val.lower() in low:
+            return True
+    # Специфичные значимые слова спецификации (без родовых наименований).
+    from src.approach_relevance import _product_tokens, _OPTIONAL_SET
+    toks = [t for t in _product_tokens(spec_text)
+            if t not in _OPTIONAL_SET and t not in _GENERIC_PRODUCT_WORDS and len(t) >= 4]
+    return any(t in low for t in toks)
 
 
 def _stuck_target(tool_name: str, tool_args: dict) -> str:

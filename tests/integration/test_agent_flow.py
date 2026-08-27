@@ -243,7 +243,7 @@ class TestAgentFlow:
                 llm_tool_call("browser_navigate", {"url": "https://other-site.ru"}),
                 llm_final(4415.59),
             ],
-            evaluate_result='4 415,59 ₽',
+            evaluate_result='МС-140 Мх500 чугунный радиатор 4 415,59 ₽',
         )
         result = await process_row(
             spec_text="Чугунный радиатор МС-140",

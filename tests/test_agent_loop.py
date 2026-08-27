@@ -7,6 +7,7 @@ from src.agent_loop import (
     _apply_approach, _is_standard_reference,
     _stuck_target, _is_product_card_url,
     _extract_price_candidate, _build_diagnostic_message,
+    _price_is_relevant,
     _is_family_page, _is_empty_search_result,
     _pick_best_fallback, _fallback_result,
     _mismatch_warning_content,
@@ -797,3 +798,38 @@ class TestPhase3Context:
         assert 'после запятой' not in SYSTEM_PROMPT
         assert 'размер/тип/Ду — НИКОГДА' in SYSTEM_PROMPT
         assert 'LEMAX Premium C10 500x600' in SYSTEM_PROMPT
+
+
+class TestPriceIsRelevant:
+    """Цена-кандидат релевантна спецификации: не берём цену чужого товара из выдачи.
+
+    Регрессия 27.08: цена электрического щитка (3 555 Р) в выдаче поиска «МС-140»
+    считалась кандидатом → гейт блокировал уход с satro-paladin, где МС-140 нет,
+    и агент вынужденно сохранял чужой товар (LEMAX VC) как «цену»."""
+
+    SPEC = 'Чугунный секционный радиатор с боковым подключением, тип МС-140 Мх500 МС-140 Мх500-0,9-2'
+    META = {'spec': 'МС-140 Мх500-0,9-2'}
+
+    def test_relevant_on_mc140_card(self):
+        content = 'МС-140 Мх500 чугунный радиатор 4 415,59 Р'
+        assert _price_is_relevant(self.SPEC, self.META, content) is True
+
+    def test_irrelevant_on_foreign_lemax_card(self):
+        content = 'Радиатор панельный ЛЕМАКС Premium VC 22х400х1400 14 864,90 Р'
+        assert _price_is_relevant(self.SPEC, self.META, content) is False
+
+    def test_irrelevant_on_electrical_panel_in_search(self):
+        content = 'Щит TDM 3 555 Р'
+        assert _price_is_relevant(self.SPEC, self.META, content) is False
+
+    def test_relevant_without_meta_falls_back_to_specific_tokens(self):
+        content = 'МС-140 Мх500 чугунный радиатор 4 415,59 Р'
+        assert _price_is_relevant(self.SPEC, {}, content) is True
+
+    def test_generic_words_alone_not_enough(self):
+        # «радиатор» — родовое слово, есть у любого радиатора; без специфики — не кандидат
+        content = 'Радиатор панельный ЛЕМАКС 14 864,90 Р'
+        assert _price_is_relevant(self.SPEC, {}, content) is False
+
+    def test_empty_content(self):
+        assert _price_is_relevant(self.SPEC, self.META, '') is False
