@@ -218,7 +218,7 @@ def _size_key(text: str) -> set | None:
     Если размеры присутствуют в обоих сравниваемых наименованиях, но различаются —
     это разные типоразмеры («Кран шаровой Ду15» ≠ «Кран шаровой Ду20»).
     """
-    low = (text or "").lower()
+    low = _norm_dim_sep(text or "").lower()
     sizes = set()
     for m in _DU_RE.finditer(low):
         sizes.add(f"ду{m.group(1)}")
@@ -410,6 +410,26 @@ _MODEL_PREFIX_EXCLUDE = frozenset({
     "атм", "тмакс", "макс", "мин", "max", "min", "град",
 })
 
+# Кириллическая «х» и знак «×» в позиции после буквы/цифры и перед цифрой —
+# разделитель размера/типа («500х600», «Мх500», «C10х500»). Нормализуем к латинской
+# «x», чтобы «Мх500» и «Мx500», «140х500» и «140x500» считались одним и тем же
+# (регрессия: rule-8/гид не находили МС-140, т.к. model_designators давал
+# кириллический «мх500» в spec и латинский «мx500» в карточке).
+# «х» в начале слова («характеристика», «хомутик») не затрагивается — перед ним нет
+# word-символа.
+_DIM_SEP_RE = re.compile(r"(?<=\w)[х×](?=\d)")
+
+
+def _norm_dim_sep(text: str) -> str:
+    """Заменяет «х»/«×» на «x» в позиции «…х<цифра» («500х600»→«500x600»,
+    «Мх500»→«Мx500»).
+
+    Слова («характеристика», «хомутик») не затрагиваются — перед «х» нет буквы/цифры.
+    """
+    if not text:
+        return text
+    return _DIM_SEP_RE.sub("x", text)
+
 
 def model_designators(text: str) -> set[str]:
     """Коды моделей/типов товара (дифференциаторы реюза): «C10», «C 10»,
@@ -419,7 +439,7 @@ def model_designators(text: str) -> set[str]:
     «10х500х600» БЕЗ токена «c10» (тип слит с размером) — по токенам модель
     не увидеть. Исключаются префиксы-параметры/диаметры и разделитель «х».
     """
-    low = (text or "").lower()
+    low = _norm_dim_sep(text or "").lower()
     if not low:
         return set()
     excluded = _MODEL_PREFIX_EXCLUDE | _PARAM_SET | _STOPWORDS_SET
@@ -595,7 +615,11 @@ def _product_matches_core(spec_text: str, found_name: str, check_brand: bool = T
     if ignore_sizes:
         pass
     elif strict_sizes:
-        if (spec_sizes or found_sizes) and spec_sizes != found_sizes:
+        # Строгий режим отклоняет, когда размер ИЗВЕСТЕН в спецификации, но не
+        # совпадает с найденным (или в найденном отсутствует). Если в спецификации
+        # размер не извлечён (None) — нечего проверять, товар может совпадать
+        # (МС-140: «Мх500» не даёт пару размеров, а в карточке «140х500»).
+        if spec_sizes is not None and spec_sizes != found_sizes:
             return False
     elif spec_sizes and found_sizes and spec_sizes != found_sizes:
         return False

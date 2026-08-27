@@ -318,10 +318,12 @@ class TestSizeKeySlashDimensions:
 
 
 class TestStrictSizes:
-    """strict_sizes=True: расхождение/отсутствие размеров с одной стороны — отказ.
+    """strict_sizes=True: расхождение размеров с известной стороны — отказ.
 
-    Для авто-реюза (rule 8, semantic cache): историческая запись без размера
-    в наименовании не должна переиспользоваться для позиции с размером.
+    Для авто-реюза (rule 8, semantic cache): если в спецификации размер ИЗВЕСТЕН
+    (Ду15) — найденный товар без размера или с другим размером отклоняется.
+    Если в спецификации размер не извлекается (МС-140: «Мх500» без пары) —
+    нечего проверять, товар может совпадать («МС-140х500» в карточке).
     """
 
     def test_one_sided_size_strict_rejects(self):
@@ -329,6 +331,31 @@ class TestStrictSizes:
         query = stored + " DN15"
         assert product_name_matches(query, stored) is True
         assert product_name_matches(query, stored, strict_sizes=True) is False
+
+    def test_spec_unknown_size_with_found_size_passes(self):
+        """МС-140: spec «Мх500» не даёт пару размеров (None), в карточке «140х500» —
+        товар тот же, strict НЕ отклоняет (нечего проверять)."""
+        spec = "Чугунный секционный радиатор с боковым подключением, тип МС-140 Мx500 МС-140 Мх500-0,9-2"
+        stored = "Чугунный секционный радиатор с боковым подключением, тип МС-140 Мx500 (Радиатор секционный чугунный МС-140х500)"
+        assert _size_key(spec) is None
+        assert _size_key(stored) == {"140x500"}
+        assert product_name_matches(spec, stored, strict_sizes=True) is True
+
+    def test_cyrillic_x_normalized(self):
+        """«Мх500» (кирилл.) и «Мx500» (лат.) — одна модель (нормализация х/x)."""
+        spec = "Чугунный секционный радиатор, тип МС-140 Мх500 МС-140 Мх500-0,9-2"
+        stored = "Чугунный секционный радиатор, тип МС-140 Мx500"
+        assert model_designators(spec) == model_designators(stored) == {"мс140", "мx500"}
+
+    def test_homoglyph_size_equal(self):
+        """«140х500» (кир.) и «140x500» (лат.) — одинаковый размер."""
+        assert _size_key("МС-140х500") == _size_key("МС-140x500") == {"140x500"}
+
+    def test_words_not_affected(self):
+        """Нормализация не трогает «х» в начале слова."""
+        from src.approach_relevance import _norm_dim_sep
+        assert _norm_dim_sep("характеристика 500х600") == "характеристика 500x600"
+        assert _norm_dim_sep("хомутик") == "хомутик"
 
     def test_both_empty_sizes_pass_strict(self):
         assert product_name_matches(
