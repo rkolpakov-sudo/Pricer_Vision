@@ -43,7 +43,7 @@
 - `classify_product_type()` возвращает "unknown" как fallback (существует только как значение, не как запись в БД)
 
 ### agent_loop.py
-- `process_row()` — основной цикл, `MAX_ROUNDS=50` (из settings.yaml), `MAX_ROUNDS_PER_SITE=15`
+- `process_row()` — основной цикл, `MAX_ROUNDS=40` (из settings.yaml), `MAX_ROUNDS_PER_SITE=15`
 - Tools = Playwright MCP tools (23) + graph tools (локальные, 7: get_approaches, save_approach, get_confirmed_prices, save_confirmed_price, search_sites, save_discovered_site, get_hints)
 - Tool routing: три ветки — `GRAPH_TOOL_NAMES → _execute_graph_tool()`, `browser_navigate → MCP + навигация`, `else → MCP`
 - Нативные tool_calls → execute → результат в messages → следующий LLM вызов
@@ -80,18 +80,25 @@
 ### Файловая структура
 ```
 C:\Projects\Pricer_Vision\
-├── main.py                      # GUI
+├── main.py                      # GUI (панель «Режим поиска», тулбар, сплиттер)
 ├── SPEC_V31.md                  # Спецификация v31.0
 ├── SPEC_V32.md                  # Спецификация v2.0 (пост-рефакторинг, фазы 1–7)
 ├── readme.md                    # Правила работы
 ├── state.md                     # Лог действий
+├── docs/
+│   ├── PLAN_SEARCH_MODE.md      # План интеграции «Режим поиска» (3 флага + рейтинг сайтов)
+│   ├── PLAN_AGENT_DEGRADATION.md      # План: деградация агента 26.08, фазы 1–5 (память, MCP, контекст)
+│   └── PLAN_AGENT_DEGRADATION_FIX2.md # План: реюз цен, деградация запроса, защита моделей C10/C20
 ├── config/
 │   ├── categories_and_sites.yaml # Seed данные + hints + русские имена
 │   ├── settings.yaml             # Все runtime-константы
+│   ├── matching_rules.yaml       # Правила сопоставления наименований (Фаза 8)
 │   ├── stealth.js                # Антидетект (12 патчей)
 │   └── playwright-mcp.json       # Playwright MCP конфиг
 ├── data/
 │   ├── pricer.db                # SQLite БД графа
+│   ├── semantic_cache.json      # Jaccard-кэш похожих товаров (Фаза 2)
+│   ├── site_profiles.json       # Профили сайтов (тип|бренд) от LearningLoop
 │   └── output/                  # Excel результаты
 ├── gui/
 │   ├── agent_monitor.py        # Real-time мониторинг агента (вкладка «Мониторинг»)
@@ -112,26 +119,29 @@ C:\Projects\Pricer_Vision\
 │   │   ├── feedback.py          #   Таблица pdf_corrections в pricer.db
 │   │   ├── review_dialog.py     #   QTableWidget редактирования (колонка Уверенность)
 │   │   └── runner.py            #   QThread оркестратор (OCR fallback + SmartReview)
-│   ├── agent_loop.py            # Основной цикл (3-веточный routing, format_steps, negative feedback, _query_llm, StuckDetector, температуры фаз, контекстный бюджет)
+│   ├── agent_loop.py            # Основной цикл (3-веточный routing, format_steps, negative feedback, _query_llm, StuckDetector, температуры фаз, контекстный бюджет, idle-таймаут, флаги режима поиска)
 │   ├── adaptive_limits.py       # AdaptiveRoundManager — динамические лимиты раундов per-site (Фаза 2)
+│   ├── approach_relevance.py    # Матчинг наименований + правила сопоставления (Фаза 8)
 │   ├── audit_logger.py          # Audit-лог JSONL (data/audit/session_*.jsonl)
-│   ├── config_loader.py         # Загрузчик config/settings.yaml
-│   ├── excel_writer.py
+│   ├── config_loader.py         # Загрузчик config/settings.yaml (+ get_run_flags/save_run_flags)
+│   ├── excel_writer.py          # SpecItem (row/spec/article) + сборка spec_text из всех колонок
 │   ├── graph_engine.py          # SQLite + in-memory (inc кэш, unknown excluded, TTL hints, pragmas)
 │   ├── _labels.py
-│   ├── learning_loop.py         # LearningLoop — автообучение из результатов прогона (Фаза 4)
+│   ├── learning_loop.py         # LearningLoop — автообучение; профили сайтов (тип|бренд), rank_sites()
 │   ├── llm_client.py            # HTTP клиент для LM Studio (+ retry с backoff из llm.retry, per-call temperature/max_tokens, Bearer-авторизация)
-│   ├── llm_providers.py         # Провайдеры LLM: opencode/routerai/локальные; креденшиалы парсятся из системы при каждом запуске; /models + кэш
-│   ├── mcp_agent_runner.py      # QThread обёртка (+ AuditLogger, TaskScheduler, SemanticCache, LearningLoop)
+│   ├── llm_providers.py         # Провайдеры LLM: opencode/routerai/локальные; креденшиалы из системы; /models + кэш; model_id_from_combo_text
+│   ├── mcp_agent_runner.py      # QThread обёртка (+ AuditLogger, TaskScheduler, SemanticCache, LearningLoop, SiteBlacklist, idle-таймаут)
 │   ├── mcp_bridge.py            # MCP клиент (мультибэкенд camoufox/playwright/nodriver, ref→target, mcp_circuit)
 │   ├── memory_manager.py        # CRUD графа (+ intent, dedup, SOLD_AT, HintManager, ApproachVersioning)
 │   ├── models/                  # Pydantic-схемы (Фаза 1)
 │   │   └── schemas.py           #   ExtractionResult, AgentDecision, ExtractedPrice, ActionType
 │   ├── resilience.py            # CircuitBreaker (llm/mcp), retry_with_backoff (Фаза 1)
-│   ├── semantic_cache.py        # SemanticCache — Jaccard-кэш похожих товаров (data/semantic_cache.json) (Фаза 2)
+│   ├── semantic_cache.py        # SemanticCache — Jaccard-кэш похожих товаров (Фаза 2)
+│   ├── session_cache.py         # NegativeCache + SiteBlacklist (сессионный блэклист сайтов)
+│   ├── session_facts.py         # RowFacts (память строки, переживает trim) + SessionFacts (межстрочные факты прогона)
 │   ├── study_runner.py          # QThread обучения (50 раундов, get_hints, утверждение)
 │   ├── stuck_detector.py        # StuckDetector — зацикливание/блокировки (Фаза 1)
-│   ├── task_scheduler.py        # TaskScheduler — группировка товаров по сайтам (+ site_profiles из LearningLoop) (Фаза 2)
+│   ├── task_scheduler.py        # TaskScheduler — группировка товаров по сайтам (+ site_profiles) (Фаза 2)
 │   ├── human_behavior.py        # HumanBehavior — человеческие клики/печать/скролл (Фаза 3)
 │   ├── rate_limiter.py          # DomainRateLimiter — per-domain RPM лимит (Фаза 3)
 │   ├── site_analyzer.py         # SiteAnalyzer — детекция SPA/SSR/антибота (Фаза 3)
@@ -144,7 +154,7 @@ C:\Projects\Pricer_Vision\
 │   ├── validator.py             # Пост-валидация
 │   └── widget_base.py
 ├── tests/
-│   ├── test_*.py                # Тесты (pytest)
+│   ├── test_*.py                # Тесты (pytest; включая test_main.py — панель «Режим поиска», test_row_idle_timeout.py)
 │   └── integration/             # Интеграционные тесты агентного цикла (test_agent_flow.py)
 ├── logs/
 │   └── runtime.log              # Последний ран
@@ -452,14 +462,13 @@ pdf_parser:
 ### SQLite оптимизация (`src/graph_engine.py`)
 - `_apply_pragmas()` в `build()`: `synchronous=NORMAL`, `cache_size=-64000` (64MB), `temp_store=MEMORY`. WAL и foreign_keys уже были включены.
 
-## Тестирование (Фаза 7)
+## Тестирование (актуально на 2026-08-27)
 
-- **434 теста**, 0 failures. Запуск: `python -m pytest -q`.
-- **Интеграционные** (`tests/integration/test_agent_flow.py`, 9 тестов): полный цикл `process_row` с моками — извлечение, tool_call цикл, reuse (rule 8), semantic cache, ошибки LLM, max rounds, captcha, stuck recovery.
-- **Критичные модули >80%**: schemas (96%), stuck_detector (100%), semantic_cache (95%), context_optimizer (100%), rate_limiter (100%), learning_loop (89%), smart_review (100%), config_loader (100%), excel_writer (97%).
+- **960 тестов, 2 skipped**, 0 failures. Запуск: `python -m pytest -q`.
+- **Интеграционные** (`tests/integration/test_agent_flow.py`): полный цикл `process_row` с моками — извлечение, tool_call цикл, reuse (rule 8, включая exact-spec ≥0.6), semantic cache, ошибки LLM, max rounds, captcha, stuck recovery, флаги режима поиска, защита моделей C10/C20, кап confidence, повторный зонд, межстрочные факты.
+- **Критичные модули >80%**: schemas, stuck_detector, semantic_cache, context_optimizer, rate_limiter, learning_loop, smart_review, config_loader, excel_writer, session_facts, approach_relevance (model_designators/mismatch_kind).
 - Покрытие: `python -m coverage run --source=src -m pytest tests -q && python -m coverage report` (coverage установлен в venv).
 - `pytest-asyncio` установлен в venv — async-тесты (mcp_bridge, pdf_parser, agent_flow) проходят.
-- В ходе Фазы 7 исправлены: `SmartReview._calculate_confidence` падал на строковом `qty` (TypeError); `ExcelWriter.detect_columns` fallback добавлял `None`-заголовки в name-колонки.
 
 ## Правила сопоставления наименований (Фаза 8)
 
@@ -558,7 +567,65 @@ pdf_parser:
 - `SpecItem.row` несёт фактический ряд листа; runner прокидывает
   `result["excel_row"]`, GUI пишет по нему. Писать «индекс отфильтрованного списка + 2»
   нельзя — строки-заголовки разделов сдвигают все результаты на чужие строки.
+## Устойчивость агента (2026-08-27)
 
+Исправление деградации агента из прогона 26.08 (планы docs/PLAN_AGENT_DEGRADATION.md,
+docs/PLAN_AGENT_DEGRADATION_FIX2.md). Принцип: **скрипты — невидимая сантехника для
+LLM, а не замена его решений** (память и решения — за LLM).
 
+### Память строки и межстрочные факты (src/session_facts.py)
+- **RowFacts** — операционная память строки: посещённые домены+статус, введённые
+  запросы, счётчик одинаковых извлечений (key+hash), price_candidate_seen, карточка,
+  ошибки, прогресс раундов («Раундов: N из M»). Инжектится свежим user-сообщением
+  перед каждым вызовом LLM (_query_llm(..., facts=)) — **переживает context trim**,
+  устраняет залипания (15 одинаковых извлечений в прогоне 26.08).
+- **SessionFacts** — межстрочные факты прогона: (тип|бренд → сайт → статус)
+  (has_product/no_product) + рабочие запросы/URL-паттерны. Позитив — под
+  use_approaches, негатив — под use_site_ranking (чистый поиск = без фактов).
+  Устраняет ложный вывод «mircli без радиаторов» и переносит микро-стратегию
+  (запрос с размером / URL-паттерн) между строками.
 
+### Защита реюза от путаницы моделей (П3, C10 vs C20)
+- **model_designators(text)** — канонические коды моделей по сырому тексту
+  («C10», «C 10», «VC33», «MS-140» → «c10»/«vc33»/«ms140»); исключены префиксы
+  параметров/диаметров и «х»-разделитель. h1 «C 10х500х600» токенизатор не разбивает
+  на «c10» — поэтому сравнение на сыром тексте.
+- product_name_matches(strict_sizes=True) требует равенства моделей на путях
+  РЕЮЗА и ГИДА: «LEMAX Premium C20 500x600» ≠ «LEMAX Premium C10 500x600».
+- **mismatch_kind(spec, found)** — 
+one/descriptive_only/key (модель/размер/
+  бренд — ключевые; материал «стальной» + описательные — descriptive_only). Кап
+  confidence в save_confirmed_price: descriptive_only → max(conf, 0.8) (допускается
+  к rule-8); key → 0.5.
 
+### Реюз цен прошлых прогонов (П1)
+- **Exact-spec реюз**: в rule-8 при нормализованном равенстве spec_text кандидата
+  текущему и не-stale записи — реюз при confidence >= 0.6 (иначе 0.9). Модель/размер
+  при точном совпадении гарантированно совпадают (защита П3).
+- БД: одноразовая миграция подтверждённых descriptive-only записей 0.5→0.8.
+
+### Устойчивость запроса (П2)
+- **Повторный зонд**: первый «пусто» на странице результатов (	erm=/keyword=//search)
+  не считается пустым — guidance «browser_wait_for 2с и повтори извлечение» (SPA мог не догрузиться).
+- **Правило 15 усилено**: очищать поле поиска перед вводом (иначе склейка запросов),
+  «х» = %D1%85 (не %D0%B5 = «е»); URL — только копированием location.href.
+- **Правило 1**: при пустом результате точного запроса — сначала проверь загрузку
+  выдачи, упрощай только после повтора, сохраняя размер/тип/Ду.
+- **Селекторы извлечения** — рабочий js_summary в hints при успехе.
+
+### Управление сайтами и подходами
+- **Точечная деприкация** (_penalize_approaches): штрафуются только подходы сайта,
+  показанные агенту; при price_candidate_seen — не штрафуются вовсе (строка не успела,
+  товар есть). Слепая деприкация — только при captcha.
+- **SiteBlacklist**: mark_success(site) — сайт с найденной в прогоне ценой не
+  блокируется/не штрафуется; strike(site, reason) с причинами для диагностики.
+  Штрафы в force-switch/max-rounds/stuck гейтятся price_candidate_seen.
+
+### Информативные ошибки MCP (src/mcp_bridge.py, _enhance_error)
+- strict mode violation → инвентарь совпавших элементов; css-parse роль-локатора →
+  подсказка формата (_role_locator_to_css, :has-text); click-timeout по устаревшему
+  ref → подсказка «свежий snapshot / a:has-text / navigate по URL»; fill-timeout →
+  инвентарь полей страницы. Слепые таймауты стали 1-раундовой обратной связью.
+
+### Итоговые тесты
+**960 passed, 2 skipped** (бейзлайн до фиксов 26.08 — 875).
