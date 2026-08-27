@@ -40,6 +40,7 @@ SUMMARIZE_MAX_LINES = get_run_config("summarize_max_lines", 200)
 CAPTCHA_KEYWORDS = get_run_config("captcha_keywords", ["ddos-guard", "hcheck", "js-check"])
 SEARCH_ENGINE = get_run_config("search_engine", "Яндекс")
 UNKNOWN_PT = "unknown"
+_RADIATOR_PRODUCT_TYPES = {"plumbing_heating_radiators"}
 CONF_TRUSTED = 0.9
 CONF_GOOD = 0.8
 CONF_MIN = 0.6
@@ -1257,6 +1258,36 @@ async def process_row(
             logger.info("Row: brand-mismatch fallback price=%s (conf=%.2f) in %.1fs",
                         result.get("price"), result.get("confidence", 0), elapsed)
             return result
+
+    # Радиатор: если точное количество секций не найдено ни на одном сайте —
+    # рассчитываем цену из известного варианта той же модели (цена за секцию × N).
+    # ТОЛЬКО для радиаторов с суффиксом -0,9-N, ТОЛЬКО после полного перебора сайтов.
+    from src.radiator_section_pricer import calculate_radiator_price, extract_sections
+    if extract_sections(spec_text) is not None and product_type in _RADIATOR_PRODUCT_TYPES:
+        try:
+            calculated = calculate_radiator_price(memory_manager, spec_text, product_type)
+            if calculated:
+                logger.info("Row: radiator section-calculated price=%.2f in %.1fs",
+                            calculated["price"], elapsed)
+                memory_manager.save_price(
+                    spec_text=spec_text, product_type=product_type,
+                    site=calculated.get("site", ""), price=calculated["price"],
+                    url=calculated.get("url", ""), confidence=calculated["confidence"],
+                    reason=calculated.get("reason", ""),
+                )
+                try:
+                    memory_manager.record_soldat(
+                        product_type, calculated.get("site", "") or ""
+                    )
+                except Exception:
+                    pass
+                _session_success(calculated.get("site", ""), url="", query=search_text)
+                final = {"spec_text": spec_text, "product_type": product_type,
+                         **calculated, "elapsed": elapsed}
+                return _result_to_schema(final)
+        except Exception as e:
+            logger.warning("Radiator section calculation failed: %s", e)
+
     logger.info("Row: max rounds reached in %.1fs", elapsed)
     return _error_result(spec_text, f"Max rounds ({MAX_ROUNDS}) reached", elapsed=elapsed)
 
