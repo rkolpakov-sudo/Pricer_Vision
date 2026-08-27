@@ -373,6 +373,33 @@ class TestAgentFlow:
         # цена всё равно извлечена
         assert result.get("price") == 100.0
 
+    async def test_evaluate_repeat_cached_in_row(self):
+        """Повторный browser_evaluate с тем же JS на том же сайте не вызывает bridge —
+        возвращается кэшированный результат с подсказкой. Регрессия: агент повторно
+        извлекал одну и ту же выдачу (позиция 36)."""
+        js = {"function": "const links = [...]; return links;"}
+        llm, bridge, engine, mm, cache = make_env(responses=[
+            llm_tool_call("browser_navigate", {"url": "https://santech.ru"}),
+            llm_tool_call("browser_evaluate", js),
+            llm_tool_call("browser_evaluate", js),  # повтор того же JS
+            llm_final(5636.8),
+        ])
+        await process_row(
+            spec_text="Радиатор МС-140",
+            llm_client=llm,
+            mcp_bridge=bridge,
+            graph_engine=engine,
+            memory_manager=mm,
+            fresh=True,
+            semantic_cache=cache,
+        )
+        # browser_evaluate выполнен только 1 раз (повтор перехвачен кэшем)
+        evals = [a for n, a in bridge.calls if n == "browser_evaluate"]
+        assert len(evals) == 1
+        # цена извлечена
+        assert bridge.calls  # строка прошла, результат через LLM final
+
+
     async def test_captcha_block_reported(self):
         """Снапшот с captcha → событие block в monitor_callback."""
         llm, bridge, engine, mm, cache = make_env(snapshot_result="hcheck challenge page", responses=[

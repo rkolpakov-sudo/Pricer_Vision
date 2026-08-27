@@ -589,6 +589,11 @@ async def process_row(
     rounds_on_site = 0
     steps = []
     stuck_detector = StuckDetector()
+    # Кэш повторов browser_evaluate в рамках строки: (домен, хэш JS) -> результат.
+    # Агент часто извлекает одну и ту же выдачу повторно одним и тем же JS — это
+    # потерянные раунды (регрессия позиции 36). При повторе возвращаем сохранённый
+    # результат и подсказываем.
+    eval_cache: dict[tuple[str, str], str] = {}
     # Счётчик «мысленных» раундов: LLM возвращает только размышления без tool_calls
     # и без цены (регрессия: позиция 36 — агент 4 раза повторил «ЦМО МС-40 = полка»,
     # не двигаясь дальше). При пороге добавляем напоминание/force-совет.
@@ -769,6 +774,22 @@ async def process_row(
                             logger.info("🧹 Поле поиска очищено перед вводом (JS)")
                         except Exception:
                             logger.debug("Field clear failed (ignored)")
+                # Кэш повторов browser_evaluate: если тот же JS на том же сайте уже
+                # выполнялся — подставляем сохранённый результат и подсказываем, чтобы
+                # агент не тратил раунды на повторное извлечение одной и той же выдачи.
+                # НЕ делаем continue: кэш-значение проходит обычную обработку ниже
+                # (StuckDetector/empty_probe/facts увидят повтор как no_change).
+                eval_repeat = None
+                _repeat_hint = ""
+                if tool_name in ("browser_evaluate", "evaluate"):
+                    js = str(tool_args.get("function") or "")
+                    key = (_extract_domain(current_site), hashlib.md5(js.encode("utf-8", errors="replace")).hexdigest())
+                    if key in eval_cache:
+                        eval_repeat = eval_cache[key]
+                        logger.info("🔁 Повтор browser_evaluate (тот же JS на %s) — кэш",
+                                    _extract_domain(current_site))
+                        tool_args = dict(tool_args)
+                        tool_args["_repeat"] = True
                 # Совет перед кликом по карточке: если в названии элемента явно указана
                 # ДРУГАЯ модель, чем в спецификации — не открывай «для проверки».
                 # (система-советник: LLM решает, но предупреждение жёсткое)
@@ -782,7 +803,23 @@ async def process_row(
                             "content": click_hint,
                         })
                         continue
-                result = await mcp_bridge.call_tool(tool_name, tool_args)
+                if eval_repeat is not None:
+                    # Повторный evaluate: результат берём из кэша, bridge не вызываем.
+                    # Результат помечаем флагом _repeat — обработка ниже (record_action/
+                    # facts/empty_probe) увидит повтор как no_change, а подсказку добавим
+                    # префиксом к tool-результату.
+                    result = eval_repeat
+                    _repeat_hint = (f"ℹ️ Повтор того же JS-извлечения на этой странице. "
+                                    f"Результат не изменился: {eval_repeat[:200]}\n"
+                                    "Не повторяй извлечение — используй уже полученные данные "
+                                    "или примени ДРУГОЙ JS/действие.")
+                else:
+                    result = await mcp_bridge.call_tool(tool_name, tool_args)
+                    if tool_name in ("browser_evaluate", "evaluate") and current_site:
+                        js = str(tool_args.get("function") or "")
+                        key = (_extract_domain(current_site), hashlib.md5(js.encode("utf-8", errors="replace")).hexdigest())
+                        if key not in eval_cache:
+                            eval_cache[key] = str(result)[:2000]
 
             if tool_name not in GRAPH_TOOL_NAMES:
                 step = {"action": tool_name}
@@ -830,7 +867,8 @@ async def process_row(
             stuck_detector.record_action(
                 action_type=tool_name,
                 target=_stuck_target(tool_name, tool_args),
-                result="success" if not str(result).startswith("error:") else "no_change",
+                result="no_change" if tool_args.get("_repeat") else
+                       ("success" if not str(result).startswith("error:") else "no_change"),
             )
 
             tool_content = str(result)
@@ -924,6 +962,8 @@ async def process_row(
             content_to_send = tool_content[:10000]
             if price_hint:
                 content_to_send = f"💰 price_candidate: {price_hint}\n" + content_to_send
+            if tool_args.get("_repeat"):
+                content_to_send = _repeat_hint + "\n" + content_to_send
             messages.append({
                 "role": "tool",
                 "tool_call_id": tc.get("id", ""),
