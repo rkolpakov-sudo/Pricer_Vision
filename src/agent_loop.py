@@ -435,13 +435,20 @@ async def process_row(
                     and not _is_family_page(p.get("url", ""))]
         if reusable:
             best = max(reusable, key=lambda p: p.get("confidence", 0))
-            if best.get("confidence", 0) >= CONF_TRUSTED and (not fresh or best.get("confidence", 0) >= 0.95):
+            conf = best.get("confidence", 0)
+            # Точное совпадение spec_text (нормализованно) — строка та же: модель и
+            # размер гарантированно совпадают (защита П3). Реюз при >= 0.6 вместо 0.9.
+            exact_match = _normalized_equal(best.get("spec_text", ""), spec_text)
+            reuse_threshold = 0.6 if (exact_match and not best.get("is_stale")) else CONF_TRUSTED
+            if conf >= reuse_threshold and (not fresh or conf >= 0.95):
                 elapsed = (datetime.now() - start_time).total_seconds()
                 result = {
                     "spec_text": spec_text, "price": best.get("price"),
                     "confidence": best.get("confidence", 0),
                     "url": best.get("url", ""), "site": best.get("site_id", ""),
-                    "reason": "Reused from DB (confidence >= 0.9)", "requires_review": False,
+                    "reason": ("Reused from DB (exact spec match)" if exact_match
+                               else "Reused from DB (confidence >= 0.9)"),
+                    "requires_review": False,
                     "elapsed": elapsed,
                 }
                 memory_manager.save_price(
@@ -1506,6 +1513,11 @@ def _save_price_and_approach(memory_manager, spec_text, product_type, price_data
                     logger.warning("Failed to save winning-pattern hint: %s", e)
     except Exception as e:
         logger.warning("Failed to save approach/success for %.2f price: %s", price_data['price'], e)
+
+
+def _normalized_equal(a: str, b: str) -> bool:
+    """Нормализованное равенство строк (lowercase + схлопывание пробелов)."""
+    return " ".join((a or "").lower().split()) == " ".join((b or "").lower().split())
 
 
 def _extract_domain(url: str) -> str:

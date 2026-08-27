@@ -717,6 +717,37 @@ class TestPhase5Verification:
         text = _all_message_text(env[0].calls[0])
         assert "Сессионные факты" not in text
 
+
+@pytest.mark.asyncio
+class TestRule8ExactMatch:
+    async def test_rule8_exact_spec_match_reuses_at_06(self):
+        """1.2: точное совпадение spec_text — реюз при confidence 0.6 без браузера."""
+        llm, bridge, engine, mm, cache = make_env(fresh=False)
+        mm.prices = [{"price": 500.0, "confidence": 0.6,
+                      "url": "https://site.ru/p", "site_id": "site.ru",
+                      "spec_text": "Труба ПНД 32"}]
+        result = await process_row(
+            spec_text="Труба ПНД 32",
+            llm_client=llm, mcp_bridge=bridge, graph_engine=engine,
+            memory_manager=mm, fresh=False, semantic_cache=cache,
+        )
+        assert result.get("price") == 500.0
+        assert llm.calls == []
+
+    async def test_rule8_non_exact_needs_09(self):
+        """1.2: соседняя строка (spec_text отличается) — реюз только при >= 0.9."""
+        llm, bridge, engine, mm, cache = make_env(fresh=False)
+        mm.prices = [{"price": 500.0, "confidence": 0.6,
+                      "url": "https://site.ru/p", "site_id": "site.ru",
+                      "spec_text": "Труба ПНД 40"}]
+        result = await process_row(
+            spec_text="Труба ПНД 32",
+            llm_client=llm, mcp_bridge=bridge, graph_engine=engine,
+            memory_manager=mm, fresh=False, semantic_cache=cache,
+        )
+        assert result.get("price") != 500.0
+
+
 @pytest.mark.asyncio
 class TestPhase0ConfidenceCap:
     SPEC_C10 = 'Стальной панельный радиатор с боковым подключением LEMAX Premium Compact Hygiene, тип C10, в компл. с краном для выпуска воздуха и креплениями LEMAX Premium C10 500x600'
