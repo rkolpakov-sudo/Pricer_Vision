@@ -70,6 +70,11 @@ def _find_base_price(mm, product_type: str, spec_text: str) -> Optional[dict]:
         c_price = c.get("price")
         if not c_price or c_price <= 0:
             continue
+        # Только надёжные цены (conf >= 0.90) — цена, сохранённая с низкой
+        # уверенностью (0.50 через advisory/confirm), не может быть базой для
+        # расчёта: ошибка в базе умножится на количество секций.
+        if c.get("confidence", 0) < 0.90:
+            continue
         if _is_invalid_price_url(c.get("url") or ""):
             continue
         price_per_section = c_price / c_sections
