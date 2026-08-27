@@ -782,3 +782,31 @@ class TestPhase0ConfidenceCap:
         result = await self._run_confirm(graph_engine, spec_c20, self.H1_C10)
         assert result.get('price') == 4044.15
         assert result.get('confidence', 1) <= 0.5
+
+@pytest.mark.asyncio
+class TestPhase2QueryRobustness:
+    async def test_first_empty_on_search_page_gets_retry_guidance(self):
+        """2.1: первый «пусто» на странице результатов — guidance «дождись и повтори», не спис."""
+        env = make_env(evaluate_result="[]", responses=[
+            llm_tool_call("browser_navigate", {"url": "https://site.ru/search?term=Товар"}),
+            llm_tool_call("browser_evaluate", {"function": "() => { return []; }"}),
+            llm_tool_call("browser_evaluate", {"function": "() => { return []; }"}),
+            llm_final(10.0),
+        ])
+        llm, bridge, engine, mm, cache = env
+        await process_row(
+            spec_text="Товар",
+            llm_client=llm, mcp_bridge=bridge, graph_engine=engine,
+            memory_manager=mm, fresh=True, semantic_cache=cache,
+        )
+        all_text = "\n".join(
+            str(m.get("content", "")) for call in llm.calls for m in call
+        )
+        assert "догрузиться" in all_text
+        assert "ПОВТОРИ извлечение" in all_text
+
+    async def test_search_results_url_detection(self):
+        from src.agent_loop import _is_search_results_url
+        assert _is_search_results_url("https://satro-paladin.com/?digiSearch=true&term=x") is True
+        assert _is_search_results_url("https://mircli.ru/search/?keyword=x") is True
+        assert _is_search_results_url("https://site.ru/catalog/product/1/") is False

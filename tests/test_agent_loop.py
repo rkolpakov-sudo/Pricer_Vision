@@ -653,6 +653,16 @@ class TestPrecisionDeprecation:
         assert mm.failed == [10, 11]
 
 
+
+
+    def test_rule15_clear_field_and_encoding(self):
+        assert "ОЧИСТИ поле поиска" in SYSTEM_PROMPT
+        assert "%D1%85" in SYSTEM_PROMPT
+        assert "склеится с новым" in SYSTEM_PROMPT
+
+    def test_rule1_no_simplify_on_first_empty(self):
+        assert "сначала проверь загрузку выдачи" in SYSTEM_PROMPT
+        assert "ТОЛЬКО после повтора упрощай запрос" in SYSTEM_PROMPT
 class TestFactsBlock:
     def test_inject_empty_block_noop(self):
         messages = [{"role": "system", "content": "s"}, {"role": "user", "content": "u"}]

@@ -178,7 +178,7 @@ SYSTEM_PROMPT = """Ты — опытный пользователь с дост�
 - get_hints: подсказки по работе на сайтах
 
 Правила:
-1. Сначала проверь get_approaches. Если есть подход — используй его target/element (CSS-селекторы) и последовательность действий. НО: url для browser_navigate должен вести на ГЛАВНУЮ сайта или страницу поиска, а не на конкретный товар из подхода. Текст для поиска (query, text) бери из КЛЮЧЕВЫХ ТОКЕНОВ и ТОВАР ДЛЯ ПОИСКА: вводи запрос, сохраняющий бренд + серию + тип + размер/Ду (например «LEMAX Premium C10 500x600»). Шаблонный хвост («в компл. с краном…», «с боковым подключением») можно опускать, НО размер/тип/Ду — НИКОГДА.
+1. Сначала проверь get_approaches. Если есть подход — используй его target/element (CSS-селекторы) и последовательность действий. НО: url для browser_navigate должен вести на ГЛАВНУЮ сайта или страницу поиска, а не на конкретный товар из подхода. Текст для поиска (query, text) бери из КЛЮЧЕВЫХ ТОКЕНОВ и ТОВАР ДЛЯ ПОИСКА: вводи запрос, сохраняющий бренд + серию + тип + размер/Ду (например «LEMAX Premium C10 500x600»). Шаблонный хвост («в компл. с краном…», «с боковым подключением») можно опускать, НО размер/тип/Ду — НИКОГДА. При пустом результате ТОЧНОГО запроса (с размером/Ду) сначала проверь загрузку выдачи (browser_wait_for 2с + повторное извлечение) и ТОЛЬКО после повтора упрощай запрос, ОБЯЗАТЕЛЬНО сохраняя размер/тип/Ду.
 2. Работай с ОДНИМ сайтом за раз. НЕ переключайся между сайтами без причины.
 3. browser_snapshot даёт accessibility-tree. Если цены не видны — используй browser_evaluate с JS (querySelectorAll) для прямого извлечения данных из DOM.
 4. После поиска на сайте: кликни на карточку товара → откроется страница с ценой. Если цены нет в карточке — ищи на странице через browser_evaluate.
@@ -193,11 +193,13 @@ SYSTEM_PROMPT = """Ты — опытный пользователь с дост�
 13. После save_confirmed_price можно продолжить поиск на других сайтах для лучшей цены, но базовая цена уже сохранена.
 14. Если сайт явно НЕ ПОДХОДИТ для товара (например, сантехнический сайт для кабеля, или производитель труб для электроники) — НЕМЕДЛЕННО переключайся на следующий сайт. Не трать больше 2 раундов на заведомо неподходящий сайт.
 15. НЕ собирай URL поиска вручную и НЕ делай percent-кодирование кириллицы руками
-    (например, не пиши %D0%B5/%D1%85 — это ломает запрос). Ищи через поисковую
-    строку сайта: browser_type в поле поиска → Enter. Если сайт SPA и после Enter
+    (например, не пиши %D0%B5/%D1%85 — это ломает запрос; «х» = %D1%85, а не %D0%B5 = «е»).
+    Ищи через поисковую строку сайта: browser_type в поле поиска → Enter. Если сайт SPA и после Enter
     результаты не появились — введи запрос в поисковую строку, отправь, затем
     СКОПИРУЙ получившийся URL из адресной строки (browser_evaluate: location.href)
     и открой его через browser_navigate. Никогда не изобретай кодировку сам.
+    Перед вводом НОВОГО запроса ОЧИСТИ поле поиска (JS: inp.value='' + dispatchEvent(new Event('input')),
+    или select-all + delete) — иначе старый текст склеится с новым.
 16. Если в структуре файла указан завод-изготовитель, тип/обозначение или артикул/код — используй их для правильного выбора товара. Бренд/тип не обязательно вставлять в поисковый запрос: сначала найди товар по наименованию, затем среди результатов отдай предпочтение позиции того же производителя/модели/артикула. Если товар выпускается несколькими заводами — это критично для выбора правильного аналога. Если «производитель» — это страна (например «Россия») или ссылка на стандарт (ГОСТ/ТУ/СНиП) — НЕ используй их как бренд и не вставляй в поиск.
 17. При вызове save_confirmed_price ВСЕГДА передавай product_name — полное наименование товара с ЗАГОЛОВКА карточки (h1), НЕ сокращай и НЕ перефразируй. Система проверит соответствие спецификации. Если она вернёт СОВЕТ («Не ошибся ли ты…») — это НЕ отказ и НЕ приговор: система лишь советует, а решение принимаешь ТЫ после перепроверки. Перепроверь заголовок h1 и соответствие товара (тип, соединение, Ду, материал). Если наименование было неполным — исправь product_name и сохрани снова. Если уверен, что товар верен — сохрани повторно с confirm=true (цена будет помечена как требующая ревью). ВАЖНО: если ты УЖЕ находишься в карточке товара и извлёк из неё цену и h1 — ПЕРВЫМ ДЕЛОМ сохрани цену (при расхождении только в описательных словах серии/комплектации — с confirm=true), и только ПОСЛЕ сохранения, если остались серьёзные сомнения, можешь перепроверить характеристики на той же карточке. НЕ уходи с карточки и НЕ проверяй серию/комплектацию на других сайтах и в Яндексе, пока цена не сохранена: уход из карточки с уже извлечённой ценой = потерянный результат. Кран шаровой и клапан балансировочный — это РАЗНЫЕ товары, воздуховод и воздухоотводчик — РАЗНЫЕ товары.
 18. Извлечение цены из карточки: цена на сайте может отображаться с любым символом — «₽», «P», «р.», «руб» или без него. НЕ ищи только символ «₽» — это самая частая ошибка. Ищи по классам: querySelectorAll('[class*="price"], [class*="price"] span, .product-price, [data-price]') и бери textContent каждого элемента. Первый элемент с классом-содержащим "price" может оказаться НЕ ценой (например, иконка «Корзина» или «В корзину») — собери ВСЕ кандидаты в массив и выбери тот, где текст похож на число с символом валюты.
@@ -588,6 +590,7 @@ async def process_row(
     diagnostic_prompts = 0
     empty_probe_streak: dict[str, int] = {}
     empty_probe_guidance_sent: set[str] = set()
+    search_page_retry_guided: set[str] = set()
     fallback_candidates: list[dict] = []
     rate_limiter = DomainRateLimiter(
         min_interval=get_antidetect_config("rate_limit_min_interval", 1.5),
@@ -846,20 +849,34 @@ async def process_row(
                 probe_domain = _extract_domain(current_site)
                 if _is_empty_search_result(tool_name, tool_content):
                     facts.record_empty_result(probe_domain)
-                    _session_no_product(probe_domain)
-                    empty_probe_streak[probe_domain] = empty_probe_streak.get(probe_domain, 0) + 1
-                    if empty_probe_streak[probe_domain] >= EMPTY_PROBE_LIMIT and probe_domain not in empty_probe_guidance_sent:
-                        empty_probe_guidance_sent.add(probe_domain)
+                    # 2.1: первый «пусто» на странице РЕЗУЛЬТАТОВ — выдача могла не догрузиться (SPA).
+                    if _is_search_results_url(current_site) and probe_domain not in search_page_retry_guided:
+                        search_page_retry_guided.add(probe_domain)
                         empty_probe_streak[probe_domain] = 0
-                        logger.warning("⚠️ %d empty search probes on %s — early exit guidance",
-                                       EMPTY_PROBE_LIMIT, probe_domain)
+                        logger.warning("⚠️ Первый пустой зонд на выдаче %s — guidance «дождись и повтори»",
+                                       probe_domain)
                         messages.append({
                             "role": "user",
-                            "content": (f"⚠️ Поиск на {probe_domain} уже {EMPTY_PROBE_LIMIT} раз подряд вернул пустой "
-                                        "результат — товар на этом сайте отсутствует. НЕ продолжай искать на нём: "
-                                        "переключись на ДРУГОЙ сайт из списка (или сохрани уже найденную цену, "
-                                        "если она была в результатах)."),
+                            "content": ("⚠️ Извлечение на странице результатов поиска вернуло пусто — выдача "
+                                        "могла не догрузиться (SPA). Сделай browser_wait_for 2с и ПОВТОРИ "
+                                        "извлечение (тот же или уточнённый JS); если снова пусто — тогда меняй "
+                                        "запрос, сохраняя размер/тип/Ду."),
                         })
+                    else:
+                        _session_no_product(probe_domain)
+                        empty_probe_streak[probe_domain] = empty_probe_streak.get(probe_domain, 0) + 1
+                        if empty_probe_streak[probe_domain] >= EMPTY_PROBE_LIMIT and probe_domain not in empty_probe_guidance_sent:
+                            empty_probe_guidance_sent.add(probe_domain)
+                            empty_probe_streak[probe_domain] = 0
+                            logger.warning("⚠️ %d empty search probes on %s — early exit guidance",
+                                           EMPTY_PROBE_LIMIT, probe_domain)
+                            messages.append({
+                                "role": "user",
+                                "content": (f"⚠️ Поиск на {probe_domain} уже {EMPTY_PROBE_LIMIT} раз подряд вернул пустой "
+                                            "результат — товар на этом сайте отсутствует. НЕ продолжай искать на нём: "
+                                            "переключись на ДРУГОЙ сайт из списка (или сохрани уже найденную цену, "
+                                            "если она была в результатах)."),
+                            })
 
             if tool_name == "save_confirmed_price":
                 # Программная проверка соответствия товара спецификации.
@@ -1238,7 +1255,7 @@ def _build_context(spec_text, product_type, approaches, confirmed_prices, sites,
             concrete = adapted.get("concrete", [])
             if concrete:
                 parts.append(f"    шаги: {format_steps(concrete)}")
-                if a is approaches[0]:
+                if a in approaches[:2]:
                     parts.append(format_steps_detailed(concrete))
     if site_guides:
         parts.append("\nКак работать на сайтах (подходы для других товаров):")
@@ -1503,6 +1520,14 @@ def _save_price_and_approach(memory_manager, spec_text, product_type, price_data
                     hint_text = f"{site_domain}: этот товар найден по запросу «{query}»"
                     if price_data.get("url"):
                         hint_text += f"; карточка: {price_data['url'][:120]}"
+                    # 2.3: рабочий селектор извлечения — переиспользуемый, не переизобретать.
+                    extract_js = next(
+                        (s.get("js_summary") for s in (steps or [])
+                         if s.get("action") == "browser_evaluate" and s.get("js_summary")),
+                        "",
+                    )
+                    if extract_js:
+                        hint_text += f"; извлечение: {extract_js}"
                     memory_manager.add_hint(
                         product_type=product_type,
                         text=hint_text,
@@ -1580,6 +1605,12 @@ def _is_empty_search_result(tool_name: str, content: str) -> bool:
     if "no matches found" in c:
         return True
     return c in ("", "[]", "{}", "null", "none", "undefined", "nan", "n/a", "ok", "empty")
+
+
+def _is_search_results_url(url: str) -> bool:
+    """True, если URL — страница результатов поиска (выдача могла не догрузиться)."""
+    u = (url or "").lower()
+    return bool(re.search(r"/search|\bterm=|keyword=|search\?|&\?q=|[\?&]q=", u))
 
 
 _PRICE_RE = re.compile(r"\d(?:[\d\s.,]{0,11})\s*(?:руб|р\.|₽|Р|P)(?!\w)", re.IGNORECASE)
