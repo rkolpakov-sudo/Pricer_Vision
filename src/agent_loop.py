@@ -589,6 +589,12 @@ async def process_row(
     rounds_on_site = 0
     steps = []
     stuck_detector = StuckDetector()
+    # Счётчик «мысленных» раундов: LLM возвращает только размышления без tool_calls
+    # и без цены (регрессия: позиция 36 — агент 4 раза повторил «ЦМО МС-40 = полка»,
+    # не двигаясь дальше). При пороге добавляем напоминание/force-совет.
+    content_only_rounds = 0
+    CONTENT_ONLY_REMIND = 2
+    CONTENT_ONLY_FORCE = 3
 
     def _shown_approach_ids(domain: str) -> list:
         """Подходы, показанные агенту для текущего сайта (для точечного штрафа)."""
@@ -669,13 +675,34 @@ async def process_row(
             return _result_to_schema(final)
 
         if not tool_calls:
+            content_only_rounds += 1
             messages.append({"role": "assistant", "content": content or "(no output)"})
+            if content_only_rounds >= CONTENT_ONLY_FORCE:
+                logger.warning("⚠️ Content-only loop (%d rounds) — forcing a decision", content_only_rounds)
+                content_only_rounds = 0
+                messages.append({
+                    "role": "user",
+                    "content": ("⚠️ Ты уже несколько раз размышлял без действий. Это зацикливание. "
+                                "Сейчас ОБЯЗАТЕЛЬНО сделай ОДНО из двух: "
+                                "1) если на текущем сайте есть цена подходящего товара — извлеки её "
+                                "(открой карточку или browser_evaluate) и вызови save_confirmed_price; "
+                                "2) если точного товара на сайте нет — НЕМЕДЛЕННО переключись на другой "
+                                "сайт (browser_navigate). Не размышляй дальше — действуй."),
+                })
+            elif content_only_rounds >= CONTENT_ONLY_REMIND:
+                messages.append({
+                    "role": "user",
+                    "content": ("⚠️ Ты размышляешь без действий. Напомни себе: либо извлеки цену "
+                                "с текущего сайта (карточка/save_confirmed_price), либо переключись на "
+                                "другой сайт. Не повторяй один и тот же вывод разными словами."),
+                })
             messages.append({"role": "user", "content": "Верни JSON с результатом поиска цены.\nФормат: {\"price\": число|null, \"confidence\": 0.0-1.0, \"url\": \"...\", \"site\": \"...\", \"reason\": \"...\", \"requires_review\": bool}"})
             _stop_check()
             response = await _llm_call(messages, TEMP_EXTRACTION)
             if "error" in response:
                 return _error_result(spec_text, f"LLM: {response['error']}")
             continue
+        content_only_rounds = 0
         msg = (response.get("choices") or [{}])[0].get("message", {})
 
         messages.append(msg)

@@ -346,6 +346,33 @@ class TestAgentFlow:
         assert result.get("price") is None
         assert "Max rounds" in result.get("error", "")
 
+    async def test_content_only_loop_gets_force_hint(self):
+        """LLM повторяет «мысли» без tool_calls и без цены — добавляется force-совет
+        «не размышляй, действуй». Регрессия: позиция 36 повторяла «ЦМО МС-40 = полка»."""
+        def llm_think(text="думаю"):
+            return {"choices": [{"message": {"content": text, "tool_calls": []}}]}
+        llm, bridge, engine, mm, cache = make_env(responses=[
+            llm_think("размышление 1"),
+            llm_think("размышление 2"),
+            llm_think("размышление 3"),
+            llm_final(100.0),
+        ])
+        result = await process_row(
+            spec_text="Товар",
+            llm_client=llm,
+            mcp_bridge=bridge,
+            graph_engine=engine,
+            memory_manager=mm,
+            fresh=True,
+            semantic_cache=cache,
+        )
+        # force-совет «зацикливание» появился в переписке с LLM
+        all_msgs = [m for call in llm.calls for m in call]
+        joined = " ".join(str(m.get("content", "")) for m in all_msgs)
+        assert "не размышляй дальше" in joined or "размышляешь без действий" in joined
+        # цена всё равно извлечена
+        assert result.get("price") == 100.0
+
     async def test_captcha_block_reported(self):
         """Снапшот с captcha → событие block в monitor_callback."""
         llm, bridge, engine, mm, cache = make_env(snapshot_result="hcheck challenge page", responses=[
