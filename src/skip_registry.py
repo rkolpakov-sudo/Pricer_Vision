@@ -20,11 +20,19 @@ def _full_analog(a: str, b: str) -> bool:
 
 
 class SkipRegistry:
-    """Множество помеченных пользователем позиций + транзитивные аналоги."""
+    """Множество помеченных пользователем позиций + транзитивные аналоги.
+
+    mark() — отмечает позицию и все её полные аналоги.
+    unmark() — если это ОСНОВНАЯ позиция (из _marked), удаляет всю группу;
+    если это АНАЛОГ (авто-подхваченный), снимает отметку только с него,
+    не затрагивая группу.
+    _excluded — индивидуально отключённые строки (не путать с основной).
+    """
 
     def __init__(self):
         self._marked: list[dict] = []
         self._tokens: dict[str, set] = {}
+        self._excluded: set[str] = set()
 
     @staticmethod
     def _normalize(text: str) -> str:
@@ -43,7 +51,14 @@ class SkipRegistry:
         if not text:
             return
         key = self._key(text, brand)
+        # Если строка была в исключённых — возвращаем её в группу
+        if key in self._excluded:
+            self._excluded.discard(key)
+            return
         if any(m["key"] == key for m in self._marked):
+            return
+        # Если уже есть primary, покрывающий этот аналог — не дублируем
+        if self.matches(text, brand) is not None:
             return
         display = self._display(text, brand)
         self._marked.append({"key": key, "text": text, "brand": (brand or "").strip()})
@@ -51,13 +66,23 @@ class SkipRegistry:
 
     def unmark(self, text: str, brand: str = "") -> None:
         key = self._key(text, brand)
-        self._marked = [m for m in self._marked if m["key"] != key]
-        self._tokens.pop(key, None)
+        if not key:
+            return
+        if any(m["key"] == key for m in self._marked):
+            # Основная позиция — удаляем всю группу, чистим исключения
+            self._marked = [m for m in self._marked if m["key"] != key]
+            self._tokens.pop(key, None)
+            self._excluded.clear()
+        else:
+            # Аналог — снимаем отметку только с него, группа остаётся
+            self._excluded.add(key)
 
     def matches(self, text: str, brand: str = "") -> str | None:
         """Описание помеченного товара, аналогом которого является (text, brand)."""
         key = self._key(text, brand)
         if not key:
+            return None
+        if key in self._excluded:
             return None
         a_display = self._display(text, brand)
         a_tokens = _product_tokens(a_display)
@@ -66,7 +91,6 @@ class SkipRegistry:
                 return self._display(m["text"], m["brand"])
             m_tokens = self._tokens.get(m["key"])
             if m_tokens and a_tokens and not (a_tokens & m_tokens):
-                # Полный аналог требует общих значимых слов — без пересечения пропускаем
                 continue
             if _full_analog(a_display, self._display(m["text"], m["brand"])):
                 return self._display(m["text"], m["brand"])
@@ -81,6 +105,7 @@ class SkipRegistry:
     def reset(self) -> None:
         self._marked.clear()
         self._tokens.clear()
+        self._excluded.clear()
 
     def __len__(self) -> int:
         return len(self._marked)

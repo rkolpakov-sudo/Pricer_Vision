@@ -113,6 +113,40 @@ class TestFullAnalog:
         r.mark("Кран шаровой Ду15", "Ридан")
         assert r.matches("Кран шаровой Ду20", "Ридан") is None
 
+    def test_unmark_analog_does_not_break_group(self):
+        """Снятие отметки с АНАЛОГА не затрагивает основную позицию.
+        Аналог перестаёт быть skipped, но группа (основная) остаётся."""
+        r = SkipRegistry()
+        r.mark("Клапан балансировочный авт. Ду15", "Ридан")
+        # полный аналог
+        assert r.is_skipped("Клапан балансировочный автоматический Ду15", "Ридан")
+        # снимаем отметку с аналога
+        r.unmark("Клапан балансировочный автоматический Ду15", "Ридан")
+        assert not r.is_skipped("Клапан балансировочный автоматический Ду15", "Ридан")
+        # основная осталась
+        assert r.is_skipped("Клапан балансировочный авт. Ду15", "Ридан")
+        assert r.blocked_count() == 1
+
+    def test_unmark_primary_clears_entire_group(self):
+        """Снятие отметки с ОСНОВНОЙ позиции удаляет всю группу, включая аналоги."""
+        r = SkipRegistry()
+        r.mark("Клапан балансировочный авт. Ду15", "Ридан")
+        assert r.is_skipped("Клапан балансировочный автоматический Ду15", "Ридан")
+        r.unmark("Клапан балансировочный авт. Ду15", "Ридан")
+        assert not r.is_skipped("Клапан балансировочный автоматический Ду15", "Ридан")
+        assert not r.is_skipped("Клапан балансировочный авт. Ду15", "Ридан")
+        assert r.blocked_count() == 0
+
+    def test_mark_after_unmark_analog_restores_it(self):
+        """Повторная отметка ранее исключённого аналога возвращает его в группу."""
+        r = SkipRegistry()
+        r.mark("Клапан балансировочный авт. Ду15", "Ридан")
+        r.unmark("Клапан балансировочный автоматический Ду15", "Ридан")
+        assert not r.is_skipped("Клапан балансировочный автоматический Ду15", "Ридан")
+        r.mark("Клапан балансировочный автоматический Ду15", "Ридан")
+        assert r.is_skipped("Клапан балансировочный автоматический Ду15", "Ридан")
+        assert r.blocked_count() == 1
+
 
 class TestRunnerIntegrationShape:
     def test_runner_stores_registry(self):
