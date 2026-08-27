@@ -731,6 +731,17 @@ async def process_row(
                 # запросах. Для per-site сайтов (vseinstrumenti) интервал больше.
                 if rate_limiter is not None and current_site:
                     await rate_limiter.wait_if_needed(current_site)
+                # Автозачистка поля поиска перед вводом: SPA-сайты (digiSearch и пр.)
+                # не очищают поле сами — старый текст склеивается с новым («МС-140
+                # Мх500МС-140»). Очищаем нативно через JS, если передан селектор поля.
+                if tool_name in ("browser_type", "type_text"):
+                    clear_js = _clear_field_js(tool_args)
+                    if clear_js:
+                        try:
+                            await mcp_bridge.call_tool("browser_evaluate", {"function": clear_js})
+                            logger.info("🧹 Поле поиска очищено перед вводом (JS)")
+                        except Exception:
+                            logger.debug("Field clear failed (ignored)")
                 result = await mcp_bridge.call_tool(tool_name, tool_args)
 
             if tool_name not in GRAPH_TOOL_NAMES:
@@ -1710,6 +1721,33 @@ def _stuck_target(tool_name: str, tool_args: dict) -> str:
         js = str(tool_args.get("function") or "")
         target = f"js:{hashlib.md5(js.encode('utf-8', errors='replace')).hexdigest()[:10]}"
     return str(target)
+
+
+def _clear_field_js(tool_args: dict) -> str | None:
+    """JS-сниппет очистки поля ввода перед browser_type.
+
+    SPA-сайты (satro-paladin digiSearch и пр.) не очищают поле сами: повторный
+    ввод склеивает старый текст с новым («МС-140 Мх500МС-140»). Если агент передал
+    CSS-селектор target («input[name="search"]», «input.search_input») или element,
+    очищаем поле нативно через value setter + input event, чтобы SPA-фреймворк
+    увидел изменение. Возвращает JS-код или None (нет надёжного селектора).
+    """
+    target = str(tool_args.get("target") or tool_args.get("element") or tool_args.get("ref") or "").strip()
+    if not target or _is_hash_ref(target):
+        return None
+    # Роль-локатор («textbox "Поиск"») не является CSS-селектором — пропускаем,
+    # чтобы не падать на парсинге. Чистим только по явному CSS.
+    if "textbox" in target or target.startswith("a:has") or "role=" in target:
+        return None
+    sel = target.replace("'", "\\'")
+    return (
+        "() => { const inp = document.querySelector('" + sel +
+        "'); if (!inp) return 'no input'; const proto = inp instanceof HTMLTextAreaElement "
+        "? HTMLTextAreaElement.prototype : HTMLInputElement.prototype; "
+        "const setter = Object.getOwnPropertyDescriptor(proto, 'value').set; "
+        "setter.call(inp, ''); inp.dispatchEvent(new Event('input', {bubbles:true})); "
+        "return 'cleared'; }"
+    )
 
 
 def _build_diagnostic_message(spec_text: str, current_site: str, card_open: bool = False,

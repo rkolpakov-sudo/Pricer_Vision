@@ -7,7 +7,7 @@ from src.agent_loop import (
     _apply_approach, _is_standard_reference,
     _stuck_target, _is_product_card_url,
     _extract_price_candidate, _build_diagnostic_message,
-    _price_is_relevant,
+    _price_is_relevant, _clear_field_js,
     _is_family_page, _is_empty_search_result,
     _pick_best_fallback, _fallback_result,
     _mismatch_warning_content,
@@ -302,6 +302,33 @@ class TestPortableStepTarget:
 
     def test_empty_step(self):
         assert _portable_step_target({}) == ""
+
+
+class TestClearFieldJs:
+    """Автозачистка поля перед browser_type (регрессия: склейка «МС-140 Мх500МС-140»)."""
+
+    def test_css_target_generates_clear_js(self):
+        js = _clear_field_js({"target": "input[name=\"search\"]"})
+        assert js is not None
+        assert "querySelector" in js
+        assert "setter.call(inp, '')" in js
+        assert "input" in js  # dispatch input event
+
+    def test_class_target_generates_clear_js(self):
+        js = _clear_field_js({"target": "input.search_input"})
+        assert js is not None
+        assert "querySelector('input.search_input')" in js
+
+    def test_hash_ref_returns_none(self):
+        assert _clear_field_js({"target": "e80"}) is None
+        assert _clear_field_js({"target": "f3e127"}) is None
+
+    def test_role_locator_returns_none(self):
+        assert _clear_field_js({"target": 'textbox "Поиск"'}) is None
+
+    def test_empty_target_returns_none(self):
+        assert _clear_field_js({"target": ""}) is None
+        assert _clear_field_js({}) is None
 
 
 class TestFormatStepsPortable:
