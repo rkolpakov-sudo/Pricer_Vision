@@ -173,6 +173,24 @@ class TestBuildContext:
                              use_site_ranking=True, site_ranking=ranking)
         assert ctx.find("rank.ru") < ctx.find("succ.ru")
 
+    def test_success_score_orders_sites(self):
+        """Сайт с БОЛЬШЕЙ суммарной успешностью подходов стоит выше при равном приоритете.
+
+        Регрессия позиции 36 (МС-140): santech (48 успехов) стоял ниже satro-paladin (2),
+        агент шёл не туда и не добирался до santech с найденным товаром."""
+        sites = [
+            {"id": "satro-paladin.com", "priority": 0},
+            {"id": "santech.ru", "priority": 0},
+        ]
+        approaches = [
+            {"site_id": "santech.ru", "success_count": 48},
+            {"site_id": "satro-paladin.com", "success_count": 2},
+        ]
+        ctx = _build_context("Чугунный секционный радиатор МС-140",
+                             "plumbing_heating_radiators", approaches, [], sites, [],
+                             use_site_ranking=True)
+        assert ctx.find("santech.ru") < ctx.find("satro-paladin.com")
+
 
 class TestErrorResult:
     def test_returns_error_dict(self):
@@ -212,6 +230,32 @@ class TestApplyApproach:
         adapted = _apply_approach(approach, "Товар")
         assert adapted["concrete"][0]["url"] == "https://site.ru/catalog"
 
+    def test_scrubs_hash_ref_target_without_element(self):
+        """Исторические подходы с target=хеш-реф (e80) и без element — бесполезны:
+        LLM должен сам найти элемент, а не вводить в несуществующий e80."""
+        approach = {
+            "concrete": [
+                {"action": "browser_type", "text": "Радиатор МС-140", "target": "e80"},
+            ],
+        }
+        adapted = _apply_approach(approach, "Чугунный радиатор МС-140")
+        step = adapted["concrete"][0]
+        assert "target" not in step or step.get("target") != "e80"
+        assert step.get("_auto_target") is True
+        assert step["text"] == "Чугунный радиатор МС-140"
+
+    def test_keeps_element_target(self):
+        """Если element сохранён (роль-локатор) — оставляем, он переносим."""
+        approach = {
+            "concrete": [
+                {"action": "browser_type", "text": "искать", "target": "e66",
+                 "element": 'textbox "Искать товары"'},
+            ],
+        }
+        adapted = _apply_approach(approach, "Товар")
+        step = adapted["concrete"][0]
+        assert step.get("element") == 'textbox "Искать товары"'
+
 
 class TestPortableStepTarget:
     def test_css_target_kept(self):
@@ -230,6 +274,12 @@ class TestPortableStepTarget:
     def test_hash_ref_replaced_by_text(self):
         step = {"action": "browser_type", "target": "f2e81", "text": "Мембранный бак 100л"}
         assert _portable_step_target(step) == "Мембранный бак 100л"
+
+    def test_auto_target_hash_ref_returns_empty(self):
+        """После _apply_approach хеш-реф очищен и помечен _auto_target —
+        локатор не показывается, LLM ищет элемент сам (не подставляем text как локатор)."""
+        step = {"action": "browser_type", "target": "e80", "text": "Радиатор МС-140", "_auto_target": True}
+        assert _portable_step_target(step) == ""
 
     def test_empty_step(self):
         assert _portable_step_target({}) == ""

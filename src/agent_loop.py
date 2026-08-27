@@ -268,11 +268,20 @@ def _portable_step_target(step: dict) -> str:
     ref `e82`, который в Camoufox не существует (другой ref-генератор). Поэтому
     для шагов click/type показываем element (роль/описание) или text — то, что
     переносимо между бэкендами.
+
+    Если target — хеш-реф и element не сохранён — возвращаем '' (LLM сам найдёт
+    элемент на странице), а НЕ text: text в шаге ввода — это значение для ввода,
+    а не локатор поля; подстановка его как target вводит агента в заблуждение.
     """
     ref = str(step.get("target") or step.get("ref") or "")
     if ref and not _is_hash_ref(ref):
         return ref
-    return str(step.get("element") or step.get("text") or "")
+    elem = str(step.get("element") or "")
+    if elem:
+        return elem
+    if step.get("_auto_target"):
+        return ""
+    return str(step.get("text") or "")
 
 
 def _apply_approach(approach: dict, spec_text: str) -> dict:
@@ -283,6 +292,14 @@ def _apply_approach(approach: dict, spec_text: str) -> dict:
     adapted["concrete"] = []
     for step in approach.get("concrete", []):
         step = dict(step)
+        # Исторические подходы могли сохранить target как хеш-реф accessibility-дерева
+        # (e80, e81) — они недействительны между сессиями/бэкендами. Если element/роль
+        # не сохранены — такой target бесполезен, LLM должен сам найти элемент на странице.
+        ref = str(step.get("target") or "")
+        if ref and _is_hash_ref(ref) and not step.get("element"):
+            step.pop("target", None)
+            step.pop("ref", None)
+            step["_auto_target"] = True
         slot_name = step.get("param_slot")
         if slot_name and slot_name in slots:
             for field in ("text", "url", "value"):
@@ -671,6 +688,25 @@ async def process_row(
                 result = _execute_graph_tool(tool_name, tool_args, graph_engine, memory_manager, spec_text=search_text)
             elif tool_name in ("browser_navigate", "navigate"):
                 new_site = tool_args.get("url", "")
+                # Жёсткий гейт: если на текущем сайте УЖЕ найдена цена-кандидат
+                # (товар выявлен в результатах/карточке), уходить на ДРУГОЙ домен запрещено,
+                # пока цена не сохранена через save_confirmed_price. Это защита от потери
+                # найденного товара (регрессия: позиция 36 — агент ушёл с santech при найденной цене).
+                leaving_domain = bool(new_site and current_site
+                                      and _extract_domain(new_site) != _extract_domain(current_site))
+                if (leaving_domain and price_candidate_seen and not price_confirmed):
+                    logger.warning("🚫 Navigate blocked: price candidate seen on %s, not confirmed",
+                                   _extract_domain(current_site))
+                    messages.append({
+                        "role": "tool",
+                        "tool_call_id": tc.get("id", ""),
+                        "content": ("error: на текущем сайте уже найдена цена-кандидат (price_candidate). "
+                                    "НЕ уходи с этого сайта, пока цена не сохранена. Сейчас: либо открой "
+                                    "карточку найденного товара и извлеки цену, либо сохрани её через "
+                                    "save_confirmed_price с product_name (полное название с карточки). "
+                                    "Только ПОСЛЕ сохранения цены можно переходить на другой сайт."),
+                    })
+                    continue
                 # Soft Yandex reminder: warn but do NOT block navigation
                 if "yandex" in current_site and not yandex_price_saved and new_site and "yandex" not in new_site.lower():
                     logger.info("ℹ️ Leaving Yandex for %s (yandex_price_saved=%s)", new_site, yandex_price_saved)
@@ -1192,7 +1228,14 @@ def _build_context(spec_text, product_type, approaches, confirmed_prices, sites,
     if sites:
         site_ids = {s['id'] for s in sites}
         approach_sites = {a.get("site_id", "") for a in approaches if a.get("site_id", "") in site_ids}
-        success_sites = {a.get("site_id", "") for a in approaches if a.get("site_id", "") in site_ids and a.get("success_count", 0) > 0}
+        # Суммарная успешность подходов по сайту: чем больше успехов, тем выше сайт
+        # (регрессия: santech с 48 успехами стоял ниже satro-paladin с 2 — агент шёл не туда).
+        success_scores: dict[str, int] = {}
+        for a in approaches:
+            sid = a.get("site_id", "")
+            if sid in site_ids and a.get("success_count", 0) > 0:
+                success_scores[sid] = success_scores.get(sid, 0) + int(a.get("success_count", 0) or 0)
+        success_sites = set(success_scores)
         price_sites = {p.get("site_id", "") for p in confirmed_prices if p.get("site_id", "") in site_ids}
         failed_sites = {a.get("site_id", "") for a in approaches if a.get("site_id", "") in site_ids and a.get("consecutive_failures", 0) >= 3}
         for s in sites:
@@ -1205,31 +1248,21 @@ def _build_context(spec_text, product_type, approaches, confirmed_prices, sites,
             # Сайты, где УЖЕ есть цены этого товара/семьи (даже другого типоразмера) —
             # самый сильный сигнал «сюда идти» (обучение на соседних позициях).
             if sid in price_sites:
-                return 0
+                return (0, -10_000_000)
             if not use_site_ranking:
                 # Чистый поиск без памяти: порядок по белому списку (priority),
                 # успешность подходов НЕ влияет.
-                if priority == 0:
-                    return 3
-                if priority == 1:
-                    return 4
-                if sid in failed_sites:
-                    return 6
-                return 5
+                cat = 3 if priority == 0 else (4 if priority == 1 else (6 if sid in failed_sites else 5))
+                return (cat, 0)
             # Рейтинг по профилю (тип, бренд) → сайт: выше подходов, но ниже цен.
             if site_ranking and sid in site_ranking:
-                return 0.5 + min(max(site_ranking[sid], -0.5), 0.5) * 0.4
+                return (0.5, -success_scores.get(sid, 0))
             if sid in success_sites:
-                return 1
+                return (1, -success_scores.get(sid, 0))
             if sid in approach_sites:
-                return 2
-            if priority == 0:
-                return 3
-            if priority == 1:
-                return 4
-            if sid in failed_sites:
-                return 6
-            return 5
+                return (2, 0)
+            cat = 3 if priority == 0 else (4 if priority == 1 else (6 if sid in failed_sites else 5))
+            return (cat, 0)
 
         ordered = sorted(sites, key=_sort_key)
         first_site = ordered[0]['id']

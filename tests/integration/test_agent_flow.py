@@ -233,6 +233,33 @@ class TestAgentFlow:
         )
         assert mm.get_all_approaches_calls >= 1
 
+    async def test_cannot_leave_site_when_price_candidate_seen(self):
+        """Критичная регрессия (позиция 36): если на сайте найдена цена-кандидат,
+        агент НЕ может уйти browser_navigate на другой домен, пока цена не сохранена."""
+        llm, bridge, engine, mm, cache = make_env(
+            responses=[
+                llm_tool_call("browser_navigate", {"url": "https://santech.ru"}),
+                llm_tool_call("browser_evaluate", {"function": "return prices;"}),
+                llm_tool_call("browser_navigate", {"url": "https://other-site.ru"}),
+                llm_final(4415.59),
+            ],
+            evaluate_result='4 415,59 ₽',
+        )
+        result = await process_row(
+            spec_text="Чугунный радиатор МС-140",
+            llm_client=llm,
+            mcp_bridge=bridge,
+            graph_engine=engine,
+            memory_manager=mm,
+            fresh=True,
+            semantic_cache=cache,
+        )
+        # Навигация на другой домен была ЗАБЛОКИРОВАНА — её нет в вызовах bridge
+        navigations = [a for n, a in bridge.calls if n == "browser_navigate"]
+        assert not any("other-site.ru" in str(a.get("url", "")) for a in navigations)
+        # Цена всё равно извлечена
+        assert result.get("price") == 4415.59
+
     async def test_tool_call_then_final(self):
         """LLM вызывает browser_navigate, затем возвращает финальную цену."""
         llm, bridge, engine, mm, cache = make_env(responses=[
