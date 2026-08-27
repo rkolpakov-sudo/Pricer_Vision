@@ -177,20 +177,38 @@ class TestBuildContext:
     def test_success_score_orders_sites(self):
         """Сайт с БОЛЬШЕЙ суммарной успешностью подходов стоит выше при равном приоритете.
 
-        Регрессия позиции 36 (МС-140): santech (48 успехов) стоял ниже satro-paladin (2),
-        агент шёл не туда и не добирался до santech с найденным товаром."""
+        Регрессия позиции 36 (МС-140): santech (успехи по МС-140) стоял ниже
+        satro-paladin (успехи по LEMAX) — агент шёл не туда."""
         sites = [
             {"id": "satro-paladin.com", "priority": 0},
             {"id": "santech.ru", "priority": 0},
         ]
         approaches = [
-            {"site_id": "santech.ru", "success_count": 48},
-            {"site_id": "satro-paladin.com", "success_count": 2},
+            {"site_id": "santech.ru", "success_count": 48, "search_query": "Радиатор чугунный МС-140 Мх500"},
+            {"site_id": "satro-paladin.com", "success_count": 200, "search_query": "Радиатор панельный LEMAX Premium C10 500x600"},
         ]
         ctx = _build_context("Чугунный секционный радиатор МС-140",
                              "plumbing_heating_radiators", approaches, [], sites, [],
                              use_site_ranking=True)
+        # santech (модель МС-140 совпадает) выше satro-paladin (модель LEMAX — чужая),
+        # несмотря на меньший success_count (48 < 200).
         assert ctx.find("santech.ru") < ctx.find("satro-paladin.com")
+
+    def test_model_filter_ignores_foreign_model_success(self):
+        """Успехи подходов ЧУЖОЙ модели (LEMAX) не поднимают сайт для МС-140."""
+        sites = [
+            {"id": "lemax.ru", "priority": 0},
+            {"id": "ms140.ru", "priority": 0},
+        ]
+        approaches = [
+            {"site_id": "lemax.ru", "success_count": 500, "search_query": "Радиатор панельный LEMAX Premium C10"},
+            {"site_id": "ms140.ru", "success_count": 3, "search_query": "Радиатор чугунный МС-140 Мх500"},
+        ]
+        ctx = _build_context("Чугунный секционный радиатор МС-140",
+                             "plumbing_heating_radiators", approaches, [], sites, [],
+                             use_site_ranking=True)
+        # ms140.ru (3 успеха по модели МС-140) выше lemax.ru (500 успехов LEMAX)
+        assert ctx.find("ms140.ru") < ctx.find("lemax.ru")
 
 
 class TestErrorResult:

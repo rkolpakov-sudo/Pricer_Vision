@@ -25,7 +25,7 @@ from src.captcha_detector import CaptchaDetector, CaptchaType
 from src.approach_relevance import (
     approach_relevant, product_name_matches, product_name_matches_ignore_brand,
     missing_required_tokens, normalize_search_text, is_standard_reference,
-    search_key_tokens, mismatch_kind,
+    search_key_tokens, mismatch_kind, model_designators,
 )
 from src.session_facts import RowFacts, SessionFacts
 
@@ -1228,13 +1228,21 @@ def _build_context(spec_text, product_type, approaches, confirmed_prices, sites,
     if sites:
         site_ids = {s['id'] for s in sites}
         approach_sites = {a.get("site_id", "") for a in approaches if a.get("site_id", "") in site_ids}
-        # Суммарная успешность подходов по сайту: чем больше успехов, тем выше сайт
-        # (регрессия: santech с 48 успехами стоял ниже satro-paladin с 2 — агент шёл не туда).
+        # Суммарная успешность подходов по сайту, ОТФИЛЬТРОВАННАЯ по МОДЕЛИ текущего
+        # товара. Модель — дифференциатор: успехи LEMAX-радиаторов не должны толкать
+        # satro-paladin выше santech для МС-140 (регрессия: агент шёл не туда).
+        # Если модель текущего товара не определена — учитываем все подходы типа.
+        spec_models = model_designators(spec_text)
         success_scores: dict[str, int] = {}
         for a in approaches:
             sid = a.get("site_id", "")
-            if sid in site_ids and a.get("success_count", 0) > 0:
-                success_scores[sid] = success_scores.get(sid, 0) + int(a.get("success_count", 0) or 0)
+            if sid not in site_ids or a.get("success_count", 0) <= 0:
+                continue
+            if spec_models:
+                a_models = model_designators(a.get("search_query") or "")
+                if not (a_models & spec_models):
+                    continue  # подход другого товара того же типа — не влияет на рейтинг
+            success_scores[sid] = success_scores.get(sid, 0) + int(a.get("success_count", 0) or 0)
         success_sites = set(success_scores)
         price_sites = {p.get("site_id", "") for p in confirmed_prices if p.get("site_id", "") in site_ids}
         failed_sites = {a.get("site_id", "") for a in approaches if a.get("site_id", "") in site_ids and a.get("consecutive_failures", 0) >= 3}

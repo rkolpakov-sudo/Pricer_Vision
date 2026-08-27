@@ -1,5 +1,27 @@
 # State Log
 
+## 2026-08-27 — ФАЗА 2 плана рефакторинга: рейтинг сайтов по модели товара
+
+### Проблема (P2/P3)
+`success_scores` считались по ТИПУ `plumbing_heating_radiators`: satro-paladin (56
+успехов LEMAX-радиаторов) стоял выше santech (1 успех МС-140). Агент для МС-140
+шёл на satro-paladin, где товара нет.
+
+### Исправлено (`agent_loop._build_context._sort_key`)
+`success_scores` фильтруются по МОДЕЛИ текущего товара (`model_designators`):
+- подход учитывается только если `model_designators(search_query)` пересекается с
+  `model_designators(spec_text)`;
+- если модель текущего товара не определена — учитываются все подходы типа (fallback);
+- успехи LEMAX-радиаторов больше не толкают satro-paladin для МС-140.
+
+### Проверка
+- МС-140: «Первый сайт для поиска: santech.ru» (price_sites — цена #1846 из кэша);
+  scores по модели для МС-140 пуст (нет подходов с моделью МС-140).
+- LEMAX C10: «Первый сайт: satro-paladin.com» (scores 30 против mircli 4) — модель
+  корректно ведёт каждый товар на свой сайт.
+- **976 passed, 2 skipped** (+1 тест: model_filter_ignores_foreign_model_success;
+  обновлён test_success_score_orders_sites).
+
 ## 2026-08-27 — ФАЗА 1 (П1b): URL МС-140 обновлён на карточку варианта /v3/
 
 ### Проблема
