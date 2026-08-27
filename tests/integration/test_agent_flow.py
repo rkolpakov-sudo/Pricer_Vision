@@ -716,3 +716,38 @@ class TestPhase5Verification:
         )
         text = _all_message_text(env[0].calls[0])
         assert "Сессионные факты" not in text
+
+@pytest.mark.asyncio
+class TestPhase0ConfidenceCap:
+    SPEC_C10 = 'Стальной панельный радиатор с боковым подключением LEMAX Premium Compact Hygiene, тип C10, в компл. с краном для выпуска воздуха и креплениями LEMAX Premium C10 500x600'
+    H1_C10 = 'Радиатор панельный ЛЕМАКС Premium C 10х500х600'
+
+    async def _run_confirm(self, graph_engine, spec, found):
+        from src.memory_manager import MemoryManager
+        mm = MemoryManager(graph_engine)
+        llm = FakeLLM([llm_tool_call('save_confirmed_price', {
+            'product_name': found,
+            'price': 4044.15, 'confidence': 0.9,
+            'url': 'https://satro-paladin.com/catalog/product/207165/',
+            'site': 'satro-paladin.com',
+            'confirm': True,
+        })])
+        return await process_row(
+            spec_text=spec, llm_client=llm, mcp_bridge=FakeBridge(),
+            graph_engine=graph_engine, memory_manager=mm,
+            fresh=True, semantic_cache=FakeSemanticCache(),
+        )
+
+    async def test_descriptive_only_confirm_not_capped(self, graph_engine):
+        # h1 опускает описательные слова + «стальной», но модель C10 совпадает
+        result = await self._run_confirm(graph_engine, self.SPEC_C10, self.H1_C10)
+        assert result.get('price') == 4044.15
+        assert result.get('confidence', 0) >= 0.8
+        assert result.get('requires_review') is True
+
+    async def test_model_mismatch_confirm_still_capped(self, graph_engine):
+        # C20 spec, но карточка C10 — модель различается, кап 0.5 остаётся
+        spec_c20 = self.SPEC_C10.replace('C10', 'C20')
+        result = await self._run_confirm(graph_engine, spec_c20, self.H1_C10)
+        assert result.get('price') == 4044.15
+        assert result.get('confidence', 1) <= 0.5

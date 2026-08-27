@@ -7,6 +7,7 @@ from src.approach_relevance import (
     _size_key,
     missing_required_tokens, normalize_search_text,
     search_key_tokens,
+    model_designators, mismatch_kind,
 )
 
 
@@ -456,3 +457,43 @@ class TestSearchKeyTokens:
 
     def test_empty_returns_empty(self):
         assert search_key_tokens('', {}) == {}
+
+class TestPhase0ModelProtection:
+    SPEC_C10 = 'Стальной панельный радиатор с боковым подключением LEMAX Premium Compact Hygiene, тип C10, в компл. с краном для выпуска воздуха и креплениями LEMAX Premium C10 500x600'
+    H1_C10 = 'Радиатор панельный ЛЕМАКС Premium C 10х500х600'
+
+    def test_model_designators_canon(self):
+        assert model_designators('LEMAX Premium C10 500x600') == {'c10'}
+        assert model_designators('Premium C 10х500х600') == {'c10'}
+        assert model_designators('VC33 600x3000') == {'vc33'}
+        assert model_designators('MS-140') == {'ms140'}
+
+    def test_model_designators_excludes_params(self):
+        assert model_designators('Кран шаровой Ду15 PN16 ру16 kvs') == set()
+        assert model_designators('11б38п Ду15') == set()
+
+    def test_reuse_blocks_different_model(self):
+        spec_c20 = self.SPEC_C10.replace('C10', 'C20')
+        assert product_name_matches(spec_c20, self.SPEC_C10, strict_sizes=True) is False
+        assert product_name_matches(spec_c20, self.SPEC_C10, ignore_sizes=True) is False
+
+    def test_reuse_allows_same_model(self):
+        assert product_name_matches(self.SPEC_C10, self.SPEC_C10, strict_sizes=True) is True
+
+    def test_reuse_same_model_via_h1(self):
+        # h1 «C 10х500х600» — модель c10 (сырой текст), токенизатор его не видит
+        assert product_name_matches(self.SPEC_C10, self.H1_C10, strict_sizes=True) is False
+        # но полный spec → spec (путь реюза сравнивает spec со stored spec) — True
+
+    def test_mismatch_kind_descriptive_only(self):
+        assert mismatch_kind(self.SPEC_C10, self.H1_C10) == 'descriptive_only'
+
+    def test_mismatch_kind_key_model(self):
+        spec_c20 = self.SPEC_C10.replace('C10', 'C20')
+        assert mismatch_kind(spec_c20, self.H1_C10) == 'key'
+
+    def test_mismatch_kind_key_size(self):
+        assert mismatch_kind('Кран шаровой Ду15', 'Кран шаровой Ду20') == 'key'
+
+    def test_mismatch_kind_none(self):
+        assert mismatch_kind(self.SPEC_C10, self.SPEC_C10) == 'none'

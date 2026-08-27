@@ -25,7 +25,7 @@ from src.captcha_detector import CaptchaDetector, CaptchaType
 from src.approach_relevance import (
     approach_relevant, product_name_matches, product_name_matches_ignore_brand,
     missing_required_tokens, normalize_search_text, is_standard_reference,
-    search_key_tokens,
+    search_key_tokens, mismatch_kind,
 )
 from src.session_facts import RowFacts, SessionFacts
 
@@ -933,10 +933,16 @@ async def process_row(
                 }, spec_text)
                 if validated.get("price") is not None:
                     if not match_ok:
-                        # LLM подтвердил несоответствующее наименование — принимаем, но помечаем на ревью
-                        # и не допускаем до доверенного кэша/auto-reuse.
+                        # LLM подтвердил несоответствие наименования. Если расхождение
+                        # ТОЛЬКО описательное/материал (модель, размер, бренд совпали) —
+                        # товар верен, допускаем до rule-8 (confidence не режем до 0.5).
+                        # Иначе (модель C20≠C10, размер, структурные ключевые слова) — 0.5.
                         validated["requires_review"] = True
-                        validated["confidence"] = round(min(validated.get("confidence", 0), 0.5), 2)
+                        kind = mismatch_kind(spec_text, found_name)
+                        if kind in ("descriptive_only", "none"):
+                            validated["confidence"] = round(max(validated.get("confidence", 0), 0.8), 2)
+                        else:
+                            validated["confidence"] = round(min(validated.get("confidence", 0), 0.5), 2)
                         validated["reason"] = (validated.get("reason", "")
                                                + " (подтверждено LLM при несоответствии наименования)").strip()
                     if brand_mismatch:
@@ -1620,12 +1626,19 @@ def _mismatch_warning_content(spec_text: str, found_name: str) -> str:
     перепроверить карточку и решить: исправить product_name либо сохранить с
     confirm=true. НЕ блокирует и НЕ принимает решение за LLM.
     """
-    from src.approach_relevance import _OPTIONAL_SET
+    from src.approach_relevance import _OPTIONAL_SET, model_designators
     missing = missing_required_tokens(spec_text, found_name)
     descriptive = sorted(w for w in missing if w in _OPTIONAL_SET)
     key = sorted(w for w in missing if w not in _OPTIONAL_SET)
+    # Модель/тип (C10 vs C20) — дифференциатор, сравнивается на сыром тексте.
+    spec_models = model_designators(spec_text)
+    model_diff = spec_models and model_designators(found_name) != spec_models
     parts = [f"⚠️ СОВЕТ: наименование «{(found_name or '')[:80]}» не полностью "
              f"совпадает со спецификацией «{(spec_text or '')[:80]}»."]
+    if model_diff:
+        parts.append(f" КЛЮЧЕВОЕ расхождение: МОДЕЛЬ/ТИП спецификации «{'», «'.join(sorted(spec_models))}» "
+                     "не совпадает с карточкой — вероятно, ДРУГОЙ товар (например C10 ≠ C20). "
+                     "Перепроверь заголовок (h1) и характеристики.")
     if key:
         parts.append(f" КЛЮЧЕВЫЕ слова спецификации отсутствуют: «{'», «'.join(key)}» — "
                      "это тип/материал/соединение/бренд; если их правда нет на карточке, "

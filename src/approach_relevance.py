@@ -398,6 +398,79 @@ def _is_optional_token(w: str) -> bool:
     return bool(re.search(r"\d", w))
 
 
+_MODEL_CODE_RE = re.compile(
+    r"(?<![a-zа-яё0-9])([a-zа-яё]{1,4})\s*[-]?\s*(\d{1,3})(?![0-9])",
+    re.IGNORECASE,
+)
+# Префиксы, которые НЕ являются моделью/типом: параметры (ру/pn/kvs…), диаметры
+# (ду/dn/dp), разделитель размера (х/x/×), единицы и служебные (тип/размер/гост/ту).
+_MODEL_PREFIX_EXCLUDE = frozenset({
+    "ду", "дн", "dn", "dp", "мм", "тип", "размер", "гост", "ту",
+    "х", "x", "×", "pn", "ру", "нр", "np", "kvs", "kv", "бар", "па",
+    "атм", "тмакс", "макс", "мин", "max", "min", "град",
+})
+
+
+def model_designators(text: str) -> set[str]:
+    """Коды моделей/типов товара (дифференциаторы реюза): «C10», «C 10»,
+    «VC33», «MS-140» → канонические «c10», «vc33», «ms140».
+
+    Сравнение на СЫРОМ тексте: h1 «Premium C 10х500х600» токенизируется в
+    «10х500х600» БЕЗ токена «c10» (тип слит с размером) — по токенам модель
+    не увидеть. Исключаются префиксы-параметры/диаметры и разделитель «х».
+    """
+    low = (text or "").lower()
+    if not low:
+        return set()
+    excluded = _MODEL_PREFIX_EXCLUDE | _PARAM_SET | _STOPWORDS_SET
+    out: set[str] = set()
+    for m in _MODEL_CODE_RE.finditer(low):
+        prefix, digits = m.group(1), m.group(2)
+        if prefix in excluded:
+            continue
+        code = prefix + digits
+        if len(code) >= 3:
+            out.add(code)
+    return out
+
+
+_MATERIAL_SET = frozenset({
+    "стальной", "латунный", "чугунный", "медный", "алюминиевый",
+    "биметаллический", "оцинкованный", "нержавеющий",
+    "сталь", "латунь", "чугун", "медь", "алюминий",
+    "полипропиленовый", "пвх", "резиновый",
+})
+
+
+def mismatch_kind(spec_text: str, found_name: str) -> str:
+    """Тип расхождения наименований: 'none' | 'descriptive_only' | 'key'.
+
+    key — различается МОДЕЛЬ (C10 vs C20), размер (Ду15 vs Ду20), бренд, или
+    отсутствуют структурные ключевые слова (панельный vs секционный, кран vs
+    клапан) — вероятно другой товар;
+    descriptive_only — отличаются только описательные слова (серия/комплектация)
+    и/или МАТЕРИАЛ-прилагательные (сайт опускает их в сокращённом h1, карточка
+    подтверждает). Модель сравнивается на сыром тексте («C 10х500х600»).
+    """
+    spec_models = model_designators(spec_text)
+    if spec_models and model_designators(found_name) != spec_models:
+        return "key"
+    spec_sizes = _size_key(spec_text)
+    found_sizes = _size_key(found_name)
+    if spec_sizes and found_sizes and spec_sizes != found_sizes:
+        return "key"
+    spec_brand = _brand_of(spec_text)
+    found_brand = _brand_of(found_name)
+    if spec_brand and found_brand and spec_brand != found_brand:
+        return "key"
+    missing = missing_required_tokens(spec_text, found_name)
+    if not missing:
+        return "none"
+    if all(w in _OPTIONAL_SET or w in _MATERIAL_SET for w in missing):
+        return "descriptive_only"
+    return "key"
+
+
 def missing_required_tokens(spec_text: str, found_name: str) -> list[str]:
     """Обязательные значимые слова спецификации, отсутствующие в названии карточки.
 
@@ -508,6 +581,14 @@ def _product_matches_core(spec_text: str, found_name: str, check_brand: bool = T
         required = spec_tokens
     if not all(_prefix_match(s, found_tokens) for s in required):
         return False
+
+    # Модель/тип — дифференциатор на путях РЕЮЗА/ГИДА (strict_sizes/ignore_sizes):
+    # «LEMAX Premium C20 500x600» ≠ «LEMAX Premium C10 500x600». Сравнение на
+    # сыром тексте (h1 «C 10х500х600» токенизатор не разбивает на «c10»).
+    if strict_sizes or ignore_sizes:
+        spec_models = model_designators(spec_text)
+        if spec_models and model_designators(found_name) != spec_models:
+            return False
 
     spec_sizes = _size_key(spec_text)
     found_sizes = _size_key(found_name)
