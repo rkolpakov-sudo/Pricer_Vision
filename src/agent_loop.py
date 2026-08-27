@@ -400,6 +400,7 @@ async def process_row(
     site_blacklist=None,
     site_visit_callback: Callable[[str], None] | None = None,
     session_facts: SessionFacts | None = None,
+    ductwork_enabled: bool = False,
 ) -> dict:
     start_time = datetime.now()
     spec_brand = (spec_meta or {}).get("brand", "") or ""
@@ -436,6 +437,25 @@ async def process_row(
         return _result_to_schema(result)
 
     product_type = graph_engine.classify_product_type(spec_text)
+
+    # Воздуховоды и фасонные части: детерминированный расчёт МОДУЛЕМ, без
+    # обращения в сеть (browser/LLM не вызываются). Строка НЕ кэшируется и
+    # НЕ сохраняется в граф — только в Excel.
+    if ductwork_enabled:
+        from src.ductwork_calculator import calculate_ductwork_row
+        try:
+            duct_result = calculate_ductwork_row(spec_text, spec_meta,
+                                                 product_type=product_type)
+        except Exception as e:
+            logger.warning("Ductwork calculation failed: %s", e)
+            duct_result = None
+        if duct_result is not None:
+            elapsed = (datetime.now() - start_time).total_seconds()
+            duct_result["elapsed"] = elapsed
+            logger.info("Row: ductwork price=%.2f (изделие) in %.1fs",
+                        duct_result.get("price", 0), elapsed)
+            return _result_to_schema(duct_result)
+
     search_text = normalize_search_text(spec_text)
     if search_text != spec_text:
         logger.info("Search text normalized: '%s' -> '%s' (незначимые фразы убраны из поиска)",
@@ -1038,7 +1058,6 @@ async def process_row(
                 if not match_ok:
                     previously_confirmed = memory_manager.has_matching_equivalence(spec_text, found_name)
                     if previously_confirmed:
-                        # Пара уже подтверждена ранее — принимаем без предупреждения.
                         logger.info("Row: known equivalent pair, accept: spec=%s found=%s",
                                     spec_text[:50], str(found_name)[:50])
                         match_ok = True
@@ -1090,7 +1109,7 @@ async def process_row(
                         # товар верен, допускаем до rule-8 (confidence не режем до 0.5).
                         # Иначе (модель C20≠C10, размер, структурные ключевые слова) — 0.5.
                         validated["requires_review"] = True
-                        kind = mismatch_kind(spec_text, found_name)
+                        kind = mismatch_kind(spec_text, found_name, spec_meta)
                         if kind in ("descriptive_only", "none"):
                             validated["confidence"] = round(max(validated.get("confidence", 0), 0.8), 2)
                         else:
@@ -2022,10 +2041,16 @@ def _result_to_schema(result: dict) -> dict:
             elapsed=result.get("elapsed"),
             brand_mismatch=result.get("brand_mismatch", False),
         )
-        return model.model_dump()
+        out = model.model_dump()
     except Exception as e:
         logger.warning("Schema validation failed: %s", e)
         return result
+    # Служебные ключи, не входящие в контракт ExtractionResult, но нужные
+    # GUI (например, ductwork_breakdown для колонки «Пометка»).
+    for extra in ("ductwork_breakdown",):
+        if result.get(extra) is not None:
+            out[extra] = result[extra]
+    return out
 
 
 CONTEXT_TOKEN_BUDGET = 8000

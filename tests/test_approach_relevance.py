@@ -526,3 +526,13 @@ class TestPhase0ModelProtection:
 
     def test_mismatch_kind_none(self):
         assert mismatch_kind(self.SPEC_C10, self.SPEC_C10) == 'none'
+
+    def test_mismatch_kind_article_overrides_to_descriptive(self):
+        """Артикул 013G7027 совпадает — товар тот же, расхождение не key.
+        Регрессия: #1852 сохранялся с conf 0.50 из-за несовпадения описательных слов,
+        хотя артикул однозначно идентифицирует товар."""
+        spec = "Клапан терморегулятора с повышенной пропускной способностью RTR-G; подключение термоэлемента типа RTR; угловой; внутренняя резьба DN25 013G7027"
+        h1 = "Клапан терморегулятора RTR-G DN25 013G7027"
+        assert mismatch_kind(spec, h1, {'article': '013G7027'}) == 'descriptive_only'
+        # без артикула — key (как было раньше)
+        assert mismatch_kind(spec, h1) == 'key'

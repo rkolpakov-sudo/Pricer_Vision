@@ -472,7 +472,7 @@ _MATERIAL_SET = frozenset({
 })
 
 
-def mismatch_kind(spec_text: str, found_name: str) -> str:
+def mismatch_kind(spec_text: str, found_name: str, spec_meta: dict | None = None) -> str:
     """Тип расхождения наименований: 'none' | 'descriptive_only' | 'key'.
 
     key — различается МОДЕЛЬ (C10 vs C20), размер (Ду15 vs Ду20), бренд, или
@@ -481,7 +481,15 @@ def mismatch_kind(spec_text: str, found_name: str) -> str:
     descriptive_only — отличаются только описательные слова (серия/комплектация)
     и/или МАТЕРИАЛ-прилагательные (сайт опускает их в сокращённом h1, карточка
     подтверждает). Модель сравнивается на сыром тексте («C 10х500х600»).
+
+    Артикул/код из spec_meta — железный идентификатор: если он совпадает с
+    найденным названием, товар тот же (расхождение не может быть "key").
     """
+    # Артикул — решающий признак: если он совпадает, товар тот же.
+    if spec_meta:
+        article = (spec_meta.get("article") or "").strip()
+        if article and article.lower() in (found_name or "").lower():
+            return "descriptive_only"
     spec_models = model_designators(spec_text)
     if spec_models and model_designators(found_name) != spec_models:
         return "key"
