@@ -53,6 +53,27 @@ class TestGetters:
         assert cl.get_antidetect_config("rate_limit_min_interval", 0.0) == 1.5
         assert cl.get_antidetect_config("missing", "d") == "d"
 
+    def test_get_browser_config_antidetect_keys(self, monkeypatch):
+        """Новые ключи антибот-консистентности отпечатка (browser)."""
+        monkeypatch.setattr(cl, "load_settings", lambda: {
+            "browser": {"locale": "ru-RU", "timezone": "Europe/Moscow",
+                        "geoip": False, "hide_setters": True,
+                        "persistent_profile": True, "pinned_fingerprint": True,
+                        "profile_dir": "data/camoufox_profile"},
+        })
+        assert cl.get_browser_config("locale", "en-US") == "ru-RU"
+        assert cl.get_browser_config("timezone", "UTC") == "Europe/Moscow"
+        assert cl.get_browser_config("geoip", True) is False
+        assert cl.get_browser_config("hide_setters", False) is True
+        assert cl.get_browser_config("persistent_profile", False) is True
+        assert cl.get_browser_config("pinned_fingerprint", False) is True
+        assert cl.get_browser_config("profile_dir", "") == "data/camoufox_profile"
+        assert cl.get_browser_config("missing", "d") == "d"
+
+    def test_get_antidetect_config_humanize_default(self, monkeypatch):
+        monkeypatch.setattr(cl, "load_settings", lambda: {"antidetect": {}})
+        assert cl.get_antidetect_config("humanize", True) is True
+
     def test_get_learning_config(self, monkeypatch):
         monkeypatch.setattr(cl, "load_settings", lambda: {"learning": {"hint_ttl_days": 90}})
         assert cl.get_learning_config("hint_ttl_days", 0) == 90

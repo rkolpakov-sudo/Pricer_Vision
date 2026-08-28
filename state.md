@@ -1,5 +1,90 @@
 # State Log
 
+## 2026-08-28 — Camoufox MCP: постоянный профиль между сессиями (persistent_context + пининг отпечатка)
+
+### Вопрос пользователя
+Могут ли сохраняться данные (куки, данные регистрации) между сессиями MCP?
+
+### Анализ (проверено в коде camoufox 0.5.5 / browser_server.py)
+- Без `persistent_context` Playwright `firefox.launch()` создаёт ВРЕМЕННЫЙ профиль:
+  куки/localStorage/данные регистрации удаляются при закрытии браузера.
+  Внутри одной MCP-сессии куки накапливаются (общий дефолтный контекст, строки
+  делят его), но `bridge.restart()` (таймаут/captcha/смена бэкенда) и завершение
+  сессии всё сбрасывают. Отпечаток генерируется заново каждый запуск.
+- Включить постоянный профиль можно только вместе с ПИНИНГОМ отпечатка: иначе
+  `launch_options()` пере-рандомизирует 22 ключа → «тот же пользователь — другой
+  компьютер» (issues #723), что хуже свежего посетителя.
+
+### Реализовано (default ON, не «опция в выключенном виде»)
+- **`config/settings.yaml`**: `browser.persistent_profile: true`,
+  `browser.profile_dir: data/camoufox_profile`, `browser.pinned_fingerprint: true`.
+- **`mcp_servers/browser_server.py`**:
+  - `_pinned_windows_preset()` — детерминированный реальный Windows-пресет из бандла
+    v150 (индекс по md5 «pricer-camoufox-windows» % len), одинаковый на каждом запуске;
+    UA актуализируется под текущую версию Firefox самим Camoufox (`from_preset`).
+  - `_camoufox_launch_kwargs(...)` → `persistent_context=True` + `user_data_dir` +
+    `enable_cache=True` + `fingerprint_preset=<пресет>`.
+  - `start()`: создаёт каталог профиля; предупреждение при `persistent_profile=true`
+    и `pinned_fingerprint=false`.
+  - `new_page()`/`stop()` совместимы с BrowserContext (persistent): `context.new_page()`,
+    `context.close()` сохраняют профиль.
+
+### Эффект
+- Куки/localStorage/данные регистрации сохраняются МЕЖДУ сессиями MCP →
+  «возвращающийся пользователь» с консистентным отпечатком и ru-locale на RU-IP —
+  самый аутентичный сценарий для ServicePipe (vseinstrumenti), меньше челленджей.
+
+### Тесты
+**1080 passed, 2 skipped** (+4 в test_browser_server: persistent_profile default-on,
+disable, пиннинг детерминирован, disable → bool True; расширен config_loader-тест).
+
+### Заметки
+- Профиль лежит в `data/camoufox_profile` (gitignored, runtime-данные). Для сброса
+  «репутации» — удалить каталог.
+- `bridge.restart()` внутри прогона всё ещё перезапускает subprocess (профиль живёт
+  на диске, но отпечаток остаётся тем же) — это НЕ теряет куки теперь.
+- Не коммитилось — ждёт подтверждения пользователя (регламент).
+
+## 2026-08-28 — Camoufox: антибот-консистентность отпечатка (locale/timezone + зачистка set*) 
+
+### Контекст (веб-исследование 28.08)
+- vseinstrumenti.ru защищён **ServicePipe** (servicepipe.tech): JS-челлендж `checkjs` +
+  капча «поверни картинку». Капча В СЕРЕДИНЕ сессии = вторая ступень — поведенческий/
+  статистический скоринг (текст капчи: «клики быстрее человеческих», «поведение как
+  у автоматизированных систем»).
+- Главное несоответствие отпечатка: `locale` не задавался → BrowserForge генерировал
+  случайный (обычно en-US), timezone оставалась реальная (Europe/Moscow), IP российский
+  → «RU-сайт + RU-IP + en-US язык» — классический сигнал (прецедент: issue #222 Zillow).
+- Утечка автоматизации на Camoufox 0.5.x: 15 перечислимых `window.set*Спуферов`
+  (issues #723) — сайт ловит одной строкой `Object.keys(window).filter(k=>k.startsWith('set'))`.
+- Пакет 0.5.5 (18.08.2026) и браузер v152.0.4-beta.28 (official/stable) — уже актуальные,
+  FF152 stealth-фиксы влиты (PR #666/#673). Апгрейд не нужен.
+
+### Реализовано
+- **`mcp_servers/browser_server.py`**:
+  - `_camoufox_launch_kwargs()` — параметры запуска: `locale="ru-RU"` + `config={"timezone":
+    "Europe/Moscow"}` (или `geoip=True` — по локальному IP, если `browser.geoip: true`).
+  - `_setter_cleanup_script()` + `page.add_init_script` в `new_page()` — удаляет перечислимые
+    `window.set*Спуферы` после спуфинга на каждой навигации (C++-слой держит значения).
+  - `start()` читает настройки из settings.yaml (fallback-дефолты при недоступности
+    config_loader); graceful-fallback geoip→locale/timezone при отсутствии `camoufox[geoip]`.
+- **`config/settings.yaml`**: `browser.locale: ru-RU`, `browser.timezone: Europe/Moscow`,
+  `browser.geoip: false`, `browser.hide_setters: true`, `antidetect.humanize: true`.
+- **`src/config_loader.py`** — новых геттеров не потребовалось (`get_browser_config`/
+  `get_antidetect_config` уже есть).
+
+### Тесты
+**1076 passed, 2 skipped** (+9): `tests/test_browser_server.py` (новый, 7: setter-cleanup,
+launch-kwargs locale/tz/geoip/humanize), `tests/test_config_loader.py` (+2: browser-ключи,
+humanize default).
+
+### Заметки
+- HumanBehavior (human_click/type через evaluate) НЕ подключён к camoufox-бэкенду осознанно:
+  Juggler-клики через native input handlers + humanize человечнее, чем JS-эмуляция.
+- Скорость не является причиной капчи: агент медленный (LLM 20–100с/шаг) + rate-limit
+  vseinstrumenti 6 req/min + cooldown 900с — сохранено.
+- Не коммитилось — ждёт подтверждения пользователя (регламент).
+
 ## 2026-08-28 — Мониторинг агента: отдельная строка «Позиция»
 
 ### Требование

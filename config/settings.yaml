@@ -1,5 +1,6 @@
 antidetect:
   cooldown_seconds: 300
+  humanize: true
   jitter: 1.0
   rate_limit_max_requests_per_minute: 20
   rate_limit_min_interval: 1.5
@@ -14,8 +15,19 @@ browser:
   - camoufox
   - playwright
   - nodriver
+  geoip: false
   headless: false
+  hide_setters: true
+  locale: ru-RU
   no_sandbox: true
+  # Постоянный профиль между сессиями MCP: куки/localStorage/данные регистрации
+  # сохраняются на диске (data/camoufox_profile) → «возвращающийся пользователь».
+  # ОБЯЗАТЕЛЬНО вместе с pinned_fingerprint (стабильный отпечаток), иначе
+  # «тот же пользователь — другой компьютер» (issues #723) — хуже свежего визита.
+  persistent_profile: true
+  pinned_fingerprint: true
+  profile_dir: data/camoufox_profile
+  timezone: Europe/Moscow
 deps:
   playwright_mcp:
     version: null

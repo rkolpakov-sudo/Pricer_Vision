@@ -16,6 +16,7 @@ Usage:
 
 import argparse
 import asyncio
+import hashlib
 import json
 import logging
 import tempfile
@@ -151,6 +152,90 @@ TOOL_DEFS = [
 
 _element_cache: dict[str, dict] = {}
 
+# window.set*Спуферы, которые Camoufox оставляет перечислимыми на window
+# (известная утечка automatization-сигнала, github.com/daijro/camoufox#723:
+# в стоковом Firefox на window один такой ключ — setResizable). Сайт может
+# поймать автоматизацию одной строкой Object.keys(window).filter(k=>k.startsWith('set')).
+# Удаляем их после вызова спуфера на каждой навигации (C++-слой держит значения сам).
+_CAMOUFOX_SETTERS = [
+    "setFontSpacingSeed", "setAudioFingerprintSeed", "setCanvasSeed",
+    "setNavigatorPlatform", "setNavigatorOscpu", "setNavigatorUserAgent",
+    "setNavigatorHardwareConcurrency", "setWebGLVendor", "setWebGLRenderer",
+    "setScreenDimensions", "setScreenColorDepth", "setTimezone",
+    "setWebRTCIPv4", "setFontList", "setSpeechVoices",
+]
+
+
+def _setter_cleanup_script() -> str:
+    """JS init-скрипт: удаляет window.set*Спуферы после спуфинга.
+
+    Регистрируется ПОСЛЕ init-скрипта Camoufox (init-скрипты выполняются в порядке
+    регистрации) → на каждой навигации сначала применяется спуфинг, затем сеттеры
+    убираются из перечисления, значение остаётся в C++-слое.
+    """
+    names = ", ".join(json.dumps(n) for n in _CAMOUFOX_SETTERS)
+    return (
+        "(() => { const _cf = [" + names + "]; "
+        "for (const n of _cf) { try { delete window[n]; } catch (e) {} } })()"
+    )
+
+
+def _pinned_windows_preset() -> dict | None:
+    """Стабильный реальный Windows-пресет отпечатка (одинаковый на каждом запуске).
+
+    Для постоянного профиля нужен ОДИН И ТОТ ЖЕ отпечаток между сессиями, иначе
+    «возвращающийся пользователь = другой компьютер» (issues #723). Берём конкретный
+    пресет из встроенного бандла v150 (реальные отпечатки) по детерминированному
+    индексу. UA актуализируется под текущую версию Firefox самим Camoufox.
+    """
+    try:
+        from camoufox.fingerprints import load_presets
+        presets = ((load_presets(ff_version=152) or {}).get("presets", {})).get("windows", [])
+    except Exception:
+        presets = []
+    if not presets:
+        return None
+    idx = int(hashlib.md5(b"pricer-camoufox-windows").hexdigest(), 16) % len(presets)
+    return presets[idx]
+
+
+def _camoufox_launch_kwargs(headless: bool, *, locale: str = "ru-RU",
+                            timezone: str = "Europe/Moscow", geoip: bool = False,
+                            humanize: bool = True, persistent_profile: bool = True,
+                            profile_dir: str = "data/camoufox_profile",
+                            pinned_fingerprint: bool = True) -> dict:
+    """Параметры запуска AsyncCamoufox с консистентным отпечатком.
+
+    Закрывает несоответствие «RU-сайт + RU-IP + en-US locale» (триггер ServicePipe):
+    locale задаёт Accept-Language/navigator.language, timezone — таймзону.
+    geoip=True считает locale/timezone/координаты по локальному IP и подставляет
+    webrtc:ipv4 (требует camoufox[geoip]).
+
+    persistent_profile + pinned_fingerprint — «возвращающийся пользователь»:
+    профиль (куки/localStorage) хранится между сессиями, а отпечаток закреплён
+    за одним реальным Windows-пресетом (иначе неконсистентность issues #723).
+    """
+    kwargs: dict = {
+        "headless": headless,
+        "os": "windows",
+        "fingerprint_preset": True,
+        "humanize": humanize,
+    }
+    if pinned_fingerprint:
+        preset = _pinned_windows_preset()
+        if preset is not None:
+            kwargs["fingerprint_preset"] = preset
+    if persistent_profile:
+        kwargs["persistent_context"] = True
+        kwargs["user_data_dir"] = profile_dir
+        kwargs["enable_cache"] = True
+    if geoip:
+        kwargs["geoip"] = True
+    else:
+        kwargs["locale"] = locale
+        kwargs["config"] = {"timezone": timezone}
+    return kwargs
+
 
 def _ref_to_role_locator(ref: str):
     node = _element_cache.get(ref)
@@ -207,17 +292,55 @@ class CamoufoxDriver(BaseDriver):
         super().__init__(headless)
         self._cam = None
         self._browser = None
+        self._hide_setters = True
 
     async def start(self):
         from camoufox.async_api import AsyncCamoufox
+        # Антибот-настройки из config/settings.yaml (Qt-free). При недоступности
+        # config_loader (запуск вне корня проекта) — безопасные дефолты.
+        try:
+            from src.config_loader import get_browser_config, get_antidetect_config
+            locale = get_browser_config("locale", "ru-RU")
+            timezone = get_browser_config("timezone", "Europe/Moscow")
+            geoip = bool(get_browser_config("geoip", False))
+            humanize = bool(get_antidetect_config("humanize", True))
+            self._hide_setters = bool(get_browser_config("hide_setters", True))
+            persistent_profile = bool(get_browser_config("persistent_profile", True))
+            profile_dir = str(get_browser_config("profile_dir", "data/camoufox_profile"))
+            pinned_fingerprint = bool(get_browser_config("pinned_fingerprint", True))
+        except Exception:
+            locale, timezone, geoip, humanize = "ru-RU", "Europe/Moscow", False, True
+            self._hide_setters = True
+            persistent_profile, profile_dir, pinned_fingerprint = True, "data/camoufox_profile", True
+        if persistent_profile and not pinned_fingerprint:
+            logger.warning("persistent_profile=true при pinned_fingerprint=false — "
+                           "«тот же пользователь, другой компьютер» (issues #723), "
+                           "антибот может усилить проверки")
+        # geoip требует camoufox[geoip] (GeoLite2 DB). Если extra не установлен —
+        # падаем на явные locale/timezone (та же консистентность для RU-IP).
+        if geoip:
+            try:
+                from camoufox.geolocation import ALLOW_GEOIP
+                if not ALLOW_GEOIP:
+                    logger.warning("geoip запрошен, но camoufox[geoip] не установлен — "
+                                   "использую locale=%s timezone=%s", locale, timezone)
+                    geoip = False
+            except Exception:
+                geoip = False
+        if persistent_profile and profile_dir:
+            try:
+                import pathlib
+                pathlib.Path(profile_dir).mkdir(parents=True, exist_ok=True)
+            except Exception:
+                logger.warning("Не удалось создать профиль %s — использую временный", profile_dir)
         last = None
         for attempt in range(4):
-            self._cam = AsyncCamoufox(
-                headless=self.headless,
-                os="windows",
-                fingerprint_preset=True,
-                humanize=True,
+            kwargs = _camoufox_launch_kwargs(
+                self.headless, locale=locale, timezone=timezone, geoip=geoip, humanize=humanize,
+                persistent_profile=persistent_profile, profile_dir=profile_dir,
+                pinned_fingerprint=pinned_fingerprint,
             )
+            self._cam = AsyncCamoufox(**kwargs)
             try:
                 self._browser = await self._cam.start()
                 self._page = await self.new_page()
@@ -246,6 +369,14 @@ class CamoufoxDriver(BaseDriver):
 
     async def new_page(self):
         page = await self._browser.new_page()
+        if self._hide_setters:
+            # Убираем перечислимые window.set*Спуферы на каждой навигации.
+            # Регистрируется после init-скрипта Camoufox → спуфинг успевает
+            # примениться, затем сеттеры удаляются (C++-слой держит значения).
+            try:
+                await page.add_init_script(_setter_cleanup_script())
+            except Exception as e:
+                logger.debug("Setter cleanup init script failed (ignored): %s", e)
         page.on("console", lambda msg: self._console_logs.append(f"[{msg.type}] {msg.text}"))
         page.on("response", lambda resp: self._network_requests.append(
             {"url": resp.url, "status": resp.status, "method": resp.request.method}))
