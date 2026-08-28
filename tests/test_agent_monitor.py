@@ -72,3 +72,33 @@ class TestAgentMonitorPanel:
             {"type": "stop"},
         ]:
             panel.handle_event(event)
+
+    def test_position_label_shows_current_position(self, qapp):
+        panel = AgentMonitorPanel()
+        panel.handle_event({"type": "row", "idx": 3, "total": 10,
+                            "preview": "ВВГ 3x1.5", "position": "Кабель ВВГ 3x1.5 ГОСТ 16442-80"})
+        assert "Позиция 3/10" in panel.position_label.text()
+        assert "Кабель ВВГ 3x1.5" in panel.position_label.text()
+
+    def test_position_label_falls_back_to_preview(self, qapp):
+        panel = AgentMonitorPanel()
+        panel.handle_event({"type": "row", "idx": 1, "total": 5, "preview": "ВВГ 3x1.5"})
+        assert "ВВГ 3x1.5" in panel.position_label.text()
+
+    def test_position_label_persists_across_actions(self, qapp):
+        panel = AgentMonitorPanel()
+        panel.handle_event({"type": "row", "idx": 2, "total": 5, "position": "Кран шаровой Ду15"})
+        panel.handle_event({"type": "action", "text": "🌐 Открываю https://site.ru", "idx": 2, "total": 5})
+        assert "Кран шаровой Ду15" in panel.position_label.text()
+
+    def test_position_label_reset(self, qapp):
+        panel = AgentMonitorPanel()
+        panel.handle_event({"type": "row", "idx": 1, "total": 5, "position": "Товар X"})
+        panel.reset()
+        assert "Позиция: —" in panel.position_label.text()
+
+    def test_position_label_cleared_on_done(self, qapp):
+        panel = AgentMonitorPanel()
+        panel.handle_event({"type": "row", "idx": 1, "total": 2, "position": "Товар X"})
+        panel.handle_event({"type": "done", "total": 2, "found": 1, "errors": 0})
+        assert "Позиция: —" in panel.position_label.text()

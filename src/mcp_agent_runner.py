@@ -303,7 +303,8 @@ class MCPAgentRunner(QThread):
                         last_health_check = datetime.now()
                     preview = spec.text[:60] if hasattr(spec, 'text') else str(spec)[:60]
                     self.status_signal.emit(("progress", i + 1, total, f"Обработка: {preview}..."))
-                    self.monitor_signal.emit({"type": "row", "idx": i + 1, "total": total, "preview": preview})
+                    self.monitor_signal.emit({"type": "row", "idx": i + 1, "total": total,
+                                              "preview": preview, "position": spec_text})
 
                     # Признак жизни строки: сбрасывает idle-таймер (LLM/браузер/смена сайта)
                     row_activity = {"last": time.monotonic()}

@@ -43,6 +43,12 @@ class AgentMonitorPanel(QWidget):
         self.row_label.setStyleSheet("font-size: 12px; font-weight: 600;")
         layout.addWidget(self.row_label)
 
+        self.position_label = QLabel("Позиция: —")
+        self.position_label.setWordWrap(True)
+        self.position_label.setMaximumHeight(60)
+        self.position_label.setStyleSheet("font-size: 12px; font-weight: 600; color: #a6e3a1;")
+        layout.addWidget(self.position_label)
+
         self.progress_bar = QProgressBar()
         self.progress_bar.setRange(0, 100)
         self.progress_bar.setValue(0)
@@ -69,6 +75,7 @@ class AgentMonitorPanel(QWidget):
     def reset(self):
         """Сброс панели перед новым прогоном."""
         self.row_label.setText("Строка: — / —")
+        self.position_label.setText("Позиция: —")
         self.progress_bar.setValue(0)
         self.action_label.setText("Запуск...")
         self.history_list.clear()
@@ -92,9 +99,11 @@ class AgentMonitorPanel(QWidget):
             idx = event.get("idx", 0)
             total = event.get("total", 0)
             preview = event.get("preview", "")
+            position = event.get("position") or preview
             self.progress_bar.setRange(0, max(total, 1))
             self.progress_bar.setValue(idx - 1)
             self.row_label.setText(f"Строка: {idx} / {total}")
+            self.position_label.setText(f"Позиция {idx}/{total}: {position}")
             self.action_label.setText(f"Обработка: {preview}")
             self._add_history(f"▶ Строка {idx}/{total}: {preview}")
         elif etype == "action":
@@ -112,6 +121,7 @@ class AgentMonitorPanel(QWidget):
             self.progress_bar.setValue(idx)
         elif etype == "done":
             self._spinner.hide()
+            self.position_label.setText("Позиция: —")
             found = event.get("found", 0)
             errors = event.get("errors", 0)
             total = event.get("total", 0)
@@ -120,6 +130,7 @@ class AgentMonitorPanel(QWidget):
             self._add_history(f"✓ Прогон завершён: {found}/{total} найдено")
         elif etype == "stop":
             self._spinner.hide()
+            self.position_label.setText("Позиция: —")
             self.action_label.setText("Остановлен пользователем")
             self._add_history("⏹ Остановлен пользователем")
 
