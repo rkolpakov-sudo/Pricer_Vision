@@ -815,7 +815,7 @@ async def process_row(
                 # ДРУГАЯ модель, чем в спецификации — не открывай «для проверки».
                 # (система-советник: LLM решает, но предупреждение жёсткое)
                 if tool_name in ("browser_click", "click"):
-                    click_hint = _model_mismatch_hint(tool_args, spec_text)
+                    click_hint = _model_mismatch_hint(tool_args, spec_text, spec_meta)
                     if click_hint:
                         logger.warning("⚠️ %s", click_hint)
                         messages.append({
@@ -1843,34 +1843,44 @@ def _price_is_relevant(spec_text: str, spec_meta: dict | None, tool_content: str
     return any(t in low for t in toks)
 
 
-def _model_mismatch_hint(tool_args: dict, spec_text: str) -> str | None:
+def _model_mismatch_hint(tool_args: dict, spec_text: str, spec_meta: dict | None = None) -> str | None:
     """Совет перед кликом по карточке: если название элемента содержит модель,
-    отличную от модели спецификации — не открывай «для проверки».
+    размер/Ду или артикул, отличный от спецификации — не открывай «для проверки».
 
     Регрессия 27.08: агент открыл карточку «ЦМО МС-40» (полка для шкафа) как
-    «лучший аналог» МС-140. Система-советник: НЕ блокирует, но жёстко предупреждает,
-    что модель не совпадает — LLM решает, но видит риск.
+    «лучший аналог» МС-140. Регрессия MVT-R: агент открыл карточку Ду20 для
+    товара с артикулом 003Z4040R (DN15 LF), хотя размеры и артикулы разные.
+    Система-советник: НЕ блокирует, но жёстко предупреждает.
     """
-    spec_models = model_designators(spec_text)
-    if not spec_models:
-        return None
-    # Название элемента/цели клика — источник текста карточки из выдачи.
+    from src.approach_relevance import _size_key
     elem = str(tool_args.get("element") or tool_args.get("target") or tool_args.get("text") or "").strip()
     if not elem:
         return None
+
+    hints = []
+
+    # 1. Проверка модели (буквенно-цифровой код)
+    spec_models = model_designators(spec_text)
     elem_models = model_designators(elem)
-    if not elem_models:
+    if spec_models and elem_models and not (elem_models & spec_models):
+        hints.append(f"модель «{'», «'.join(sorted(elem_models))}» (спецификация: «{'», «'.join(sorted(spec_models))}»)")
+
+    # 2. Проверка размера/Ду
+    spec_sizes = _size_key(spec_text)
+    elem_sizes = _size_key(elem)
+    if spec_sizes and elem_sizes and spec_sizes != elem_sizes:
+        hints.append(f"размер/Ду «{'», «'.join(sorted(elem_sizes))}» (спецификация: «{'», «'.join(sorted(spec_sizes))}»)")
+
+    # 3. Проверка артикула — только если уже есть другое расхождение (размер/модель)
+    article = (spec_meta or {}).get("article") or ""
+    if article and article.lower() not in elem.lower() and hints:
+        hints.append(f"артикул «{article}» отсутствует в названии карточки")
+
+    if not hints:
         return None
-    foreign = elem_models - spec_models
-    if not foreign:
-        return None
-    # Если модели пересекаются (МС-140 и МС-140х500) — допустимо; отсекаем только
-    # ПОЛНОСТЬЮ чужие (МС-40, LEMAX VC).
-    if elem_models & spec_models:
-        return None
+
     return (
-        f"⚠️ ВНИМАНИЕ: модель «{', '.join(sorted(elem_models))}» в названии элемента "
-        f"НЕ совпадает с моделью спецификации «{', '.join(sorted(spec_models))}». "
+        f"⚠️ ВНИМАНИЕ: {'; '.join(hints)}. "
         "Это, вероятно, ДРУГОЙ товар. НЕ открывай карточку «для проверки» — это "
         "потерянный раунд. Продолжай поиск в выдаче или переключись на другой сайт."
     )

@@ -339,7 +339,7 @@ class TestModelMismatchHint:
     def test_foreign_shelf_card_warns(self):
         hint = _model_mismatch_hint({"element": "Полка для шкафа ЦМО МС-40"}, self.SPEC)
         assert hint is not None
-        assert "НЕ совпадает" in hint
+        assert "мс40" in hint
         assert "НЕ открывай карточку" in hint
 
     def test_foreign_lemax_warns(self):
@@ -358,6 +358,23 @@ class TestModelMismatchHint:
 
     def test_spec_without_model_no_warning(self):
         assert _model_mismatch_hint({"element": "ЦМО МС-40"}, "Клей Energopro") is None
+
+    def test_wrong_size_warns(self):
+        """MVT-R: DN15 LF 003Z4040R vs карточка Ду20 003Z4042R — разные размеры и артикулы."""
+        spec = "Ручной муфтовый балансировочный клапан MVT-R с блокировкой настройки DN15 LF 003Z4040R"
+        meta = {"article": "003Z4040R"}
+        elem = "Клапан балансировочный ручной латунь MVT-R Ду 20 Rp3/4 Ру16 с измерительными ниппелями Ридан 003Z4042R"
+        hint = _model_mismatch_hint({"element": elem}, spec, meta)
+        assert hint is not None
+        assert "размер" in hint or "Ду" in hint
+        assert "003Z4040R" in hint
+
+    def test_correct_size_no_warning(self):
+        """MVT-R DN15 с правильным артикулом — без предупреждения."""
+        spec = "Ручной муфтовый балансировочный клапан MVT-R с блокировкой настройки DN15 003Z4041R"
+        meta = {"article": "003Z4041R"}
+        elem = "Клапан балансировочный ручной латунь MVT-R Ду 15 Ридан 003Z4041R"
+        assert _model_mismatch_hint({"element": elem}, spec, meta) is None
 
 
 class TestFormatStepsPortable:
