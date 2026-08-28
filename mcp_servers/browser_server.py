@@ -19,6 +19,7 @@ import asyncio
 import hashlib
 import json
 import logging
+import re
 import tempfile
 
 from mcp.server.lowlevel import Server
@@ -33,17 +34,35 @@ async def _handle_list_tools(ctx, params) -> types.ListToolsResult:
     return types.ListToolsResult(tools=TOOL_DEFS)
 
 
-async def _handle_call_tool(ctx, params) -> types.CallToolResult:
+async def _dispatch_with_recovery(name: str, args: dict) -> str:
+    """Выполняет tool-call; при «browser/context has been closed» — перезапускает
+    браузер и повторяет ОДИН раз.
+
+    Без этого падение браузера каскадно ломало весь прогон: «BrowserContext.new_page:
+    Target page, context or browser has been closed» накапливал ошибки MCP → circuit
+    breaker OPEN → все строки убивались (MCP=0 / MCP circuit open).
+    """
     if _driver._browser is None:
         await _driver.start()
-    result = await _dispatch(params.name, params.arguments or {})
+    result = await _dispatch(name, args)
+    if "has been closed" in result:
+        logger.warning("Browser closed — перезапуск браузера и повтор попытки (%s)", name)
+        try:
+            await _driver.stop()
+        except Exception:
+            pass
+        await _driver.start()
+        result = _dispatch(name, args)
+    return result
+
+
+async def _handle_call_tool(ctx, params) -> types.CallToolResult:
+    result = await _dispatch_with_recovery(params.name, params.arguments or {})
     return types.CallToolResult(content=[types.TextContent(type="text", text=result)])
 
 
 async def _handle_call_tool_v1(name: str, arguments: dict) -> list[types.TextContent]:
-    if _driver._browser is None:
-        await _driver.start()
-    result = await _dispatch(name, arguments or {})
+    result = await _dispatch_with_recovery(name, arguments or {})
     return [types.TextContent(type="text", text=result)]
 
 
@@ -229,6 +248,18 @@ def _camoufox_launch_kwargs(headless: bool, *, locale: str = "ru-RU",
         kwargs["persistent_context"] = True
         kwargs["user_data_dir"] = profile_dir
         kwargs["enable_cache"] = True
+        # Постоянный профиль + session-restore Firefox = «два браузера»: после
+        # нечистого закрытия (force-kill/таймаут/рестарт bridge) Firefox при
+        # следующем запуске восстанавливает прошлые окна ПОВЕРХ новых. Отключаем
+        # восстановление сессии, чтобы при старте открывалась только наша страница.
+        kwargs["firefox_user_prefs"] = {
+            "browser.sessionstore.resume_from_crash": False,
+            "browser.sessionstore.max_resumed_crashes": 0,
+            "browser.sessionstore.restore_on_demand": False,
+            "browser.sessionstore.restore_tabs_lazily": False,
+            "browser.startup.page": 0,
+            "toolkit.startup.max_resumed_crashes": -1,
+        }
     if geoip:
         kwargs["geoip"] = True
     else:
@@ -242,6 +273,66 @@ def _ref_to_role_locator(ref: str):
     if node and isinstance(node, dict) and node.get("role") and node.get("name"):
         return node["role"], node["name"]
     return None, None
+
+
+_SNAPSHOT_REF_RE = re.compile(r"^e\d+$")
+
+
+def _is_snapshot_ref(target: str) -> bool:
+    """target вида e1234 — ref из accessibility-снапшота (не CSS-селектор)."""
+    return bool(target and _SNAPSHOT_REF_RE.match(target.strip()))
+
+
+def _action_error_hint(exc: Exception) -> str:
+    """Понятная агенту причина/подсказка для частых ошибок Playwright.
+
+    Раньше ошибка возвращалась сырой («Timeout 10000ms exceeded») — LLM тратила
+    2–3 раунда на слепое восстановление. Теперь сразу объясняем причину и даём
+    формат корректного target (CSS/роль).
+    """
+    msg = str(exc)
+    if "strict mode violation" in msg:
+        m = re.search(r"resolved to (\d+) elements", msg)
+        n = m.group(1) if m else "несколько"
+        return (f"strict mode violation: селектор совпадает с {n} элементами. "
+                "Уточни селектор (CSS с атрибутом или индексом) либо используй роль "
+                "(например 'button \"Найти\"' / 'textbox \"Поиск\"').")
+    if "Timeout" in msg or "timeout" in msg:
+        return ("элемент не найден/недоступен по указанному target в отведённое время. "
+                "Обнови browser_snapshot и используй CSS-селектор (например "
+                "'input[name=\"search\"]') или роль (например 'textbox \"Поиск\"').")
+    return ""
+
+
+def _resolve_action_target(target: str):
+    """Разбирает target на роль-локатор / CSS / мгновенную ошибку.
+
+    Быстрый отказ для устаревших хеш-refов снапшота (e1234), которых нет в
+    _element_cache: вместо page.locator('e1234') → 10с таймаут → ошибка + 2–3
+    восстановительных LLM-раунда возвращаем мгновенную ошибку с подсказкой.
+
+    ВСЕГДА возвращает 3-кортеж: ('role', role, name) | ('css', selector, '')
+    | ('error', message, ''). Единая арность обязательна: вызывающие обращаются
+    к kind[2] (регрессия: 2-кортеж ('css', t) давал IndexError «tuple index
+    out of range» на каждом CSS-клике/вводе → агент не мог работать).
+    """
+    t = (target or "").strip()
+    if not t:
+        return ("error", "error: пустой target — укажи CSS-селектор или роль элемента.", "")
+    if _is_snapshot_ref(t):
+        role, name = _ref_to_role_locator(t)
+        if role and name:
+            return ("role", role, name)
+        return ("error",
+                "error: target — устаревший ref снапшота (%s), элемент уже не найден "
+                "(страница могла перерисоваться). Используй CSS-селектор "
+                "(например 'input[name=\"search\"]') или роль (например 'textbox \"Поиск\"'), "
+                "либо обнови browser_snapshot." % t, "")
+    for prefix in ("link ", "button ", "textbox ", "searchbox ", "heading "):
+        if t.startswith(prefix):
+            role, name = t.split(" ", 1)
+            return ("role", role, name)
+    return ("css", t, "")
 
 
 class BaseDriver:
@@ -296,6 +387,11 @@ class CamoufoxDriver(BaseDriver):
 
     async def start(self):
         from camoufox.async_api import AsyncCamoufox
+        # Защита от двойного запуска: если браузер уже поднят (повторный вызов
+        # start() при живом _browser) — не плодим второй экземпляр.
+        if self._browser is not None:
+            logger.info("camoufox уже запущен — повторный start() проигнорирован")
+            return
         # Антибот-настройки из config/settings.yaml (Qt-free). При недоступности
         # config_loader (запуск вне корня проекта) — безопасные дефолты.
         try:
@@ -348,10 +444,12 @@ class CamoufoxDriver(BaseDriver):
             except Exception as e:
                 last = e
                 logger.warning("camoufox start attempt %d failed: %s", attempt + 1, e)
+                # Полное завершение неудачной попытки: __aexit__ закрывает браузер,
+                # если он успел подняться (иначе ретрай плодит второй экземпляр).
                 try:
-                    await self._cam.__aexit__(None, None, None)
+                    await asyncio.wait_for(self._cam.__aexit__(None, None, None), timeout=15)
                 except Exception:
-                    pass
+                    logger.warning("camoufox teardown после неудачного старта завис/не удался")
                 self._cam = None
                 self._browser = None
         raise RuntimeError(f"camoufox start failed after retries: {last}")
@@ -359,9 +457,11 @@ class CamoufoxDriver(BaseDriver):
     async def stop(self):
         if self._cam is not None:
             try:
-                await self._cam.__aexit__(None, None, None)
+                # Таймаут на закрытие: зависший браузер не должен блокировать
+                # рестарт bridge (иначе новый браузер поднимется ПОВЕРХ старого).
+                await asyncio.wait_for(self._cam.__aexit__(None, None, None), timeout=15)
             except Exception:
-                pass
+                logger.warning("camoufox stop завис/не удался — профиль может быть занят")
         self._cam = None
         self._browser = None
         self._pages = []
@@ -419,56 +519,47 @@ class CamoufoxDriver(BaseDriver):
             return ""
 
     async def click(self, page, target: str) -> str:
-        role, name = _ref_to_role_locator(target)
-        if role and name:
-            try:
-                await page.get_by_role(role, name=name).click(timeout=10000)
-                await asyncio.sleep(0.3)
-                return "ok"
-            except Exception:
-                pass
-        if target.startswith(("link ", "button ", "textbox ", "searchbox ", "heading ")):
-            parts = target.split(" ", 1)
-            try:
-                await page.get_by_role(parts[0], name=parts[1]).click(timeout=10000)
-                await asyncio.sleep(0.3)
-                return "ok"
-            except Exception:
-                pass
+        kind = _resolve_action_target(target)
+        if kind[0] == "error":
+            return kind[1]
         try:
-            await page.click(target, timeout=10000)
+            if kind[0] == "role":
+                await page.get_by_role(kind[1], name=kind[2]).click(timeout=10000)
+            else:
+                await page.click(kind[1], timeout=10000)
             await asyncio.sleep(0.3)
             return "ok"
         except Exception as e:
-            return f"error: click failed: {e}"
+            hint = _action_error_hint(e)
+            return f"error: click failed: {e}{(' — ' + hint) if hint else ''}"
 
     async def type_text(self, page, target: str, text: str) -> str:
-        role, name = _ref_to_role_locator(target)
-        if role and name:
-            try:
-                await page.get_by_role(role, name=name).fill(text, timeout=10000)
-                return "ok"
-            except Exception:
-                pass
-        if target.startswith(("textbox ", "searchbox ")):
-            parts = target.split(" ", 1)
-            try:
-                await page.get_by_role(parts[0], name=parts[1]).fill(text, timeout=10000)
-                return "ok"
-            except Exception:
-                pass
+        kind = _resolve_action_target(target)
+        if kind[0] == "error":
+            return kind[1]
         try:
-            await page.locator(target).fill(text, timeout=10000)
+            if kind[0] == "role":
+                await page.get_by_role(kind[1], name=kind[2]).fill(text, timeout=10000)
+            else:
+                await page.locator(kind[1]).fill(text, timeout=10000)
             return "ok"
         except Exception as e:
-            return f"error: type failed: {e}"
+            hint = _action_error_hint(e)
+            return f"error: type failed: {e}{(' — ' + hint) if hint else ''}"
 
     async def hover(self, page, target: str) -> str:
+        kind = _resolve_action_target(target)
+        if kind[0] == "error":
+            return kind[1]
         try:
-            await page.hover(target, timeout=10000)
+            if kind[0] == "role":
+                await page.get_by_role(kind[1], name=kind[2]).hover(timeout=10000)
+            else:
+                await page.hover(kind[1], timeout=10000)
             return "ok"
         except Exception as e:
-            return f"error: hover failed: {e}"
+            hint = _action_error_hint(e)
+            return f"error: hover failed: {e}{(' — ' + hint) if hint else ''}"
 
     async def press_key(self, page, key: str) -> str:
         try:

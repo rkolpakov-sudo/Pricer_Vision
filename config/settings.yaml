@@ -20,10 +20,6 @@ browser:
   hide_setters: true
   locale: ru-RU
   no_sandbox: true
-  # Постоянный профиль между сессиями MCP: куки/localStorage/данные регистрации
-  # сохраняются на диске (data/camoufox_profile) → «возвращающийся пользователь».
-  # ОБЯЗАТЕЛЬНО вместе с pinned_fingerprint (стабильный отпечаток), иначе
-  # «тот же пользователь — другой компьютер» (issues #723) — хуже свежего визита.
   persistent_profile: true
   pinned_fingerprint: true
   profile_dir: data/camoufox_profile
