@@ -14,11 +14,59 @@ browser:
   - camoufox
   - playwright
   - nodriver
-  headless: true
+  headless: false
   no_sandbox: true
 deps:
   playwright_mcp:
     version: null
+ductwork:
+  area_allowance: 1.05
+  confidence: 1.0
+  enabled: false
+  nomenclature_lengths:
+    rect: 1.25
+    round: 3.0
+  price_per_m2: null
+  requires_review: true
+  shaped_prices:
+    rect:
+      0.5: 2148
+      0.7: 2445
+      0.8: 2665
+      0.9: 3011
+      1.0: 2878
+    round:
+      0.5: 1860
+      0.7: 2215
+      0.8: 2435
+      0.9: 2655
+      1.0: 2878
+  site_id: ductwork_calculator
+  steel_defaults:
+    black: 625
+    galvanized: 850
+    stainless: 2350
+  straight_prices:
+    rect:
+      0.5: 1457
+      0.7: 1881
+      0.8: 2098
+      0.9: 2395
+      1.0: 2615
+    round:
+      0.5: 1220
+      0.7: 1678
+      0.8: 1900
+      0.9: 2117
+      1.0: 2341
+  thickness_coeffs:
+    0.5: 0.8
+    0.6: 0.9
+    0.7: 0.95
+    0.8: 1.0
+    0.9: 1.05
+    1.0: 1.1
+    1.2: 1.2
 learning:
   hint_ttl_days: 90
   site_profiles_path: data/site_profiles.json
@@ -28,9 +76,9 @@ limits:
 llm:
   llama_cpp_url: http://localhost:8080/v1/chat/completions
   lm_studio_url: http://localhost:1234/v1/chat/completions
-  model: hy3-free
+  model: esatapedico/qwen3.8-27b-nvfp4-mtp-gguf/qwen3.8-27b-nvfp4-mtp-very-low.gguf
   ollama_url: http://localhost:11434/api/chat
-  provider: opencode
+  provider: lmstudio
   providers:
     llamacpp:
       base_url: http://localhost:8080/v1
@@ -76,11 +124,16 @@ run:
   fresh: false
   group_by_site: false
   main_temperature: 0.3
-  max_rounds: 50
+  max_rounds: 40
   max_rounds_per_site: 15
   max_study_rounds: 50
+  reuse_price: true
+  row_idle_timeout_seconds: 180
+  row_max_seconds: 900
   study_temperature: 0.5
   summarize_max_chars: 800
+  use_approaches: true
+  use_site_ranking: true
 ui:
   log_rotation_mb: 10
   telemetry_update_ms: 1000
