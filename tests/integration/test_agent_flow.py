@@ -891,3 +891,55 @@ class TestPhase2QueryRobustness:
         assert _is_search_results_url("https://satro-paladin.com/?digiSearch=true&term=x") is True
         assert _is_search_results_url("https://mircli.ru/search/?keyword=x") is True
         assert _is_search_results_url("https://site.ru/catalog/product/1/") is False
+
+
+@pytest.mark.asyncio
+class TestDuctworkModule:
+    """Модуль воздуховодов: перехват в process_row без обращения к браузеру/LLM."""
+
+    async def test_ductwork_row_calculated_without_network(self):
+        """ductwork_enabled=True: воздуховод считается локально, LLM/MCP НЕ вызываются."""
+        llm, bridge, engine, mm, cache = make_env(responses=[])
+        result = await process_row(
+            spec_text="Воздуховод из оцинкованной стали Ø100, толщина стали 0,5мм",
+            llm_client=llm, mcp_bridge=bridge, graph_engine=engine,
+            memory_manager=mm, fresh=True, semantic_cache=cache,
+            ductwork_enabled=True,
+            spec_meta={"qty": 920, "uom": "м.п."},
+        )
+        assert result.get("price") is not None
+        assert abs(result["price"] - 965.86) < 0.1  # цена за изделие (3 м)
+        assert result.get("site") == "ductwork_calculator"
+        assert result.get("ductwork_breakdown")
+        assert result.get("requires_review") is True
+        assert not result.get("error")
+        # Сеть и LLM НЕ тронуты
+        assert llm.calls == []
+        assert bridge.calls == []
+        # В граф/кэш не сохраняется
+        assert mm.saved_prices == []
+
+    async def test_ductwork_disabled_goes_to_agent(self):
+        """ductwork_enabled=False: воздуховод обрабатывается обычным агентом."""
+        llm, bridge, engine, mm, cache = make_env(responses=[llm_final(120.0)])
+        result = await process_row(
+            spec_text="Воздуховод из оцинкованной стали Ø100, толщина стали 0,5мм",
+            llm_client=llm, mcp_bridge=bridge, graph_engine=engine,
+            memory_manager=mm, fresh=True, semantic_cache=cache,
+            ductwork_enabled=False,
+            spec_meta={"qty": 920, "uom": "м.п."},
+        )
+        assert result.get("price") == 120.0
+        assert llm.calls  # LLM вызывался
+
+    async def test_non_ductwork_row_not_intercepted(self):
+        """Модуль включён, но строка не воздуховод → обычный агент."""
+        llm, bridge, engine, mm, cache = make_env(responses=[llm_final(55.0)])
+        result = await process_row(
+            spec_text="Кран шаровой Ду15",
+            llm_client=llm, mcp_bridge=bridge, graph_engine=engine,
+            memory_manager=mm, fresh=True, semantic_cache=cache,
+            ductwork_enabled=True,
+        )
+        assert result.get("price") == 55.0
+        assert llm.calls

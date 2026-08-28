@@ -102,7 +102,8 @@ class MCPAgentRunner(QThread):
     metrics_signal = Signal(object)
 
     def __init__(self, specs: list, llm_client, db_path: str = DB_PATH, parent=None, fresh: bool = True,
-                 skip_registry=None, use_approaches: bool = True, use_site_ranking: bool = True):
+                 skip_registry=None, use_approaches: bool = True, use_site_ranking: bool = True,
+                 ductwork_enabled: bool = False):
         super().__init__(parent)
         self.specs = specs
         self.llm_client = llm_client
@@ -110,6 +111,7 @@ class MCPAgentRunner(QThread):
         self._fresh = fresh
         self._use_approaches = use_approaches
         self._use_site_ranking = use_site_ranking
+        self._ductwork_enabled = ductwork_enabled
         self._skip_registry = skip_registry
         self._stop_event = threading.Event()
         self._restart_bridge = threading.Event()
@@ -333,7 +335,8 @@ class MCPAgentRunner(QThread):
                     spec_meta = {"article": spec.article, "brand": spec.brand,
                                  "name_raw": spec.name_raw, "uom": spec.uom,
                                  "spec": getattr(spec, "spec", ""),
-                                 "headers": spec.headers} if hasattr(spec, 'article') else None
+                                 "headers": spec.headers,
+                                 "qty": getattr(spec, "qty", None)} if hasattr(spec, 'article') else None
 
                     try:
                         result = await _run_row_with_idle_timeout(
@@ -356,6 +359,7 @@ class MCPAgentRunner(QThread):
                                 site_blacklist=site_blacklist,
                                 site_visit_callback=_site_visited,
                                 session_facts=session_facts,
+                                ductwork_enabled=self._ductwork_enabled,
                             ),
                             idle_timeout=row_idle_timeout,
                             max_seconds=row_max_seconds,
@@ -468,6 +472,11 @@ class MCPAgentRunner(QThread):
         """Update use_site_ranking live; applies from the next row."""
         self._use_site_ranking = value
         logger.info("Use site ranking updated to %s", value)
+
+    def set_ductwork_enabled(self, value: bool):
+        """Update ductwork module flag live; applies from the next row."""
+        self._ductwork_enabled = bool(value)
+        logger.info("Ductwork module updated to %s", value)
 
     def stop(self):
         self._stop_event.set()

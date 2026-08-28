@@ -90,3 +90,31 @@ def test_toggle_reuse_price_writes_config(qapp, monkeypatch, tmp_path):
         assert flags["use_site_ranking"] is True
     finally:
         win.close()
+
+
+def test_ductwork_checkbox_default_off(qapp, monkeypatch, tmp_path):
+    win = _monkey_window(monkeypatch, tmp_path, "run: {}\n")
+    try:
+        assert win.ductwork_cb.isChecked() is False
+    finally:
+        win.close()
+
+
+def test_ductwork_checkbox_initialized_from_config(qapp, monkeypatch, tmp_path):
+    win = _monkey_window(monkeypatch, tmp_path,
+                         "ductwork:\n  enabled: true\nrun: {}\n")
+    try:
+        assert win.ductwork_cb.isChecked() is True
+    finally:
+        win.close()
+
+
+def test_ductwork_toggle_writes_config(qapp, monkeypatch, tmp_path):
+    import src.config_loader as cl
+    win = _monkey_window(monkeypatch, tmp_path, "run: {}\n")
+    try:
+        assert cl.get_ductwork_enabled() is False
+        win.ductwork_cb.setChecked(True)
+        assert cl.get_ductwork_enabled() is True
+    finally:
+        win.close()

@@ -620,6 +620,12 @@ class MainWindow(QMainWindow):
         self.use_site_ranking_cb.setToolTip("Начинать поиск с сайтов, где этот тип товара находился быстрее всего")
         self.use_site_ranking_cb.toggled.connect(self._on_run_mode_toggle)
         run_checks.addWidget(self.use_site_ranking_cb)
+        from src.config_loader import get_ductwork_enabled
+        self.ductwork_cb = QCheckBox("Расчёт воздуховодов")
+        self.ductwork_cb.setChecked(get_ductwork_enabled())
+        self.ductwork_cb.setToolTip("Воздуховоды и фасонные части считать локально (без обращения к сайтам)")
+        self.ductwork_cb.toggled.connect(self._on_run_mode_toggle)
+        run_checks.addWidget(self.ductwork_cb)
         run_checks.addSpacing(8)
         run_hint = QLabel("ⓘ Чистый поиск: снять все три флажка")
         run_hint.setProperty("muted", True)
@@ -819,9 +825,50 @@ class MainWindow(QMainWindow):
                 f"Загружено: {self._total_rows} строк · Колонки: {self._mapping_hint(mapping)}"
             )
             self.toast_manager.success(f"Loaded {self._total_rows} rows")
+            self._prompt_ductwork_module()
         except Exception as e:
             self.add_log("ERR", "init", f"Failed to load: {e}")
             QMessageBox.critical(self, "Ошибка", f"Не удалось загрузить файл:\n{e}")
+
+    def _prompt_ductwork_module(self):
+        """Детекция воздуховодов в спецификации → дисклаймер «включить модуль?».
+
+        Модуль расчёта воздуховодов по умолчанию ВЫКЛЮЧЕН. При обнаружении
+        воздуховодов/фасонных частей предлагается включить его (расчёт без
+        обращения к сайтам). Выбор сохраняется в config/settings.yaml.
+        """
+        from src.config_loader import save_ductwork_enabled
+        from src.ductwork_calculator import count_ductwork_items
+        try:
+            specs = self.excel_writer.get_specs()
+        except Exception as e:
+            self.add_log("WARN", "init", f"Детекция воздуховодов не выполнена: {e}")
+            return
+        n = count_ductwork_items(specs)
+        if n > 0:
+            ans = QMessageBox.question(
+                self, "Модуль расчёта воздуховодов",
+                f"В спецификации обнаружены воздуховоды и фасонные части — {n} поз.\n\n"
+                "Включить модуль расчёта воздуховодов?\n"
+                "(позиции будут рассчитаны локально, без обращения к сайтам)\n\n"
+                "«Нет» — эти позиции будут обрабатываться как обычно (поиск по сайтам).",
+                QMessageBox.Yes | QMessageBox.No, QMessageBox.No,
+            )
+            enabled = ans == QMessageBox.Yes
+            self.ductwork_cb.blockSignals(True)
+            self.ductwork_cb.setChecked(enabled)
+            self.ductwork_cb.blockSignals(False)
+            save_ductwork_enabled(enabled)
+            self.add_log("INFO", "init",
+                         f"Воздуховоды: обнаружено {n} поз., модуль расчёта {'ВКЛЮЧЁН' if enabled else 'выключен'}")
+            self.status_label.setText(
+                f"Загружено: {self._total_rows} строк · модуль воздуховодов {'вкл' if enabled else 'выкл'}"
+            )
+        else:
+            save_ductwork_enabled(False)
+            self.ductwork_cb.blockSignals(True)
+            self.ductwork_cb.setChecked(False)
+            self.ductwork_cb.blockSignals(False)
 
     @staticmethod
     def _mapping_hint(mapping: dict) -> str:
@@ -984,12 +1031,14 @@ class MainWindow(QMainWindow):
             fresh=not self.reuse_price_cb.isChecked(),
             use_approaches=self.use_approaches_cb.isChecked(),
             use_site_ranking=self.use_site_ranking_cb.isChecked(),
+            ductwork_enabled=self.ductwork_cb.isChecked(),
             skip_registry=self._skip_registry,
         )
         mode_str = (
             f"цены={'вкл' if self.reuse_price_cb.isChecked() else 'выкл'}, "
             f"подходы={'вкл' if self.use_approaches_cb.isChecked() else 'выкл'}, "
-            f"рейтинг={'вкл' if self.use_site_ranking_cb.isChecked() else 'выкл'}"
+            f"рейтинг={'вкл' if self.use_site_ranking_cb.isChecked() else 'выкл'}, "
+            f"воздуховоды={'вкл' if self.ductwork_cb.isChecked() else 'выкл'}"
         )
         self.add_log("INFO", "init", f"Режим поиска: {mode_str}")
         self.monitor_panel.reset()
@@ -1116,6 +1165,8 @@ class MainWindow(QMainWindow):
             ws.cell(excel_row, hm["category"], pt or "")
             if brand_mismatch and "note" in hm:
                 ws.cell(excel_row, hm["note"], "не совпадает бренд")
+            elif result.get("ductwork_breakdown") and "note" in hm:
+                ws.cell(excel_row, hm["note"], result["ductwork_breakdown"])
 
     def _switch_to_assistant(self):
         """Switch right panel to assistant tab and ensure it's visible."""
@@ -1322,19 +1373,22 @@ class MainWindow(QMainWindow):
             self.add_log("INFO", "control", f"Bridge restarting with backend={backend}")
 
     def _on_run_mode_toggle(self, checked=False):
-        from src.config_loader import save_run_flags
+        from src.config_loader import save_run_flags, save_ductwork_enabled
         reuse_price = self.reuse_price_cb.isChecked()
         use_approaches = self.use_approaches_cb.isChecked()
         use_site_ranking = self.use_site_ranking_cb.isChecked()
         save_run_flags(reuse_price=reuse_price, use_approaches=use_approaches,
                        use_site_ranking=use_site_ranking)
+        save_ductwork_enabled(self.ductwork_cb.isChecked())
         if self._processing_active and hasattr(self, '_runner') and self._runner:
             self._runner.set_fresh(not reuse_price)
             self._runner.set_use_approaches(use_approaches)
             self._runner.set_use_site_ranking(use_site_ranking)
+            self._runner.set_ductwork_enabled(self.ductwork_cb.isChecked())
             mode = (f"цены={'вкл' if reuse_price else 'выкл'}, "
                     f"подходы={'вкл' if use_approaches else 'выкл'}, "
-                    f"рейтинг={'вкл' if use_site_ranking else 'выкл'}")
+                    f"рейтинг={'вкл' if use_site_ranking else 'выкл'}, "
+                    f"воздуховоды={'вкл' if self.ductwork_cb.isChecked() else 'выкл'}")
             self.add_log("INFO", "control", f"Режим поиска: {mode} (со следующей позиции)")
 
 

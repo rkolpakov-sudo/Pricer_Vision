@@ -133,6 +133,25 @@ def get_pdf_config(key: str, default):
     cfg = load_settings()
     return cfg.get("pdf_parser", {}).get(key, default)
 
+
+def get_ductwork_config(key: str, default):
+    cfg = load_settings()
+    return cfg.get("ductwork", {}).get(key, default)
+
+
+def get_ductwork_enabled() -> bool:
+    return bool(get_ductwork_config("enabled", False))
+
+
+def save_ductwork_enabled(enabled: bool):
+    cfg = load_settings()
+    cfg.setdefault("ductwork", {})["enabled"] = bool(enabled)
+    path = Path(os.path.dirname(os.path.abspath(__file__))).parent / "config" / "settings.yaml"
+    with open(path, "w", encoding="utf-8") as f:
+        yaml.dump(cfg, f, default_flow_style=False, allow_unicode=True)
+    global _SETTINGS_CACHE
+    _SETTINGS_CACHE = cfg
+
 def save_browser_headless(headless: bool):
     cfg = load_settings()
     cfg.setdefault("browser", {})["headless"] = headless

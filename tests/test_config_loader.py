@@ -61,6 +61,31 @@ class TestGetters:
         monkeypatch.setattr(cl, "load_settings", lambda: {"pdf_parser": {"use_llm": True}})
         assert cl.get_pdf_config("use_llm", False) is True
 
+    def test_get_ductwork_config(self, monkeypatch):
+        monkeypatch.setattr(cl, "load_settings", lambda: {"ductwork": {"enabled": True, "price_per_m2": 500}})
+        assert cl.get_ductwork_config("enabled", False) is True
+        assert cl.get_ductwork_config("price_per_m2", None) == 500
+        assert cl.get_ductwork_config("missing", "d") == "d"
+
+    def test_get_ductwork_enabled_default_false(self, monkeypatch):
+        monkeypatch.setattr(cl, "load_settings", lambda: {})
+        assert cl.get_ductwork_enabled() is False
+
+    def test_get_ductwork_enabled_true(self, monkeypatch):
+        monkeypatch.setattr(cl, "load_settings", lambda: {"ductwork": {"enabled": True}})
+        assert cl.get_ductwork_enabled() is True
+
+    def test_save_ductwork_enabled(self, tmp_path, monkeypatch):
+        target = tmp_path / "config" / "settings.yaml"
+        target.parent.mkdir(parents=True)
+        _redirect_config(tmp_path, monkeypatch, {"run": {}})
+        cl.save_ductwork_enabled(True)
+        written = yaml.safe_load(target.read_text(encoding="utf-8"))
+        assert written["ductwork"]["enabled"] is True
+        assert cl.get_ductwork_enabled() is True
+        cl.save_ductwork_enabled(False)
+        assert cl.get_ductwork_enabled() is False
+
     def test_get_deps_config_empty(self, monkeypatch):
         monkeypatch.setattr(cl, "load_settings", lambda: {})
         assert cl.get_deps_config() == {}

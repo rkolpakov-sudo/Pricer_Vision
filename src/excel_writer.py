@@ -69,7 +69,7 @@ class SpecItem:
     """Структурированное описание товара из Excel."""
     def __init__(self, text: str, article: str = "", brand: str = "", name_raw: str = "",
                  uom: str = "шт", headers: list | None = None, spec: str = "",
-                 row: int = 0):
+                 row: int = 0, qty=None):
         self.text = text
         self.article = article
         self.brand = brand
@@ -78,6 +78,7 @@ class SpecItem:
         self.headers = headers or []
         self.spec = spec
         self.row = row
+        self.qty = qty
 
 
 from src._labels import _CAT_RU_LABELS, _SUBCAT_RU_LABELS
@@ -344,6 +345,7 @@ class ExcelWriter:
         # строки-заголовки разделов («Отопление», «Вентиляция» и т.п.) —
         # без количества — не являются товарами
         qty_col = mapping.get("qty")
+        qty_val = None
         if qty_col is not None:
             qty_val = self._ws.cell(excel_row, qty_col + 1).value
             if qty_val is None or str(qty_val).strip() == "":
@@ -360,6 +362,7 @@ class ExcelWriter:
             spec=spec_raw,
             headers=self._headers,
             row=excel_row,
+            qty=qty_val,
         )
 
     def get_specs(self) -> list[SpecItem]:
