@@ -124,7 +124,8 @@ C:\Projects\Pricer_Vision\
 │   ├── approach_relevance.py    # Матчинг наименований + правила сопоставления (Фаза 8)
 │   ├── audit_logger.py          # Audit-лог JSONL (data/audit/session_*.jsonl)
 │   ├── config_loader.py         # Загрузчик config/settings.yaml (+ get_run_flags/save_run_flags)
-│   ├── excel_writer.py          # SpecItem (row/spec/article) + сборка spec_text из всех колонок
+│   ├── ductwork_calculator.py   # Расчёт воздуховодов/фасонных частей без сети (20 типов, цена за изделие с L_ном 3000/1250мм, гейт+дисклаймер)
+│   ├── excel_writer.py          # SpecItem (row/spec/article/qty) + сборка spec_text из всех колонок
 │   ├── graph_engine.py          # SQLite + in-memory (inc кэш, unknown excluded, TTL hints, pragmas)
 │   ├── _labels.py
 │   ├── learning_loop.py         # LearningLoop — автообучение; профили сайтов (тип|бренд), rank_sites()
@@ -144,6 +145,7 @@ C:\Projects\Pricer_Vision\
 │   ├── task_scheduler.py        # TaskScheduler — группировка товаров по сайтам (+ site_profiles) (Фаза 2)
 │   ├── human_behavior.py        # HumanBehavior — человеческие клики/печать/скролл (Фаза 3)
 │   ├── rate_limiter.py          # DomainRateLimiter — per-domain RPM лимит (Фаза 3)
+│   ├── radiator_section_pricer.py # Расчёт цены радиатора по секциям (цена за секцию × N, только после перебора сайтов)
 │   ├── site_analyzer.py         # SiteAnalyzer — детекция SPA/SSR/антибота (Фаза 3)
 │   ├── captcha_detector.py      # CaptchaDetector — типы captcha + рекомендации (Фаза 3)
 │   ├── column_classifier.py     # Системная классификация колонок спецификации
@@ -154,8 +156,8 @@ C:\Projects\Pricer_Vision\
 │   ├── validator.py             # Пост-валидация
 │   └── widget_base.py
 ├── tests/
-│   ├── test_*.py                # Тесты (pytest; включая test_main.py — панель «Режим поиска», test_row_idle_timeout.py)
-│   └── integration/             # Интеграционные тесты агентного цикла (test_agent_flow.py)
+│   ├── test_*.py                # Тесты (pytest; включая test_main.py — панель «Режим поиска», test_row_idle_timeout.py, test_ductwork_calculator.py — модуль воздуховодов)
+│   └── integration/             # Интеграционные тесты агентного цикла (test_agent_flow.py, в т.ч. TestDuctworkModule)
 ├── logs/
 │   └── runtime.log              # Последний ран
 └── venv/                        # Виртуальное окружение
@@ -462,11 +464,11 @@ pdf_parser:
 ### SQLite оптимизация (`src/graph_engine.py`)
 - `_apply_pragmas()` в `build()`: `synchronous=NORMAL`, `cache_size=-64000` (64MB), `temp_store=MEMORY`. WAL и foreign_keys уже были включены.
 
-## Тестирование (актуально на 2026-08-27)
+## Тестирование (актуально на 2026-08-28)
 
-- **960 тестов, 2 skipped**, 0 failures. Запуск: `python -m pytest -q`.
-- **Интеграционные** (`tests/integration/test_agent_flow.py`): полный цикл `process_row` с моками — извлечение, tool_call цикл, reuse (rule 8, включая exact-spec ≥0.6), semantic cache, ошибки LLM, max rounds, captcha, stuck recovery, флаги режима поиска, защита моделей C10/C20, кап confidence, повторный зонд, межстрочные факты.
-- **Критичные модули >80%**: schemas, stuck_detector, semantic_cache, context_optimizer, rate_limiter, learning_loop, smart_review, config_loader, excel_writer, session_facts, approach_relevance (model_designators/mismatch_kind).
+- **1031 тест, 2 skipped**, 0 failures. Запуск: `python -m pytest -q`.
+- **Интеграционные** (`tests/integration/test_agent_flow.py`): полный цикл `process_row` с моками — извлечение, tool_call цикл, reuse (rule 8, включая exact-spec ≥0.6), semantic cache, ошибки LLM, max rounds, captcha, stuck recovery, флаги режима поиска, защита моделей C10/C20, кап confidence, повторный зонд, межстрочные факты, **модуль воздуховодов** (расчёт без обращения к браузеру/LLM).
+- **Критичные модули >80%**: schemas, stuck_detector, semantic_cache, context_optimizer, rate_limiter, learning_loop, smart_review, config_loader, excel_writer, session_facts, approach_relevance (model_designators/mismatch_kind), ductwork_calculator.
 - Покрытие: `python -m coverage run --source=src -m pytest tests -q && python -m coverage report` (coverage установлен в venv).
 - `pytest-asyncio` установлен в venv — async-тесты (mcp_bridge, pdf_parser, agent_flow) проходят.
 
@@ -558,12 +560,36 @@ pdf_parser:
   подтверждённых цен (`confidence ≥ 0.90`). Результат: `conf 0.70`, `requires_review=True`,
   `reason="рассчитано программно"`.
 
-### Режим поиска (панель «Режим поиска», три флага памяти)
-- Отдельная строка-панель между тулбаром и спиннером с тремя независимыми флажками:
+### Модуль расчёта воздуховодов и фасонных частей (`src/ductwork_calculator.py`)
+- **Без обращения в сеть/LLM**: позиции-воздуховоды и фасонные части (20 типов
+  элементов) рассчитываются локально, детерминированно.
+- **Включение**: модуль по умолчанию ВЫКЛЮЧЕН (`ductwork.enabled: false` в
+  `config/settings.yaml`). При загрузке спецификации детектирует воздуховоды и
+  выдаёт дисклаймер «В спецификации обнаружены воздуховоды — включить модуль
+  расчёта?» [Да/Нет]. Управление — чекбокс «Расчёт воздуховодов» в панели
+  «Режим поиска» и `config_loader.get/save_ductwork_enabled`.
+- **Модель расчёта** (портирована из Proj_duct, подтверждена result-файлами):
+  - **Цена за изделие** = `S_м.п. × 1.05 × цена_м² × K_толщины × L_ном`, где
+    L_ном — номенклатурная длина прямого воздуховода: **круглый 3000 мм,
+    прямоугольный 1250 мм**; фасонные части — в шт, L_ном не применяется.
+  - Отвод прямоугольный: `R = 1.0×max(A,B)`.
+  - Цены за м² — таблицы `straight_prices`/`shaped_prices` (rect/round × δ) +
+    дефолт стали (850/2350/625) из `settings.yaml`.
+- **Гейт** `is_ductwork_row()`: узкий детектор 20 типов + вент-контекст;
+  сантехника (ниппель 1/2", отвод трубы Ø25, вентиляторы/клапаны/диффузоры)
+  не перехватывается.
+- **Результат**: в колонку «Цена» — цена за изделие; в «Пометку» — breakdown
+  (тип, S_издел, цена_м², K_толщины, L_ном, изделий, полная стоимость).
+  Строки НЕ кэшируются (semantic-cache/negative-cache) и НЕ сохраняются в граф.
+- **Пример**: Ø100 δ0.5 → 965.85 ₽/изделие (3 м); 150x150 δ0.5 → 917.91 ₽/изделие (1.25 м).
+
+### Режим поиска (панель «Режим поиска», четыре флажка)
+- Отдельная строка-панель между тулбаром и спиннером с независимыми флажками:
   - **Цены из памяти** (`run.reuse_price`, инверсия legacy `run.fresh`) — переиспользование rule-8/кэша;
   - **Подходы** (`run.use_approaches`) — подсказки шагов поиска из графа;
-  - **Рейтинг сайтов** (`run.use_site_ranking`) — ранжирование сайтов по профилю `(тип, бренд)`.
-- Сняты все три = «чистый поиск без памяти» (для нагрузочного A/B-теста).
+  - **Рейтинг сайтов** (`run.use_site_ranking`) — ранжирование сайтов по профилю `(тип, бренд)`;
+  - **Расчёт воздуховодов** (`ductwork.enabled`) — локальный расчёт воздуховодов/фасонных частей без сети.
+- Сняты все три флажка памяти = «чистый поиск без памяти» (для нагрузочного A/B-теста).
 - `config_loader.get_run_flags()` / `save_run_flags()`; изменение на лету через
   `runner.set_use_approaches/set_use_site_ranking` (как `set_fresh`).
 - Рейтинг сайтов: `learning_loop.site_profiles` ключ `тип|бренд`, учёт неудач,
@@ -674,4 +700,4 @@ one/descriptive_only/key (модель/размер/
   инвентарь полей страницы. Слепые таймауты стали 1-раундовой обратной связью.
 
 ### Итоговые тесты
-**960 passed, 2 skipped** (бейзлайн до фиксов 26.08 — 875).
+**1031 passed, 2 skipped** (бейзлайн до фиксов 26.08 — 875).

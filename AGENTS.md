@@ -5,7 +5,7 @@
 ## Команды
 
 - **Запуск приложения:** `python main.py`
-- **Тесты:** `python -m pytest -q` (ожидается полный зелёный набор: **996 passed, 2 skipped**; async-тесты mcp_bridge/pdf_parser могут падать, если в `venv` нет `pytest-asyncio`).
+- **Тесты:** `python -m pytest -q` (ожидается полный зелёный набор: **1031 passed, 2 skipped**; async-тесты mcp_bridge/pdf_parser могут падать, если в `venv` нет `pytest-asyncio`).
 - **Проверка синтаксиса:** `python -m py_compile <files>` (либо запуск pytest).
 - Окружение: `venv/` (единый, Python 3.13; MinerU 3.4 установлен в нём же).
 
@@ -26,7 +26,7 @@
 
 ## Архитектура (кратко)
 
-- `main.py` — точка входа, главное окно (таблицы, toolbar, splitter, панель «Режим поиска»).
+- `main.py` — точка входа, главное окно (таблицы, toolbar, splitter, панель «Режим поиска» с чекбоксом «Расчёт воздуховодов», дисклаймер модуля при загрузке спецификации).
 - `src/` — ядро:
   - `agent_loop.py` — основной цикл обработки строк (MCP + graph tools, нативные tool_calls, `_query_llm` c circuit breaker, StuckDetector, температуры фаз, контекстный бюджет 8000 токенов). Флаги режима: `use_approaches`/`use_site_ranking`; idle-таймаут строки задаёт runner; факты-память RowFacts/SessionFacts; exact-spec реюз ≥0.6; кап confidence по `mismatch_kind` (descriptive-only ≥0.8).
   - `task_scheduler.py` — TaskScheduler: группировка товаров по сайтам, приоритизация батчей (Фаза 2).
@@ -52,6 +52,7 @@
   - `dependency_manager/` — инструмент «Зависимости» (Qt-free логика в `manager.py`/`npm.py`/`pypi.py`, UI в `dialog.py`). Проверка версий pip+npm и ревизии chromium (`BrowserInfo`) для `@playwright/mcp`.
   - `pdf_parser/` — парсер PDF (MinerU → fallback structurer, LLM отключён).
   - `radiator_section_pricer.py` — расчёт цены радиатора по секциям при ненахождении точного количества (ТОЛЬКО для радиаторов, ТОЛЬКО после полного перебора сайтов, на основе confirmed_prices).
+  - `ductwork_calculator.py` — модуль расчёта воздуховодов и фасонных частей (без обращения в сеть): 20 типов элементов, цена за изделие с номенклатурной длиной (круглый 3000 мм / прямоугольный 1250 мм), включается через `ductwork.enabled` + дисклаймер при загрузке спецификации.
 - `gui/` — `graph_assistant.py` (панели: HelpPage, StudyPage, CRUD), `graph_explorer.py` (визуализация графа), `agent_monitor.py` (мониторинг), `metrics_panel.py`, `spinner_widget.py`.
 - `mcp_servers/` — `browser_server.py` (MCP-сервер бэкендов camoufox/nodriver, используется), `pricer_server.py` (**не используется**).
 - `config/` — YAML-конфиги (`settings.yaml` → `browser.backend/backends`, `run.reuse_price/use_approaches/use_site_ranking`), `matching_rules.yaml`, `stealth.js` (антидетект), `playwright-mcp.json`.
