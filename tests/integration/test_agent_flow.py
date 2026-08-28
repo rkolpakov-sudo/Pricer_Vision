@@ -943,3 +943,48 @@ class TestDuctworkModule:
         )
         assert result.get("price") == 55.0
         assert llm.calls
+
+
+class TestQueryGuards:
+    """Система-советник по вводу запросов (дубли / монстр-вставка spec_text)."""
+
+    @pytest.mark.asyncio
+    async def test_duplicate_query_skipped(self):
+        """Повторный ввод ТОГО ЖЕ запроса на том же сайте не исполняется —
+        возвращается tool-совет, bridge не вызывается."""
+        llm, bridge, engine, mm, cache = make_env(responses=[
+            llm_tool_call("browser_navigate", {"url": "https://santech.ru"}),
+            llm_tool_call("browser_type", {"text": "МС-140"}),
+            llm_tool_call("browser_type", {"text": "МС-140"}),
+            llm_final(4415.59),
+        ])
+        result = await process_row(
+            spec_text="Чугунный радиатор МС-140",
+            llm_client=llm, mcp_bridge=bridge, graph_engine=engine,
+            memory_manager=mm, fresh=True, semantic_cache=cache,
+        )
+        types = [a for n, a in bridge.calls if n == "browser_type"]
+        assert len(types) == 1  # повтор не исполнен
+        texts = [str(m.get("content", "")) for m in llm.calls[3] if m.get("role") == "tool"]
+        assert any("уже вводился" in t for t in texts)
+        assert result.get("price") == 4415.59
+
+    @pytest.mark.asyncio
+    async def test_monster_query_skipped(self):
+        """Запрос с ';' (вставка всего spec_text) не исполняется — совет использовать
+        артикул/модель/размер."""
+        llm, bridge, engine, mm, cache = make_env(responses=[
+            llm_tool_call("browser_navigate", {"url": "https://santech.ru"}),
+            llm_tool_call("browser_type", {"text": "Кран шаровой полнопроходной; внутренняя резьба; тип BVR-DR"}),
+            llm_final(5438.35),
+        ])
+        result = await process_row(
+            spec_text="Кран шаровой BVR-DR",
+            llm_client=llm, mcp_bridge=bridge, graph_engine=engine,
+            memory_manager=mm, fresh=True, semantic_cache=cache,
+        )
+        types = [a for n, a in bridge.calls if n == "browser_type"]
+        assert len(types) == 0  # монстр-запрос не исполнен
+        texts = [str(m.get("content", "")) for m in llm.calls[2] if m.get("role") == "tool"]
+        assert any("слишком длинный" in t for t in texts)
+        assert result.get("price") == 5438.35

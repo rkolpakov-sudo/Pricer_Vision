@@ -238,8 +238,12 @@ class LLMClient:
             response.raise_for_status()
             data = response.json()
             usage = data.get("usage") or {}
-            self.prompt_tokens += int(usage.get("prompt_tokens") or 0)
-            self.completion_tokens += int(usage.get("completion_tokens") or 0)
+            pt = int(usage.get("prompt_tokens") or 0)
+            ct = int(usage.get("completion_tokens") or 0)
+            self.prompt_tokens += pt
+            self.completion_tokens += ct
+            if pt or ct:
+                logger.info("LLM usage: prompt=%d completion=%d model=%s", pt, ct, model_name)
             return data
         except httpx.TimeoutException:
             logger.error(f"LLM timeout ({self.timeout}s)")

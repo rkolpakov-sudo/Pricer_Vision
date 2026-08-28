@@ -15,6 +15,7 @@ from src.agent_loop import (
     CONTEXT_TOKEN_BUDGET, EMPTY_PROBE_LIMIT,
     TEMP_EXPLORATION, TEMP_NAVIGATION, TEMP_EXTRACTION, TEMP_RECOVERY,
     _penalize_approaches, _deprecate_site_approaches, _inject_facts_block,
+    _normalize_js, _query_lost_tokens, _keep_newest_exchanges,
 )
 from src.session_facts import RowFacts, SessionFacts
 
@@ -68,7 +69,9 @@ class TestConstants:
 
 class TestContextBudget:
     def test_budget_constant(self):
-        assert CONTEXT_TOKEN_BUDGET == 8000
+        # Честная оценка токенов (кириллица ~2 симв./токен): 12000 ≈ прежний
+        # эффективный реальный контекст при «8000» через len//4.
+        assert CONTEXT_TOKEN_BUDGET == 12000
 
     def test_estimate_tokens(self):
         assert _estimate_tokens("") == 0
@@ -924,3 +927,32 @@ class TestPriceIsRelevant:
 
     def test_empty_content(self):
         assert _price_is_relevant(self.SPEC, self.META, '') is False
+
+
+class TestNormalizeJs:
+    def test_collapses_whitespace(self):
+        a = "() => { const x = 1; }"
+        b = "() => {\n   const x = 1;\t }"
+        assert _normalize_js(a) == _normalize_js(b)
+
+    def test_unifies_quotes(self):
+        a = "() => { return {a: 'x'}; }"
+        b = '() => { return {a: "x"}; }'
+        assert _normalize_js(a) == _normalize_js(b)
+
+    def test_empty(self):
+        assert _normalize_js("") == ""
+
+
+class TestQueryLostTokens:
+    def test_lost_size_detected(self):
+        assert _query_lost_tokens("Кран шаровой Ду15", "Кран шаровой") == ["размер"]
+
+    def test_lost_model_detected(self):
+        assert _query_lost_tokens("LEMAX Premium C10 500x600", "LEMAX Premium") == ["модель", "размер"]
+
+    def test_no_loss(self):
+        assert _query_lost_tokens("LEMAX C10 500x600", "LEMAX C10 500x600") == []
+
+    def test_empty_new_query(self):
+        assert _query_lost_tokens("Кран Ду15", "") == ["размер"]

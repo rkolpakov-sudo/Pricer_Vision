@@ -23,6 +23,8 @@ REPEAT_NOTICE_THRESHOLD = 3
 MAX_QUERIES_PER_SITE = 3
 MAX_SITES_IN_BLOCK = 6
 MAX_ERRORS = 3
+EVALS_WITHOUT_TYPE_NOTICE = 4
+SITES_WITHOUT_RESULT_NOTICE = 3
 
 
 class RowFacts:
@@ -31,10 +33,13 @@ class RowFacts:
     def __init__(self):
         self._sites: dict[str, dict] = {}
         self._price_candidate_seen = False
+        self._price_candidate_hint: str = ""
         self._card_open = False
         self._recent_errors: list[str] = []
         self._rounds_used: int | None = None
         self._rounds_total: int | None = None
+        self._navblocks = 0
+        self._visited_urls: list[str] = []
 
     # --- запись фактов (детерминированно) ---
 
@@ -50,6 +55,25 @@ class RowFacts:
         if not site["queries"] or site["queries"][-1] != q:
             site["queries"].append(q[:120])
             site["queries"] = site["queries"][-MAX_QUERIES_PER_SITE:]
+        # Реальный ввод запроса — сбрасываем счётчик «извлечения без ввода».
+        site["evals_since_type"] = 0
+
+    def seen_query(self, domain: str, query: str) -> int:
+        """Сколько раз этот ТОЧНЫЙ текст запроса уже вводился на домене."""
+        q = (query or "").strip()
+        if not domain or not q:
+            return 0
+        site = self._sites.get(domain)
+        if not site:
+            return 0
+        return site["queries"].count(q)
+
+    def last_query(self, domain: str) -> str:
+        """Последний введённый запрос на домене (для сравнения деградации)."""
+        site = self._sites.get(domain)
+        if not site or not site["queries"]:
+            return ""
+        return site["queries"][-1]
 
     def record_browser_call(self, domain: str, key: str, result_hash: str = "") -> None:
         """Учитывает вызов инструмента. Одинаковый вызов с одинаковым
@@ -58,6 +82,8 @@ class RowFacts:
             return
         site = self._site(domain)
         site["extractions"] += 1
+        if key.startswith("evaluate:"):
+            site["evals_since_type"] += 1
         call = (key, result_hash)
         if site["last_call"] == call:
             site["repeat_streak"] += 1
@@ -65,12 +91,22 @@ class RowFacts:
             site["repeat_streak"] = 1
         site["last_call"] = call
 
+    @property
+    def evals_without_type(self) -> int:
+        """Максимальное число извлечений подряд без ввода запроса (по сайтам)."""
+        return max((s.get("evals_since_type", 0) for s in self._sites.values()), default=0)
+
     def record_empty_result(self, domain: str) -> None:
         if domain:
             self._site(domain)["status"] = "пустой результат"
 
-    def record_price_candidate(self) -> None:
+    def record_price_candidate(self, hint: str = "") -> None:
         self._price_candidate_seen = True
+        h = (hint or "").strip()
+        if h and len(h) > 120:
+            h = h[:120]
+        if h:
+            self._price_candidate_hint = h
 
     def record_card_open(self) -> None:
         self._card_open = True
@@ -83,6 +119,19 @@ class RowFacts:
             self._recent_errors.append(m[:120])
             self._recent_errors = self._recent_errors[-MAX_ERRORS:]
 
+    def record_navblock(self) -> None:
+        self._navblocks += 1
+
+    def record_url(self, url: str) -> None:
+        u = (url or "").strip().rstrip("/")
+        if u and (not self._visited_urls or self._visited_urls[-1] != u):
+            self._visited_urls.append(u)
+            self._visited_urls = self._visited_urls[-12:]
+
+    def seen_url(self, url: str) -> bool:
+        u = (url or "").strip().rstrip("/")
+        return bool(u and u in self._visited_urls)
+
     def set_progress(self, rounds_used: int, rounds_total: int) -> None:
         """Бюджет раундов строки — LLM сам решает, когда сохранить кандидата раньше."""
         self._rounds_used = rounds_used
@@ -91,6 +140,17 @@ class RowFacts:
     @property
     def price_candidate_seen(self) -> bool:
         return self._price_candidate_seen
+
+    @property
+    def price_candidate_hint(self) -> str:
+        return self._price_candidate_hint
+
+    @property
+    def navblocks(self) -> int:
+        return self._navblocks
+
+    def distinct_sites(self) -> int:
+        return len(self._sites)
 
     # --- формирование блока для LLM ---
 
@@ -105,9 +165,21 @@ class RowFacts:
             if site["repeat_streak"] >= REPEAT_NOTICE_THRESHOLD:
                 line += (f"; извлечение страницы повторено {site['repeat_streak']} "
                          "раз подряд с одинаковым результатом")
+            if site.get("evals_since_type", 0) >= EVALS_WITHOUT_TYPE_NOTICE:
+                line += (f"; запрос поиска не вводился уже {site['evals_since_type']} "
+                         "извлечений подряд — только browser_evaluate; для реального поиска "
+                         "используй browser_type с текстом запроса")
             parts.append(line)
         if self._price_candidate_seen:
-            parts.append("  уже видели цену-кандидата (price_candidate)")
+            line = "  уже видели цену-кандидата (price_candidate)"
+            if self._price_candidate_hint:
+                line += f": {self._price_candidate_hint}"
+            if self._navblocks:
+                line += f"; попыток уйти с сайта без сохранения: {self._navblocks}"
+            parts.append(line)
+        if len(self._sites) >= SITES_WITHOUT_RESULT_NOTICE:
+            parts.append(f"  уже посещено сайтов: {len(self._sites)} — при отсутствии результата "
+                         "лучше сохранить лучший аналог (сниженный conf) или завершить строку")
         if self._card_open:
             parts.append("  открыта карточка товара")
         if self._recent_errors:
@@ -121,7 +193,7 @@ class RowFacts:
         site = self._sites.get(domain)
         if site is None:
             site = {"status": "посещён", "queries": [], "extractions": 0,
-                    "last_call": None, "repeat_streak": 0}
+                    "last_call": None, "repeat_streak": 0, "evals_since_type": 0}
             self._sites[domain] = site
         return site
 

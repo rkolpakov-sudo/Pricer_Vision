@@ -25,7 +25,7 @@ from src.captcha_detector import CaptchaDetector, CaptchaType
 from src.approach_relevance import (
     approach_relevant, product_name_matches, product_name_matches_ignore_brand,
     missing_required_tokens, normalize_search_text, is_standard_reference,
-    search_key_tokens, mismatch_kind, model_designators,
+    search_key_tokens, mismatch_kind, model_designators, _size_key,
 )
 from src.session_facts import RowFacts, SessionFacts
 
@@ -44,6 +44,17 @@ _RADIATOR_PRODUCT_TYPES = {"plumbing_heating_radiators"}
 CONF_TRUSTED = 0.9
 CONF_GOOD = 0.8
 CONF_MIN = 0.6
+
+# Верхний предел символов для browser_evaluate-результата в сообщении LLM.
+# Один JSON-результат до 8k символов проходит целиком (лимит строк не работает
+# для однострочного JSON) и раздувает контекст. Цена-кандидат извлекается из
+# ПОЛНОГО результата до усечения и подставляется в начало — LLM её не теряет.
+EVALUATE_MESSAGE_CAP = 6000
+# Повтор запроса считается дублем, если он уже вводился на том же домене.
+QUERY_DUP_SKIP_AFTER = 1
+# «Монстр»-запрос: вставка всего spec_text (сигнатура — ';' между частями).
+MONSTER_QUERY_MARKER = ";"
+MONSTER_QUERY_MIN_LEN = 70
 
 TEMP_EXPLORATION = 0.7
 TEMP_NAVIGATION = 0.3
@@ -736,6 +747,8 @@ async def process_row(
         for tc in tool_calls:
             tool_name = tc.get("name", "")
             tool_args = tc.get("arguments", {})
+            _query_hint = ""
+            _nav_hint = ""
 
             if tool_name in GRAPH_TOOL_NAMES:
                 result = _execute_graph_tool(tool_name, tool_args, graph_engine, memory_manager, spec_text=search_text)
@@ -750,21 +763,39 @@ async def process_row(
                 if (leaving_domain and price_candidate_seen and not price_confirmed):
                     logger.warning("🚫 Navigate blocked: price candidate seen on %s, not confirmed",
                                    _extract_domain(current_site))
+                    facts.record_navblock()
+                    _pc = facts.price_candidate_hint
+                    _pc_part = f"\nЦена-кандидат: {_pc}." if _pc else ""
+                    if facts.navblocks >= 2:
+                        _block_msg = (f"error: на текущем сайте УЖЕ найдена цена-кандидат{_pc_part} "
+                                      f"Ты {facts.navblocks} раз пытался уйти без сохранения. НЕМЕДЛЕННО: "
+                                      "если карточка открыта — извлеки h1 и цену и вызови save_confirmed_price "
+                                      "(confirm=true при расхождении только в описательных словах). Только ПОСЛЕ "
+                                      "сохранения переходи на другой сайт.")
+                    else:
+                        _block_msg = (f"error: на текущем сайте уже найдена цена-кандидат{_pc_part} "
+                                      "НЕ уходи с этого сайта, пока цена не сохранена. Сейчас: либо открой "
+                                      "карточку найденного товара и извлеки цену, либо сохрани её через "
+                                      "save_confirmed_price с product_name (полное название с карточки). "
+                                      "Только ПОСЛЕ сохранения цены можно переходить на другой сайт.")
                     messages.append({
                         "role": "tool",
                         "tool_call_id": tc.get("id", ""),
-                        "content": ("error: на текущем сайте уже найдена цена-кандидат (price_candidate). "
-                                    "НЕ уходи с этого сайта, пока цена не сохранена. Сейчас: либо открой "
-                                    "карточку найденного товара и извлеки цену, либо сохрани её через "
-                                    "save_confirmed_price с product_name (полное название с карточки). "
-                                    "Только ПОСЛЕ сохранения цены можно переходить на другой сайт."),
+                        "content": _block_msg,
                     })
                     continue
                 # Soft Yandex reminder: warn but do NOT block navigation
                 if "yandex" in current_site and not yandex_price_saved and new_site and "yandex" not in new_site.lower():
                     logger.info("ℹ️ Leaving Yandex for %s (yandex_price_saved=%s)", new_site, yandex_price_saved)
+                # B6: повторная навигация на тот же URL в рамках строки — подсказка (не пропуск).
+                _nav_hint = ""
+                moved_to_new_domain = False
+                if new_site and facts.seen_url(new_site):
+                    _nav_hint = (f"ℹ️ Страница {new_site} уже открывалась в этой строке. "
+                                 "Работай с текущей страницей или укажи новый URL.")
                 if new_site and new_site != current_site:
                     if _extract_domain(new_site) != _extract_domain(current_site):
+                        moved_to_new_domain = True
                         price_candidate_seen = False
                         recent_errors = []
                         empty_probe_streak.clear()
@@ -776,14 +807,72 @@ async def process_row(
                     await rate_limiter.wait_if_needed(current_site or "")
                 result = await mcp_bridge.call_tool(tool_name, tool_args)
                 facts.record_site_visit(_extract_domain(current_site))
+                if new_site:
+                    facts.record_url(new_site)
                 if _is_product_card_url(current_site):
                     facts.record_card_open()
+                # B7: уже посещено несколько сайтов без результата — guidance (не запрет).
+                if (moved_to_new_domain and facts.distinct_sites() >= 3
+                        and not price_candidate_seen and not price_confirmed):
+                    messages.append({
+                        "role": "user",
+                        "content": (f"⚠️ Уже посещено {facts.distinct_sites()} сайтов без найденной цены. "
+                                    "Если на текущем сайте нет подходящего товара — лучше сохранить лучший "
+                                    "аналог (confidence снизится) или завершить строку, чем продолжать "
+                                    "перебор сайтов."),
+                    })
             else:
                 # Rate limit EVERY browser action (not just navigate): клики, печать,
                 # evaluate, снапшоты идут на тот же домен и тоже ловят бан при частых
                 # запросах. Для per-site сайтов (vseinstrumenti) интервал больше.
                 if rate_limiter is not None and current_site:
                     await rate_limiter.wait_if_needed(current_site)
+                # Совет-предупреждения по вводу запроса (система-советник, не блокировка
+                # решений): дубли запроса, «монстр»-вставка spec_text, деградация с потерей
+                # модели/размера. LLM решает, но видит, что действие уже выполнялось/бесполезно.
+                if tool_name in ("browser_type", "type_text"):
+                    query_text = str(tool_args.get("text") or "").strip()
+                    query_domain = _extract_domain(current_site or "")
+                    if query_text and query_domain:
+                        dup_count = facts.seen_query(query_domain, query_text)
+                        if dup_count >= QUERY_DUP_SKIP_AFTER:
+                            if dup_count >= 2:
+                                _dup_msg = (f"⚠️ Запрос «{query_text[:100]}» уже вводился на этом сайте "
+                                            f"{dup_count + 1} раз подряд и результата не дал. НЕ повторяй его: "
+                                            "измени текст запроса, переключись на другой сайт или сохрани "
+                                            "уже найденную цену/аналог.")
+                            else:
+                                _dup_msg = (f"ℹ️ Запрос «{query_text[:100]}» уже вводился на этом сайте "
+                                            "ранее и результата не дал. Повтор вряд ли поможет — измени "
+                                            "текст запроса или переключись на другой сайт.")
+                            logger.info("♻️ Запрос-дубль на %s: «%s»", query_domain, query_text[:80])
+                            messages.append({
+                                "role": "tool",
+                                "tool_call_id": tc.get("id", ""),
+                                "content": _dup_msg,
+                            })
+                            continue
+                        if MONSTER_QUERY_MARKER in query_text:
+                            logger.info("♻️ Монстр-запрос отклонён на %s: «%s»", query_domain, query_text[:80])
+                            messages.append({
+                                "role": "tool",
+                                "tool_call_id": tc.get("id", ""),
+                                "content": (f"ℹ️ Запрос слишком длинный для поиска магазина "
+                                            f"(вставлен весь текст позиции). Используй артикул/модель/размер: "
+                                            "ключевые токены указаны в контексте. Пример: «065B8320R» "
+                                            "или «BVR-DR DN40»."),
+                            })
+                            continue
+                        if len(query_text) > MONSTER_QUERY_MIN_LEN:
+                            _query_hint = ("ℹ️ Запрос длинный («{}…»). Для точного поиска используй "
+                                           "артикул/модель/размер — см. ключевые токены в контексте.").format(query_text[:60])
+                        prev_q = facts.last_query(query_domain)
+                        if prev_q and prev_q != query_text:
+                            lost = _query_lost_tokens(prev_q, query_text)
+                            if lost:
+                                _query_hint = (f"ℹ️ Новый запрос потерял: {', '.join(lost)}. "
+                                               "Упрощай, сохраняя размер/тип/Ду, либо смени сайт — "
+                                               "упрощение до неузнаваемости не найдёт товар.")
                 # Автозачистка поля поиска перед вводом: SPA-сайты (digiSearch и пр.)
                 # не очищают поле сами — старый текст склеивается с новым («МС-140
                 # Мх500МС-140»). Очищаем нативно через JS, если передан селектор поля.
@@ -804,7 +893,8 @@ async def process_row(
                 _repeat_hint = ""
                 if tool_name in ("browser_evaluate", "evaluate"):
                     js = str(tool_args.get("function") or "")
-                    key = (_extract_domain(current_site), hashlib.md5(js.encode("utf-8", errors="replace")).hexdigest())
+                    key = (_extract_domain(current_site),
+                           hashlib.md5(_normalize_js(js).encode("utf-8", errors="replace")).hexdigest())
                     if key in eval_cache:
                         eval_repeat = eval_cache[key]
                         logger.info("🔁 Повтор browser_evaluate (тот же JS на %s) — кэш",
@@ -838,7 +928,8 @@ async def process_row(
                     result = await mcp_bridge.call_tool(tool_name, tool_args)
                     if tool_name in ("browser_evaluate", "evaluate") and current_site:
                         js = str(tool_args.get("function") or "")
-                        key = (_extract_domain(current_site), hashlib.md5(js.encode("utf-8", errors="replace")).hexdigest())
+                        key = (_extract_domain(current_site),
+                               hashlib.md5(_normalize_js(js).encode("utf-8", errors="replace")).hexdigest())
                         if key not in eval_cache:
                             eval_cache[key] = str(result)[:2000]
 
@@ -979,8 +1070,14 @@ async def process_row(
                 if price_hint and _price_is_relevant(spec_text, spec_meta, tool_content):
                     price_candidate_seen = True
                     empty_probe_streak.clear()
-                    facts.record_price_candidate()
+                    facts.record_price_candidate(str(price_hint))
             content_to_send = tool_content[:10000]
+            if tool_name == "browser_evaluate" and len(tool_content) > EVALUATE_MESSAGE_CAP:
+                content_to_send = tool_content[:EVALUATE_MESSAGE_CAP] + "\n…(результат усечён; цена-кандидат выше, если была)"
+            if _query_hint:
+                content_to_send = _query_hint + "\n" + content_to_send
+            if _nav_hint:
+                content_to_send = _nav_hint + "\n" + content_to_send
             if price_hint:
                 content_to_send = f"💰 price_candidate: {price_hint}\n" + content_to_send
             if tool_args.get("_repeat"):
@@ -1896,6 +1993,40 @@ def _stuck_target(tool_name: str, tool_args: dict) -> str:
     return str(target)
 
 
+def _query_lost_tokens(prev_query: str, new_query: str) -> list[str]:
+    """Что новый запрос потерял относительно предыдущего (модель/размер).
+
+    Возвращает список потерянных дискриминаторов: «модель», «размер».
+    Используется как совет: упрощение запроса допустимо, но потеря модели/размера
+    делает товар неузнаваемым для поиска магазина.
+    """
+    lost = []
+    prev_models = model_designators(prev_query or "")
+    new_models = model_designators(new_query or "")
+    if prev_models and not (new_models & prev_models):
+        lost.append("модель")
+    prev_sizes = _size_key(prev_query or "") or set()
+    new_sizes = _size_key(new_query or "") or set()
+    if prev_sizes and not (new_sizes & prev_sizes):
+        lost.append("размер")
+    return lost
+
+
+def _normalize_js(js: str) -> str:
+    """Нормализует JS-код для кэша повторов browser_evaluate.
+
+    Агент пишет «почти те же» скрипты (отличия только в пробелах/кавычках) —
+    точный md5 их не объединяет, и кэш бесполезен (248 повторов из 941 в прогоне).
+    Схлопываем пробелы/переносы и унифицируем кавычки: эквивалентные скрипты
+    получают один хэш.
+    """
+    if not js:
+        return ""
+    out = re.sub(r"\s+", " ", js)
+    out = out.replace("'", '"')
+    return out
+
+
 def _clear_field_js(tool_args: dict) -> str | None:
     """JS-сниппет очистки поля ввода перед browser_type.
 
@@ -2063,14 +2194,27 @@ def _result_to_schema(result: dict) -> dict:
     return out
 
 
-CONTEXT_TOKEN_BUDGET = 8000
+CONTEXT_TOKEN_BUDGET = 12000
+
+
+_CYR_RE = re.compile(r'[А-Яа-яЁё]')
+_ASCII_RE = re.compile(r'[A-Za-z0-9{}()<>\[\]/\\:;,._+\-*&%$#@!?\'"`~^|=]')
 
 
 def _estimate_tokens(text: str) -> int:
-    """Грубая оценка токенов (~4 символа на токен для кириллицы/ASCII)."""
+    """Честная оценка токенов: кириллица ~2 симв./токен, ASCII ~4, прочее ~3.
+
+    Раньше len//4 занижал счёт для кириллицы в ~1.7–2 раза (системный промпт на
+    ~69% кириллица): «8000» по факту означало 12–16k реальных токенов в LM Studio.
+    Теперь число бюджета соответствует реальному счёту (бюджет 12000 ≈ прежний
+    эффективный реальный контекст — поведение сохранено, цифра стала честной).
+    """
     if not text:
         return 0
-    return max(1, len(text) // 4)
+    cyr = len(_CYR_RE.findall(text))
+    ascii_chars = len(_ASCII_RE.findall(text))
+    other = max(0, len(text) - cyr - ascii_chars)
+    return max(1, cyr // 2 + ascii_chars // 4 + other // 3)
 
 
 def _message_size(msg: dict) -> int:
@@ -2082,12 +2226,55 @@ def _message_size(msg: dict) -> int:
     return size
 
 
+def _keep_newest_exchanges(messages: list[dict], budget: int) -> list[dict]:
+    """Возвращает НОВЕЙШИЕ сообщения из `messages`, укладывающиеся в `budget`.
+
+    Сообщения группируются в атомарные блоки «assistant + следующие за ним
+    tool-результаты» — связка tool_call_id ↔ tool не рвётся: LLM не получит
+    tool-ответ без его вызова (нарушение протокола OpenAI).
+    """
+    if budget <= 0 or not messages:
+        return []
+    blocks: list[list[dict]] = []
+    i = 0
+    n = len(messages)
+    while i < n:
+        m = messages[i]
+        if m.get("role") == "tool":
+            blocks.append([m])
+            i += 1
+            continue
+        block = [m]
+        i += 1
+        if m.get("role") == "assistant":
+            while i < n and messages[i].get("role") == "tool":
+                block.append(messages[i])
+                i += 1
+        blocks.append(block)
+    kept: list[list[dict]] = []
+    kept_size = 0
+    for b in reversed(blocks):
+        bsz = sum(_message_size(m) for m in b)
+        if kept_size + bsz <= budget:
+            kept.insert(0, b)
+            kept_size += bsz
+        else:
+            break
+    return [m for b in kept for m in b]
+
+
 def _trim_messages_for_budget(messages: list[dict], budget: int = CONTEXT_TOKEN_BUDGET) -> list[dict]:
     """Сжимает историю, если суммарный объём превышает бюджет.
 
-    Сохраняет system, последнее user-сообщение и хвост диалога;
-    выкидывает самые старые tool/assistant сообщения (они не входят в
-    system+хвост, чтобы не порвать связку tool_call_id ↔ tool).
+    Гарантии:
+    1. system сохраняется;
+    2. ПЕРВОЕ user-сообщение (задача: спека + контекст) сохраняется как якорь —
+       RowFacts не дублирует spec_text, без задачи LLM теряет цель строки;
+    3. НОВЕЙШИЕ полные обмены (assistant+tool) сохраняются в слайдинг-окне,
+       связка tool_call_id ↔ tool не рвётся;
+    4. Итог НЕ превышает budget (якорь усекается по контенту в крайнем случае).
+
+    Память строки не теряется: RowFacts пересоздаётся per-call и инжектится после трима.
     """
     if not messages:
         return messages
@@ -2095,30 +2282,31 @@ def _trim_messages_for_budget(messages: list[dict], budget: int = CONTEXT_TOKEN_
     if total <= budget:
         return messages
 
-    # Находим последнее user-сообщение — всё после него сохраняем целиком
-    last_user_idx = -1
-    for i, m in enumerate(messages):
-        if m.get("role") == "user":
-            last_user_idx = i
-    tail_start = last_user_idx if last_user_idx >= 0 else len(messages)
-
-    tail = messages[tail_start:]
-    tail_size = sum(_message_size(m) for m in tail)
     system = messages[:1] if messages and messages[0].get("role") == "system" else []
+    rest = messages[len(system):]
 
-    # Пробегаем сообщения между system и хвостом, усекая до бюджета
-    kept = []
-    kept_size = tail_size
-    for m in messages[len(system):tail_start]:
-        size = _message_size(m)
-        if kept_size + size <= budget:
-            kept.append(m)
-            kept_size += size
-        else:
-            break
+    # Якорь-задача: первое user-сообщение (спека + контекст). Не выбрасываем,
+    # но не даём монополизировать бюджет (в крайнем случае усекаем контент).
+    first_user = next((m for m in rest if m.get("role") == "user"), None)
+    anchor = None
+    if first_user is not None:
+        anchor = dict(first_user)
+        anchor_cap_tokens = max(64, budget // 3)
+        if _message_size(anchor) > anchor_cap_tokens:
+            content = str(anchor.get("content") or "")
+            anchor["content"] = content[:anchor_cap_tokens * 4]
+        rest = [m for m in rest if m is not first_user]
+
+    reserved = sum(_message_size(m) for m in system)
+    if anchor is not None:
+        reserved += _message_size(anchor)
+    newest = _keep_newest_exchanges(rest, max(0, budget - reserved))
+
+    out = system + ([anchor] if anchor is not None else []) + newest
+    out_size = sum(_message_size(m) for m in out)
     logger.info("Context trim: %d → %d tokens (kept %d of %d messages)",
-                total, kept_size, len(system) + len(kept) + len(tail), len(messages))
-    return system + kept + tail
+                total, out_size, len(out), len(messages))
+    return out
 
 
 def _inject_facts_block(messages: list[dict], block: str) -> list[dict]:

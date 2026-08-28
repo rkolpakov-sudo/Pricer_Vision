@@ -131,7 +131,7 @@ run:
   row_idle_timeout_seconds: 180
   row_max_seconds: 900
   study_temperature: 0.5
-  summarize_max_chars: 800
+  summarize_max_chars: 8000
   use_approaches: true
   use_site_ranking: true
 ui:

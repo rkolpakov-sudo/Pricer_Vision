@@ -91,6 +91,75 @@ class TestRowFacts:
         f = RowFacts()
         assert "Раундов:" not in f.to_prompt_block()
 
+    def test_seen_query_counts_prior(self):
+        f = RowFacts()
+        f.record_query("santech.ru", "МС-140")
+        assert f.seen_query("santech.ru", "МС-140") == 1
+        assert f.seen_query("santech.ru", "МС-140 500x600") == 0
+        assert f.seen_query("", "МС-140") == 0
+
+    def test_last_query(self):
+        f = RowFacts()
+        assert f.last_query("santech.ru") == ""
+        f.record_query("santech.ru", "q1")
+        f.record_query("santech.ru", "q2")
+        assert f.last_query("santech.ru") == "q2"
+
+    def test_evals_since_type_resets_on_query(self):
+        f = RowFacts()
+        f.record_browser_call("x.ru", "evaluate:js1", "h")
+        f.record_browser_call("x.ru", "evaluate:js2", "h")
+        assert f.evals_without_type == 2
+        f.record_query("x.ru", "запрос")
+        assert f.evals_without_type == 0
+
+    def test_evals_without_type_noticed_in_block(self):
+        f = RowFacts()
+        f.record_site_visit("lunda.ru")
+        for i in range(4):
+            f.record_browser_call("lunda.ru", f"evaluate:js{i}", "h")
+        block = f.to_prompt_block()
+        assert "запрос поиска не вводился" in block
+        assert "browser_type" in block
+
+    def test_price_candidate_hint_in_block(self):
+        f = RowFacts()
+        f.record_price_candidate("5 636,80 ₽")
+        block = f.to_prompt_block()
+        assert "5 636,80 ₽" in block
+        assert f.price_candidate_hint == "5 636,80 ₽"
+
+    def test_navblocks_in_block(self):
+        f = RowFacts()
+        f.record_price_candidate("100 ₽")
+        f.record_navblock()
+        f.record_navblock()
+        block = f.to_prompt_block()
+        assert "попыток уйти с сайта без сохранения: 2" in block
+        assert f.navblocks == 2
+
+    def test_visited_urls_dedup_and_seen(self):
+        f = RowFacts()
+        f.record_url("https://santech.ru/catalog/i498/")
+        f.record_url("https://santech.ru/catalog/i498/")
+        assert f.seen_url("https://santech.ru/catalog/i498/") is True
+        assert f.seen_url("https://santech.ru/catalog/i499/") is False
+
+    def test_distinct_sites_count(self):
+        f = RowFacts()
+        assert f.distinct_sites() == 0
+        f.record_site_visit("a.ru")
+        f.record_site_visit("b.ru")
+        f.record_site_visit("c.ru")
+        assert f.distinct_sites() == 3
+
+    def test_sites_count_guidance_in_block(self):
+        f = RowFacts()
+        for d in ("a.ru", "b.ru", "c.ru"):
+            f.record_site_visit(d)
+        block = f.to_prompt_block()
+        assert "уже посещено сайтов: 3" in block
+
 class TestSessionFacts:
     PT = 'plumbing_heating_radiators'
     BRAND = 'Лемакс'
