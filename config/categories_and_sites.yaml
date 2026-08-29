@@ -29,6 +29,11 @@ site_incompatible_types:
     - plumbing_heating_pipes
     - plumbing_heating_fittings
     - plumbing_heating_valves_armature
+spa_sites:
+  ridan.ru:
+    search_url: "https://ridan.ru/search?term={query}"
+    wait_selector: ".product-card, .catalog-item, [data-product]"
+    timeout_ms: 5000
 hints:
   - product_type_id: unknown
     text: "vodokomfort.ru: корпоративный сайт НЕ РАБОТАЕТ через Playwright (JS-оверлей поиска). Используй shop.vodokomfort.ru — там работает стандартный поиск."
@@ -45,6 +50,9 @@ hints:
   - product_type_id: unknown
     text: "Если сайт использует JS-SPA, поиск через form.submit() может не работать. Если за 5 шагов не нашёл — переключайся на другой сайт."
     priority: 0.8
+  - product_type_id: unknown
+    text: "ridan.ru — SPA-сайт. Используй прямой URL: https://ridan.ru/search?term={QUERY}. После навигации жди 3-5 сек и проверяй .product-card."
+    priority: 0.85
   - product_type_id: unknown
     text: "Если 2+ известных сайта не дали результата — используй поисковую систему для поиска товара."
     priority: 0.8
