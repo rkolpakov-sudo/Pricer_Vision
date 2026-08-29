@@ -489,7 +489,8 @@ class GraphEngine:
                 deprecated = 1
             elif nf >= 3:
                 from datetime import timedelta
-                cooldown = (datetime.now() + timedelta(hours=24)).isoformat()
+                backoff_hours = min(2 * (2 ** (nf - 3)), 16)
+                cooldown = (datetime.now() + timedelta(hours=backoff_hours)).isoformat()
             self._conn.execute(
                 "UPDATE approaches SET failures_count = failures_count + 1, "
                 "consecutive_failures = ?, cooldown_until = ?, "
