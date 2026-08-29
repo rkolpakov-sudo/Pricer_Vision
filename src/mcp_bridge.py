@@ -306,7 +306,8 @@ class MCPBridge:
             # camoufox/nodriver/нужной версии mcp).
             own_venv = Path(__file__).resolve().parent.parent / "venv" / "Scripts" / "python.exe"
             interpreter = str(own_venv) if own_venv.exists() else sys.executable
-            args = [script, "--backend", backend]
+            action_timeout = get_mcp_config("action_timeout_ms", 10000)
+            args = [script, "--backend", backend, "--action-timeout", str(action_timeout)]
             if self._headless:
                 args.append("--headless")
             return _ServerConnection(backend, interpreter, args)

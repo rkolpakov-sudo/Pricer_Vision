@@ -29,6 +29,10 @@ from mcp import types
 logging.basicConfig(level=logging.INFO, format="%(name)s %(message)s")
 logger = logging.getLogger("pricer.browser")
 
+# Таймаут действий (fill/click/hover) в мс. Задаётся через --action-timeout
+# при запуске (из config/settings.yaml → mcp.action_timeout_ms).
+_ACTION_TIMEOUT = 10000
+
 
 async def _handle_list_tools(ctx, params) -> types.ListToolsResult:
     return types.ListToolsResult(tools=TOOL_DEFS)
@@ -524,9 +528,9 @@ class CamoufoxDriver(BaseDriver):
             return kind[1]
         try:
             if kind[0] == "role":
-                await page.get_by_role(kind[1], name=kind[2]).click(timeout=10000)
+                await page.get_by_role(kind[1], name=kind[2]).click(timeout=_ACTION_TIMEOUT)
             else:
-                await page.click(kind[1], timeout=10000)
+                await page.click(kind[1], timeout=_ACTION_TIMEOUT)
             await asyncio.sleep(0.3)
             return "ok"
         except Exception as e:
@@ -539,9 +543,9 @@ class CamoufoxDriver(BaseDriver):
             return kind[1]
         try:
             if kind[0] == "role":
-                await page.get_by_role(kind[1], name=kind[2]).fill(text, timeout=10000)
+                await page.get_by_role(kind[1], name=kind[2]).fill(text, timeout=_ACTION_TIMEOUT)
             else:
-                await page.locator(kind[1]).fill(text, timeout=10000)
+                await page.locator(kind[1]).fill(text, timeout=_ACTION_TIMEOUT)
             return "ok"
         except Exception as e:
             hint = _action_error_hint(e)
@@ -553,9 +557,9 @@ class CamoufoxDriver(BaseDriver):
             return kind[1]
         try:
             if kind[0] == "role":
-                await page.get_by_role(kind[1], name=kind[2]).hover(timeout=10000)
+                await page.get_by_role(kind[1], name=kind[2]).hover(timeout=_ACTION_TIMEOUT)
             else:
-                await page.hover(kind[1], timeout=10000)
+                await page.hover(kind[1], timeout=_ACTION_TIMEOUT)
             return "ok"
         except Exception as e:
             hint = _action_error_hint(e)
@@ -1033,9 +1037,12 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Anti-detect browser MCP server")
     parser.add_argument("--backend", choices=("camoufox", "nodriver"), default="camoufox")
     parser.add_argument("--headless", action="store_true", default=False)
+    parser.add_argument("--action-timeout", type=int, default=10000,
+                        help="Action timeout in ms for fill/click/hover")
     args = parser.parse_args()
 
-    global _driver
+    global _driver, _ACTION_TIMEOUT
+    _ACTION_TIMEOUT = args.action_timeout
     if args.backend == "camoufox":
         _driver = CamoufoxDriver(headless=args.headless)
     else:
