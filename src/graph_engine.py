@@ -63,6 +63,7 @@ CREATE TABLE IF NOT EXISTS approaches (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     product_type_id TEXT REFERENCES product_types(id),
     site_id TEXT REFERENCES sites(id),
+    category TEXT,
     pattern TEXT NOT NULL,
     concrete TEXT NOT NULL,
     selectors_cache TEXT,
@@ -144,9 +145,11 @@ class GraphEngine:
         self._approaches_index: dict[tuple[str, str], list[dict]] = {}
         self._approaches_by_product: dict[str, list[dict]] = {}
         self._approaches_by_site: dict[str, list[dict]] = {}
+        self._approaches_by_site_category: dict[tuple[str, str], list[dict]] = {}
         self._approaches_by_id: dict[int, dict] = {}
-        self._product_sites: dict[str, list[dict]] = {}
         self._prices_by_token: dict[str, list[dict]] = {}
+        self._product_sites: dict[str, list[dict]] = {}
+        self._site_stats: dict[str, dict] = {}
         self._hints_by_product: dict[str, list[dict]] = {}
         self._all_sites: dict[str, dict] = {}
         self._all_products: dict[str, dict] = {}
@@ -191,12 +194,28 @@ class GraphEngine:
             self._conn.execute("ALTER TABLE hints ADD COLUMN expires_at TEXT")
         except Exception:
             pass  # column already exists
+        # Migration: add category to approaches + populate from product_types
+        try:
+            self._conn.execute("ALTER TABLE approaches ADD COLUMN category TEXT")
+        except Exception:
+            pass  # column already exists
+        self._conn.execute("""
+            UPDATE approaches SET category = (
+                SELECT pt.category FROM product_types pt
+                WHERE pt.id = approaches.product_type_id
+            ) WHERE category IS NULL
+        """)
+        self._conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_approaches_site_category "
+            "ON approaches(site_id, category)"
+        )
         self._conn.commit()
 
     def _load_indexes(self):
         self._approaches_index.clear()
         self._approaches_by_product.clear()
         self._approaches_by_site.clear()
+        self._approaches_by_site_category.clear()
         self._approaches_by_id.clear()
         now_iso = datetime.now().isoformat()
         for row in self._conn.execute(
@@ -213,6 +232,9 @@ class GraphEngine:
             self._approaches_index.setdefault(key, []).append(a)
             self._approaches_by_product.setdefault(a["product_type_id"], []).append(a)
             self._approaches_by_site.setdefault(a["site_id"], []).append(a)
+            cat = a.get("category")
+            if cat:
+                self._approaches_by_site_category.setdefault((a["site_id"], cat), []).append(a)
             self._approaches_by_id[a["id"]] = a
 
         self._prices_by_token.clear()
@@ -271,40 +293,72 @@ class GraphEngine:
 
     def get_approaches(self, product_type: str, site: str | None = None) -> list[dict]:
         self.build()
+        category = None
+        if product_type and product_type != "unknown":
+            try:
+                row = self._conn.execute(
+                    "SELECT category FROM product_types WHERE id = ?",
+                    (product_type,)
+                ).fetchone()
+                if row:
+                    category = row[0]
+            except Exception:
+                pass
+        if site and category:
+            cat_approaches = self._filter_approaches(
+                self._approaches_by_site_category.get((site, category), [])
+            )
+            if cat_approaches:
+                return cat_approaches
         if site:
-            approaches = self._filter_approaches(self._approaches_index.get((product_type, site), []))
-            if approaches and product_type != "unknown":
-                return approaches
-            site_approaches = self._filter_approaches(self._approaches_by_site.get(site, []))
-            if product_type == "unknown":
+            site_approaches = self._filter_approaches(
+                self._approaches_by_site.get(site, [])
+            )
+            if not category:
                 return site_approaches
-            seen_ids = {a.get("id") for a in approaches}
-            extra = [a for a in site_approaches if a.get("id") not in seen_ids]
-            return approaches + extra
-        approaches = self._filter_approaches(self._approaches_by_product.get(product_type, []))
-        if approaches or product_type != "unknown":
-            return approaches
-        all_approaches = []
-        for vals in self._approaches_by_site.values():
-            all_approaches.extend(vals)
-        return self._filter_approaches(all_approaches)
+            seen_ids = {a.get("id") for a in (cat_approaches if site and category else [])}
+            return [a for a in site_approaches if a.get("id") not in seen_ids]
+        if category:
+            cat_approaches = []
+            for (s, c), apps in self._approaches_by_site_category.items():
+                if c == category:
+                    cat_approaches.extend(apps)
+            if cat_approaches:
+                return self._filter_approaches(cat_approaches)
+        return self._filter_approaches(
+            self._approaches_by_product.get(product_type, [])
+        )
 
     def get_approaches_by_site(self, site: str) -> list[dict]:
         self.build()
         return self._filter_approaches(self._approaches_by_site.get(site, []))
 
+    def get_approaches_by_site_and_category(self, site: str, category: str) -> list[dict]:
+        self.build()
+        return self._filter_approaches(
+            self._approaches_by_site_category.get((site, category), [])
+        )
+
     def get_all_approaches(self) -> list[dict]:
         self.build()
         result = []
+        seen = set()
         for approaches in self._approaches_index.values():
-            result.extend(approaches)
+            for a in approaches:
+                if a["id"] not in seen:
+                    result.append(a)
+                    seen.add(a["id"])
         return self._filter_approaches(result)
 
     def get_all_approaches_for_assistant(self) -> list[dict]:
         self.build()
         result = []
+        seen = set()
         for approaches in self._approaches_index.values():
-            result.extend(approaches)
+            for a in approaches:
+                if a["id"] not in seen:
+                    result.append(a)
+                    seen.add(a["id"])
         return result
 
     def get_best_approach(self, product_type: str, site: str) -> dict | None:
@@ -330,6 +384,17 @@ class GraphEngine:
 
     def save_approach(self, data: dict) -> int:
         self.build()
+        category = data.get("category")
+        if not category:
+            try:
+                row = self._conn.execute(
+                    "SELECT category FROM product_types WHERE id = ?",
+                    (data["product_type_id"],)
+                ).fetchone()
+                if row:
+                    category = row[0]
+            except Exception:
+                pass
         with self._lock:
             self._conn.execute(
                 "INSERT OR IGNORE INTO product_types (id, name) VALUES (?, ?)",
@@ -341,11 +406,11 @@ class GraphEngine:
             )
             cur = self._conn.execute(
                 """INSERT INTO approaches
-                (product_type_id, site_id, pattern, concrete, selectors_cache,
+                (product_type_id, site_id, category, pattern, concrete, selectors_cache,
                 param_slots, method, search_query, notes)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
-                    data["product_type_id"], data["site_id"],
+                    data["product_type_id"], data["site_id"], category,
                     json.dumps(data.get("pattern", []), ensure_ascii=False),
                     json.dumps(data.get("concrete", []), ensure_ascii=False),
                     json.dumps(data.get("selectors_cache", {}), ensure_ascii=False),
@@ -360,6 +425,7 @@ class GraphEngine:
                 "id": aid,
                 "product_type_id": data["product_type_id"],
                 "site_id": data["site_id"],
+                "category": category,
                 "pattern": data.get("pattern", []),
                 "concrete": data.get("concrete", []),
                 "selectors_cache": data.get("selectors_cache", {}),
@@ -380,6 +446,10 @@ class GraphEngine:
             self._approaches_index.setdefault(key, []).append(entry)
             self._approaches_by_product.setdefault(entry["product_type_id"], []).append(entry)
             self._approaches_by_site.setdefault(entry["site_id"], []).append(entry)
+            if category:
+                self._approaches_by_site_category.setdefault(
+                    (entry["site_id"], category), []
+                ).append(entry)
             self._approaches_by_id[aid] = entry
         return aid
 
