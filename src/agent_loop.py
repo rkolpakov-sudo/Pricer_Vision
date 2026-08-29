@@ -757,6 +757,15 @@ async def process_row(
                 result = _execute_graph_tool(tool_name, tool_args, graph_engine, memory_manager, spec_text=search_text)
             elif tool_name in ("browser_navigate", "navigate"):
                 new_site = tool_args.get("url", "")
+                if new_site and "yandex.ru/search" in new_site.lower():
+                    logger.info("🚫 Blocked yandex.ru/search navigation")
+                    messages.append({
+                        "role": "tool",
+                        "tool_call_id": tc.get("id", ""),
+                        "content": ("error: Яндекс-поиск запрещён. Используй прямые URL магазинов. "
+                                    "Если нужен магазин — ищи его название в списке sites.")
+                    })
+                    continue
                 leaving_domain = bool(new_site and current_site
                                       and _extract_domain(new_site) != _extract_domain(current_site))
                 if (leaving_domain and price_candidate_seen and not price_confirmed):
