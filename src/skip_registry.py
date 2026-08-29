@@ -107,5 +107,19 @@ class SkipRegistry:
         self._tokens.clear()
         self._excluded.clear()
 
+    def to_dict(self) -> dict:
+        return {
+            "marked": list(self._marked),
+            "excluded": list(self._excluded),
+        }
+
+    def from_dict(self, data: dict):
+        self._marked = list(data.get("marked", []))
+        self._excluded = set(data.get("excluded", []))
+        self._tokens = {}
+        for m in self._marked:
+            display = self._display(m.get("text", ""), m.get("brand", ""))
+            self._tokens[m["key"]] = _product_tokens(display)
+
     def __len__(self) -> int:
         return len(self._marked)

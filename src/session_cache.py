@@ -55,6 +55,13 @@ class NegativeCache:
     def reset(self) -> None:
         self._counts.clear()
 
+    def to_dict(self) -> dict:
+        return {"counts": dict(self._counts), "limit": self._limit}
+
+    def from_dict(self, data: dict):
+        self._counts = dict(data.get("counts", {}))
+        self._limit = data.get("limit", self.NOT_FOUND_LIMIT)
+
     def __len__(self) -> int:
         return len(self._counts)
 
@@ -143,6 +150,20 @@ class SiteBlacklist:
         self._strikes.clear()
         self._reasons.clear()
         self._successful.clear()
+
+    def to_dict(self) -> dict:
+        return {
+            "strikes": dict(self._strikes),
+            "reasons": dict(self._reasons),
+            "successful": list(self._successful),
+            "limit": self._limit,
+        }
+
+    def from_dict(self, data: dict):
+        self._strikes = dict(data.get("strikes", {}))
+        self._reasons = dict(data.get("reasons", {}))
+        self._successful = set(data.get("successful", []))
+        self._limit = data.get("limit", self.MAX_STRIKES)
 
     def __len__(self) -> int:
         return len(self._strikes)

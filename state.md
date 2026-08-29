@@ -4705,3 +4705,58 @@ SemCache — всего 18.
 ### Дальше (рекомендация)
 - При следующем прогоне следить, что Row 2 (⌀150х4,5) реально ищется в браузере
   (на santech ВГП оц ⌀150 не существует — макс. Ду 100, ожидаем «не найдено»/аналог).
+
+---
+
+## 2026-08-29 — Сохранение и восстановление сессии
+
+### Что сделано
+
+Реализована возможность сохранять полное состояние сессии (результаты, кэши, флаги)
+и восстанавливать его после перезапуска приложения.
+
+### Новые файлы
+- **`src/session_manager.py`** — Qt-free модуль: save/load/list/archive/delete session JSON.
+  Формат: `data/sessions/<spec>_<ts>.json` или `_current.json` (автосохранение).
+- **`gui/session_dialog.py`** — QDialog выбора сессии при запуске (список + «Новая сессия» + «Удалить»).
+- **`tests/test_session_manager.py`** — 20 тестов: save/load, list, delete, archive, round-trip всех кэшей.
+
+### Изменённые файлы
+| Файл | Изменения |
+|------|-----------|
+| `src/session_cache.py` | `NegativeCache.to_dict()/from_dict()`, `SiteBlacklist.to_dict()/from_dict()` |
+| `src/session_facts.py` | `SessionFacts.to_dict()/from_dict()` |
+| `src/skip_registry.py` | `SkipRegistry.to_dict()/from_dict()` |
+| `src/mcp_agent_runner.py` | `restored_caches` параметр, `self.results` (атрибут), восстановление кэшей при старте |
+| `main.py` | `_auto_save_session()`, `_restore_session()`, `_check_last_session()`, `_open_session_dialog()`, `_build_session_state()`, кнопка «💾 Сессия», `_restored_results`/`_session_log_entries` |
+| `.gitignore` | `data/sessions/` |
+
+### Формат JSON сессии
+```json
+{
+  "version": 1,
+  "saved_at": "2026-08-29T14:30:00",
+  "spec_path": "data/input/vtk_spec_v2.xlsx",
+  "total_rows": 144,
+  "processed_count": 45,
+  "found_count": 12,
+  "results": [...],
+  "negative_cache": {...},
+  "site_blacklist": {...},
+  "session_facts": {...},
+  "skip_registry": {...},
+  "run_flags": {...},
+  "log_entries": [...]
+}
+```
+
+### Тесты
+**20 новых тестов** — все зелёные. Существующие 76 тестов кэшей — без изменений.
+Общий прогон: 1088 passed + 8 failed (предсуществующие pdf/browser) + 22 skipped = 1118.
+
+### Сценарии использования
+1. **Авто-сохранение**: при закрытии окна → `data/sessions/_current.json`
+2. **Диалог при запуске**: если есть сессии → список с выбором/удалением
+3. **Кнопка «💾 Сессия»**: показать диалог в любой момент
+4. **Восстановление**: spec загружается, таблица заполняется, кэши восстанавливаются,
+   при нажатии «Старт» — обработка продолжается с первой незавершённой позиции

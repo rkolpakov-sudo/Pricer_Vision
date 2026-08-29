@@ -480,6 +480,10 @@ class MainWindow(QMainWindow):
         self._total_rows = 0
         self._skip_registry = SkipRegistry()
         self._skip_reconciling = False
+        self._restored_results = []
+        self._restored_row_indices = set()
+        self._restored_caches = None
+        self._session_log_entries = []
         from src.approach_relevance import load_rules
         load_rules()
         from src.config_loader import load_settings
@@ -496,13 +500,135 @@ class MainWindow(QMainWindow):
         apply_theme(QApplication.instance(), self._current_theme)
         self.toast_manager = ToastManager(self)
 
+        QTimer.singleShot(100, self._check_last_session)
+
     def closeEvent(self, event):
         if self._processing_active and hasattr(self, '_runner') and self._runner:
             self._runner.stop()
             self._runner.wait(3000)
+        self._auto_save_session()
         if hasattr(self, 'graph_widget'):
             self.graph_widget._physics.stop()
         super().closeEvent(event)
+
+    def _auto_save_session(self):
+        """Сохраняет текущую сессию в data/sessions/_current.json."""
+        from src.session_manager import save_session, auto_save_path
+        if not self._spec_path:
+            return
+        state = self._build_session_state()
+        if state["results"] or state["negative_cache"] or state["skip_registry"].get("marked"):
+            try:
+                save_session(auto_save_path(), state)
+                logger.info("Auto-saved session to %s", auto_save_path())
+            except Exception as e:
+                logger.error("Auto-save session failed: %s", e)
+
+    def _build_session_state(self) -> dict:
+        """Собирает текущее состояние сессии для сохранения."""
+        runner = getattr(self, '_runner', None)
+        caches = {}
+        if runner and hasattr(runner, '_restored_caches') and runner._restored_caches:
+            caches = runner._restored_caches
+        elif self._restored_caches:
+            caches = self._restored_caches
+        return {
+            "spec_path": self._spec_path or "",
+            "total_rows": self._total_rows,
+            "results": self._restored_results,
+            "negative_cache": caches.get("negative_cache", {}),
+            "site_blacklist": caches.get("site_blacklist", {}),
+            "session_facts": caches.get("session_facts", {}),
+            "skip_registry": self._skip_registry.to_dict(),
+            "run_flags": {
+                "reuse_price": self.reuse_price_cb.isChecked(),
+                "use_approaches": self.use_approaches_cb.isChecked(),
+                "use_site_ranking": self.use_site_ranking_cb.isChecked(),
+                "ductwork_enabled": self.ductwork_cb.isChecked(),
+            },
+            "metrics": {},
+            "log_entries": self._session_log_entries[-200:],
+        }
+
+    def _check_last_session(self):
+        """При запуске: показать диалог выбора сессии, если есть сохранённые."""
+        from src.session_manager import list_sessions
+        sessions = list_sessions()
+        if not sessions:
+            return
+        from gui.session_dialog import SessionDialog
+        dlg = SessionDialog(sessions, self)
+        if dlg.exec():
+            if dlg.selected_session:
+                self._restore_session(dlg.selected_session)
+
+    def _open_session_dialog(self):
+        """Открыть диалог выбора сессии по кнопке «Сессия»."""
+        from src.session_manager import list_sessions, save_session, auto_save_path
+        from gui.session_dialog import SessionDialog
+        if self._spec_path and self._restored_results:
+            state = self._build_session_state()
+            try:
+                save_session(auto_save_path(), state)
+            except Exception:
+                pass
+        sessions = list_sessions()
+        dlg = SessionDialog(sessions, self)
+        if dlg.exec():
+            if dlg.selected_session:
+                self._restore_session(dlg.selected_session)
+
+    def _restore_session(self, session_path: str):
+        """Восстанавливает сессию из JSON-файла."""
+        from src.session_manager import load_session
+        state = load_session(session_path)
+        if not state:
+            QMessageBox.warning(self, "Ошибка", "Не удалось загрузить сессию.")
+            return
+
+        spec_path = state.get("spec_path", "")
+        if not spec_path or not Path(spec_path).exists():
+            QMessageBox.warning(self, "Ошибка",
+                                f"Файл спецификации не найден:\n{spec_path}\n\n"
+                                "Проверьте, что файл не был перемещён или удалён.")
+            return
+
+        self.load_spec(path=spec_path)
+        if not self._spec_path:
+            return
+
+        self._skip_registry.from_dict(state.get("skip_registry", {}))
+
+        self._restored_results = state.get("results", [])
+        self._restored_row_indices = set()
+        for result in self._restored_results:
+            excel_row = result.get("excel_row", 0)
+            if excel_row >= 2:
+                idx = excel_row - 2
+                self._restored_row_indices.add(idx)
+                self._on_row_done(idx, result)
+
+        flags = state.get("run_flags", {})
+        self.reuse_price_cb.setChecked(flags.get("reuse_price", True))
+        self.use_approaches_cb.setChecked(flags.get("use_approaches", True))
+        self.use_site_ranking_cb.setChecked(flags.get("use_site_ranking", True))
+        self.ductwork_cb.setChecked(flags.get("ductwork_enabled", False))
+
+        self._restored_caches = {
+            "negative_cache": state.get("negative_cache", {}),
+            "site_blacklist": state.get("site_blacklist", {}),
+            "session_facts": state.get("session_facts", {}),
+        }
+
+        self._session_log_entries = state.get("log_entries", [])
+        for entry in self._session_log_entries[-50:]:
+            self.add_log(entry.get("level", "INFO"), entry.get("phase", "session"),
+                         entry.get("msg", ""))
+
+        self.add_log("INFO", "session",
+                     f"Сессия восстановлена: {len(self._restored_results)} результатов, "
+                     f"{len(self._restored_row_indices)} строк обработано")
+        self.toast_manager.success(f"Сессия восстановлена ({len(self._restored_results)} результатов)")
 
     def _load_config(self):
         config_path = Path(__file__).parent / "config" / "settings.yaml"
@@ -551,6 +677,11 @@ class MainWindow(QMainWindow):
         self.clear_skip_btn.setEnabled(False)
         self.clear_skip_btn.clicked.connect(self._clear_skip_marks)
         top_bar.addWidget(self.clear_skip_btn)
+
+        self.session_btn = QPushButton("💾 Сессия")
+        self.session_btn.setToolTip("Сохранить/загрузить сессию обработки")
+        self.session_btn.clicked.connect(self._open_session_dialog)
+        top_bar.addWidget(self.session_btn)
 
         from src.config_loader import load_settings
         self.headless_cb = QCheckBox("🕶️ Headless")
@@ -759,6 +890,10 @@ class MainWindow(QMainWindow):
         if len(self._log_data) > 5000:
             self._log_data = self._log_data[-2500:]
 
+        self._session_log_entries.append({"level": level, "phase": phase, "msg": str(message)[:200]})
+        if len(self._session_log_entries) > 500:
+            self._session_log_entries = self._session_log_entries[-300:]
+
         t = TOKENS.get(self._current_theme, TOKENS[Theme.DARK])
         level_colors = {"INFO": t["success"], "WARN": t["warning"], "ERR": t["danger"], "DEBUG": t["text-muted"]}
         lc = level_colors.get(level, t["text-primary"])
@@ -816,6 +951,10 @@ class MainWindow(QMainWindow):
             self._spec_path = path
             self._total_rows = data_rows
             self._skip_registry.reset()
+            self._restored_results = []
+            self._restored_row_indices = set()
+            self._restored_caches = None
+            self._session_log_entries = []
             self.start_btn.setEnabled(True)
             self._show_preview()
             self._center_tabs.setCurrentIndex(1)  # switch to Предпросмотр
@@ -1033,6 +1172,7 @@ class MainWindow(QMainWindow):
             use_site_ranking=self.use_site_ranking_cb.isChecked(),
             ductwork_enabled=self.ductwork_cb.isChecked(),
             skip_registry=self._skip_registry,
+            restored_caches=self._restored_caches,
         )
         mode_str = (
             f"цены={'вкл' if self.reuse_price_cb.isChecked() else 'выкл'}, "
@@ -1088,6 +1228,7 @@ class MainWindow(QMainWindow):
         self.metrics_panel.update_metrics(stats)
 
     def _on_row_done(self, idx, result):
+        self._restored_results.append(result)
         row = self.results_table.rowCount()
         self.results_table.insertRow(row)
 
@@ -1328,6 +1469,9 @@ class MainWindow(QMainWindow):
         total = spec_result.get("total", 0)
         found = spec_result.get("found_count", 0)
         errs = spec_result.get("error_count", 0)
+
+        if hasattr(self, '_runner') and self._runner and self._runner.results:
+            self._restored_results = self._runner.results
 
         self.add_log("INFO", "complete",
             f"Готово: {found}/{total} найдено, {errs} ошибок")

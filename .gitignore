@@ -27,6 +27,7 @@ data/input/*
 !data/input/.gitkeep
 data/output/*
 !data/output/.gitkeep
+data/sessions/
 logs/*
 !logs/.gitkeep
 graph.json

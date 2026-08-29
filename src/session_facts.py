@@ -261,6 +261,18 @@ class SessionFacts:
                 out.append((dom, status))
         return out
 
+    def to_dict(self) -> dict:
+        status = {f"{k[0]}||{k[1]}": v for k, v in self._status.items()}
+        return {"status": status, "working": dict(self._working)}
+
+    def from_dict(self, data: dict):
+        self._status = {}
+        for k, v in data.get("status", {}).items():
+            parts = k.split("||", 1)
+            if len(parts) == 2:
+                self._status[(parts[0], parts[1])] = v
+        self._working = dict(data.get("working", {}))
+
     def to_context_blocks(self, product_type: str, brand: str,
                           limit: int = 4) -> tuple[str, str]:
         """Возвращает (положительный_блок, отрицательный_блок) для контекста."""

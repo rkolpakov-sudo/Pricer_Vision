@@ -103,7 +103,7 @@ class MCPAgentRunner(QThread):
 
     def __init__(self, specs: list, llm_client, db_path: str = DB_PATH, parent=None, fresh: bool = True,
                  skip_registry=None, use_approaches: bool = True, use_site_ranking: bool = True,
-                 ductwork_enabled: bool = False):
+                 ductwork_enabled: bool = False, restored_caches: dict | None = None):
         super().__init__(parent)
         self.specs = specs
         self.llm_client = llm_client
@@ -113,6 +113,7 @@ class MCPAgentRunner(QThread):
         self._use_site_ranking = use_site_ranking
         self._ductwork_enabled = ductwork_enabled
         self._skip_registry = skip_registry
+        self._restored_caches = restored_caches
         self._stop_event = threading.Event()
         self._restart_bridge = threading.Event()
         self._restart_bridge_value = None
@@ -123,6 +124,7 @@ class MCPAgentRunner(QThread):
         self._blocks = 0
         self._processed = 0
         self._found = 0
+        self.results = []
 
     def _current_metrics(self) -> dict:
         return _build_metrics(
@@ -195,7 +197,7 @@ class MCPAgentRunner(QThread):
             await bridge.stop()
             return
         try:
-            results = []
+            self.results = []
             total = len(self.specs)
             scheduler = TaskScheduler(mm, site_profiles=learning_loop.site_profiles)
             # Рейтинг сайтов по профилю (тип, бренд) — вычисляется per-row по бренду товара.
@@ -228,6 +230,14 @@ class MCPAgentRunner(QThread):
             site_blacklist = SiteBlacklist()
             # Межстрочные факты: сайт × (тип|бренд) статус + рабочие паттерны.
             session_facts = SessionFacts()
+            # Восстановление кэшей из предыдущей сессии
+            if self._restored_caches:
+                negative_cache.from_dict(self._restored_caches.get("negative_cache", {}))
+                site_blacklist.from_dict(self._restored_caches.get("site_blacklist", {}))
+                session_facts.from_dict(self._restored_caches.get("session_facts", {}))
+                logger.info("Restored session caches: %d negative, %d blacklist, %d facts",
+                            len(negative_cache), len(site_blacklist),
+                            len(session_facts._status) if hasattr(session_facts, '_status') else 0)
 
             def _on_site_visited(site_id: str):
                 self._last_visited_site = site_id
@@ -268,7 +278,7 @@ class MCPAgentRunner(QThread):
                     logger.info("Row %d: user skip — '%s' (аналог '%s')", i + 1, spec_text[:40], matched[:40])
                     self.status_signal.emit(("progress", i + 1, total, f"Пропуск (пользователь): {spec_text[:60]}..."))
                     result["excel_row"] = getattr(spec, "row", 0) or (original_index.get(id(spec), i) + 2)
-                    results.append(result)
+                    self.results.append(result)
                     audit.log_extraction(spec_text, False, None)
                     row_idx = original_index.get(id(spec), i)
                     self._processed += 1
@@ -284,7 +294,7 @@ class MCPAgentRunner(QThread):
                     logger.info("Row %d: negative cache — '%s' not found earlier, skipping", i + 1, spec_text[:40])
                     self.status_signal.emit(("progress", i + 1, total, f"Пропуск (не найдено ранее): {spec_text[:60]}..."))
                     result["excel_row"] = getattr(spec, "row", 0) or (original_index.get(id(spec), i) + 2)
-                    results.append(result)
+                    self.results.append(result)
                     audit.log_extraction(spec_text, False, None)
                     row_idx = original_index.get(id(spec), i)
                     self._processed += 1
@@ -405,7 +415,7 @@ class MCPAgentRunner(QThread):
                 # (прерывания пользователем/cancelled/Stopped — не считаем)
                 if result.get("price") is None and result.get("error") not in ("cancelled", "Stopped"):
                     negative_cache.record(spec_text)
-                results.append(result)
+                self.results.append(result)
                 audit.log_extraction(spec_text, result.get("price") is not None, result.get("price"))
                 row_idx = original_index.get(id(spec), i)
                 result["excel_row"] = getattr(spec, "row", 0) or (row_idx + 2)
@@ -425,18 +435,18 @@ class MCPAgentRunner(QThread):
 
             # Phase 4: Learning Loop — обновляем граф по итогам прогона
             try:
-                learning_summary = learning_loop.consolidate_after_run(results)
+                learning_summary = learning_loop.consolidate_after_run(self.results)
                 logger.info("Learning loop: %s", learning_summary)
             except Exception as e:
                 logger.warning("Learning loop consolidation failed: %s", e)
 
-            total = len(results)
-            found = sum(1 for r in results if r.get("price") is not None)
-            review = sum(1 for r in results if r.get("requires_review"))
-            errs = sum(1 for r in results if r.get("error"))
+            total = len(self.results)
+            found = sum(1 for r in self.results if r.get("price") is not None)
+            review = sum(1 for r in self.results if r.get("requires_review"))
+            errs = sum(1 for r in self.results if r.get("error"))
             spec_result = {
                 "total": total,
-                "positions": results,
+                "positions": self.results,
                 "found_count": found,
                 "review_count": review,
                 "error_count": errs,
