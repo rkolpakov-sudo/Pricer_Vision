@@ -295,7 +295,8 @@ class MCPBridge:
             if os.path.exists(_MCP_CONFIG):
                 pw_args.extend(["--config", _MCP_CONFIG])
             pw_args.extend(["--viewport-size", "1920x1080"])
-            pw_args.extend(["--timeout-action", "10000"])
+            action_timeout = get_mcp_config("action_timeout_ms", 10000)
+            pw_args.extend(["--timeout-action", str(action_timeout)])
             pw_args.extend(["--timeout-navigation", "30000"])
             return _ServerConnection("playwright", "npx.cmd", pw_args)
         if backend in ("camoufox", "nodriver"):
