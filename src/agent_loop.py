@@ -862,8 +862,13 @@ async def process_row(
                     query_domain = _extract_domain(current_site or "")
                     if query_text and query_domain:
                         dup_count = facts.seen_query(query_domain, query_text)
+                        unique_tried = facts.unique_queries_on_site(query_domain)
                         if dup_count >= QUERY_DUP_SKIP_AFTER:
-                            if dup_count >= 2:
+                            if len(unique_tried) >= 2:
+                                _dup_msg = (f"error: На этом сайте УЖЕ尝试ованы {len(unique_tried)} "
+                                            f"варианта запроса: {', '.join(q[:40] for q in unique_tried[:3])}. "
+                                            "Результатов НЕТ. ПЕРЕХОДИ к следующему сайту из списка.")
+                            elif dup_count >= 2:
                                 _dup_msg = (f"⚠️ Запрос «{query_text[:100]}» уже вводился на этом сайте "
                                             f"{dup_count + 1} раз подряд и результата не дал. НЕ повторяй его: "
                                             "измени текст запроса, переключись на другой сайт или сохрани "
@@ -872,7 +877,7 @@ async def process_row(
                                 _dup_msg = (f"ℹ️ Запрос «{query_text[:100]}» уже вводился на этом сайте "
                                             "ранее и результата не дал. Повтор вряд ли поможет — измени "
                                             "текст запроса или переключись на другой сайт.")
-                            logger.info("♻️ Запрос-дубль на %s: «%s»", query_domain, query_text[:80])
+                            logger.info("♻️ Запрос-дубль на %s: «%s» (unique=%d)", query_domain, query_text[:80], len(unique_tried))
                             messages.append({
                                 "role": "tool",
                                 "tool_call_id": tc.get("id", ""),
