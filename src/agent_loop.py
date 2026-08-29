@@ -1041,7 +1041,7 @@ async def process_row(
                             if fb_result and not str(fb_result).startswith("error:"):
                                 tool_content = (f"⚠️ Таймаут поиска на {domain} ({site_timeout_counts[domain]} раз). "
                                                 f"Поле поиска очищено автоматически. Введи запрос заново или переключись на другой сайт.")
-                                messages.append({"role": "assistant", "content": tool_content})
+                                messages.append({"role": "tool", "tool_call_id": tc.get("id", ""), "content": tool_content})
                             else:
                                 tool_content = (f"error: Таймаут на {domain} ({site_timeout_counts[domain]} раз). "
                                                 f"Переключись на другой сайт из списка.")
@@ -1703,7 +1703,7 @@ def _execute_graph_tool(name: str, args: dict, engine, mm, spec_text: str = "") 
             approaches = [a for a in approaches if approach_relevant(a, spec_text)]
             if not approaches:
                 return "Нет подходов, релевантных текущему товару"
-            level_names = {1: "точный тип+сайт", 2: "категория+сайт", 3: "только сайт", 4: "категория", 5: "тип товара"}
+            level_names = {1: "точный тип+сайт", 2: "категория+сайт", 3: "только сайт", 4: "тип товара", 5: "категория"}
             sl = approaches[0].get("source_level")
             level_hint = f" (уровень: {level_names.get(sl, '?')})" if sl else ""
             lines = [f"Подходов: {len(approaches)}{level_hint}"]
@@ -2410,10 +2410,9 @@ def _trim_messages_for_budget(messages: list[dict], budget: int = CONTEXT_TOKEN_
     1. system сохраняется;
     2. ПЕРВОЕ user-сообщение (задача: спека + контекст) сохраняется как якорь —
        RowFacts не дублирует spec_text, без задачи LLM теряет цель строки;
-    3. НОВЕЙШИЕ полные обмены (assistant+tool) сохраняются в слайдинг-окне (3 пары),
+    3. НОВЕЙШИЕ полные обмены (assistant+tool) сохраняются в слайдинг-окне,
        связка tool_call_id ↔ tool не рвётся;
-    4. Старые раунды заменяются СВОДКОЙ (summary), содержащей посещённые сайты и ключевые факты;
-    5. Итог НЕ превышает budget (якорь усекается по контенту в крайнем случае).
+    4. Итог НЕ превышает budget (якорь усекается по контенту в крайнем случае).
 
     Память строки не теряется: RowFacts пересоздаётся per-call и инжектится после трима.
     """

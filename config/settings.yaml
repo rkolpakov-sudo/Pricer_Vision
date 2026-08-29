@@ -136,7 +136,7 @@ run:
   max_rounds: 40
   max_rounds_per_site: 15
   max_study_rounds: 50
-  reuse_price: false
+  reuse_price: true
   row_idle_timeout_seconds: 180
   row_max_seconds: 450
   study_temperature: 0.5

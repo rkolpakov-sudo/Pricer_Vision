@@ -39,7 +39,7 @@ def _normalize_spec_tokens(text: str) -> str:
     t = text
     t = t.replace("х", "x").replace("Х", "X")
     t = t.replace("Ø", "D").replace("ø", "d")
-    t = t.replace("№", "N").replace("高于", "mm")
+    t = t.replace("№", "N")
     t = t.replace(",", ".")
     t = re.sub(r'\s+', ' ', t)
     return t
@@ -343,7 +343,17 @@ class GraphEngine:
             for a in site_approaches:
                 a["source_level"] = 3
             return site_approaches
-        # Level 4: category (all sites)
+        # Level 4: product_type only (all sites) — тип специфичнее категории,
+        # поэтому раньше категории. Иначе get_approaches('plumbing_heating_pipes')
+        # возвращал бы все подходы категории (вентили/радиаторы/насосы).
+        if product_type and product_type != "unknown":
+            result = self._filter_approaches(
+                self._approaches_by_product.get(product_type, [])
+            )
+            for a in result:
+                a["source_level"] = 4
+            return result
+        # Level 5: category (all sites) — последний fallback
         if category:
             cat_approaches = []
             for (s, c), apps in self._approaches_by_site_category.items():
@@ -352,16 +362,8 @@ class GraphEngine:
             if cat_approaches:
                 filtered = self._filter_approaches(cat_approaches)
                 for a in filtered:
-                    a["source_level"] = 4
+                    a["source_level"] = 5
                 return filtered
-        # Level 5: product_type only (fallback) — skip for unknown
-        if product_type and product_type != "unknown":
-            result = self._filter_approaches(
-                self._approaches_by_product.get(product_type, [])
-            )
-            for a in result:
-                a["source_level"] = 5
-            return result
         return []
 
     def get_approaches_by_site(self, site: str) -> list[dict]:

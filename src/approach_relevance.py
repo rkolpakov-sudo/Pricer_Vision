@@ -329,7 +329,9 @@ def _product_tokens(text: str) -> set:
     normalized = text
     normalized = normalized.replace("Ø", "Ду").replace("ø", "ду")
     normalized = normalized.replace("DN", "Ду").replace("dn", "ду")
-    normalized = normalized.replace("Ф", "Ду")
+    # Диаметр «Ф15» → «Ду15». ТОЛЬКО когда Ф перед цифрой — иначе ломаем слова
+    # с заглавной «Ф» (Фланцевый → Дуланцевый) и получаем ложные расхождения.
+    normalized = re.sub(r"Ф(?=\d)", "Ду", normalized)
     tokens = set()
     for w in _WORD_RE.findall(_context_normalize(normalized).lower()):
         if w in _STOPWORDS_SET or w in _STRUCTURAL_SET or len(w) < 3:
