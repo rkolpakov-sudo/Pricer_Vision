@@ -2336,12 +2336,44 @@ def _message_size(msg: dict) -> int:
     return size
 
 
-def _keep_newest_exchanges(messages: list[dict], budget: int) -> list[dict]:
+def _generate_rounds_summary(messages: list[dict]) -> str:
+    """Генерирует краткую сводку по старым раундам для замены trimmed сообщений."""
+    site_visits = []
+    key_facts = []
+    current_site = ""
+    for m in messages:
+        if m.get("role") == "assistant":
+            content = str(m.get("content") or "")
+            if "Открываю" in content and "http" in content:
+                for word in content.split():
+                    if word.startswith("http"):
+                        current_site = word.rstrip(".,")
+                        site_visits.append(current_site)
+                        break
+        elif m.get("role") == "tool":
+            content = str(m.get("content") or "")
+            if "error:" in content.lower():
+                key_facts.append(f"Ошибка на {current_site}: {content[:80]}")
+            elif "saved" in content.lower() or "сохран" in content.lower():
+                key_facts.append(f"Цена сохранена: {content[:80]}")
+    sites_visited = list(dict.fromkeys(site_visits))
+    summary_parts = [f"Ранние раунды ({len(messages)} сообщений):"]
+    if sites_visited:
+        summary_parts.append(f"  Сайты: {', '.join(sites_visited[:5])}")
+    if key_facts:
+        summary_parts.append(f"  Ключевые факты:")
+        for fact in key_facts[:5]:
+            summary_parts.append(f"    - {fact}")
+    return "\n".join(summary_parts)
+
+
+def _keep_newest_exchanges(messages: list[dict], budget: int, keep_count: int = 3) -> list[dict]:
     """Возвращает НОВЕЙШИЕ сообщения из `messages`, укладывающиеся в `budget`.
 
     Сообщения группируются в атомарные блоки «assistant + следующие за ним
     tool-результаты» — связка tool_call_id ↔ tool не рвётся: LLM не получит
     tool-ответ без его вызова (нарушение протокола OpenAI).
+    keep_count — максимальное количество пар assistant+tools для сохранения.
     """
     if budget <= 0 or not messages:
         return []
@@ -2363,8 +2395,14 @@ def _keep_newest_exchanges(messages: list[dict], budget: int) -> list[dict]:
         blocks.append(block)
     kept: list[list[dict]] = []
     kept_size = 0
+    assistant_count = 0
     for b in reversed(blocks):
         bsz = sum(_message_size(m) for m in b)
+        is_assistant_block = any(m.get("role") == "assistant" for m in b)
+        if is_assistant_block:
+            assistant_count += 1
+        if assistant_count > keep_count:
+            break
         if kept_size + bsz <= budget:
             kept.insert(0, b)
             kept_size += bsz
@@ -2380,9 +2418,10 @@ def _trim_messages_for_budget(messages: list[dict], budget: int = CONTEXT_TOKEN_
     1. system сохраняется;
     2. ПЕРВОЕ user-сообщение (задача: спека + контекст) сохраняется как якорь —
        RowFacts не дублирует spec_text, без задачи LLM теряет цель строки;
-    3. НОВЕЙШИЕ полные обмены (assistant+tool) сохраняются в слайдинг-окне,
+    3. НОВЕЙШИЕ полные обмены (assistant+tool) сохраняются в слайдинг-окне (3 пары),
        связка tool_call_id ↔ tool не рвётся;
-    4. Итог НЕ превышает budget (якорь усекается по контенту в крайнем случае).
+    4. Старые раунды заменяются СВОДКОЙ (summary), содержащей посещённые сайты и ключевые факты;
+    5. Итог НЕ превышает budget (якорь усекается по контенту в крайнем случае).
 
     Память строки не теряется: RowFacts пересоздаётся per-call и инжектится после трима.
     """
@@ -2410,12 +2449,18 @@ def _trim_messages_for_budget(messages: list[dict], budget: int = CONTEXT_TOKEN_
     reserved = sum(_message_size(m) for m in system)
     if anchor is not None:
         reserved += _message_size(anchor)
-    newest = _keep_newest_exchanges(rest, max(0, budget - reserved))
+    # Keep last 3 exchanges as rolling window
+    newest = _keep_newest_exchanges(rest, max(0, budget - reserved), keep_count=3)
 
-    out = system + ([anchor] if anchor is not None else []) + newest
+    # Generate summary for trimmed old exchanges
+    old_messages = [m for m in rest if m not in newest]
+    summary_text = _generate_rounds_summary(old_messages) if old_messages else ""
+    summary_msg = [{"role": "user", "content": summary_text}] if summary_text else []
+
+    out = system + ([anchor] if anchor is not None else []) + summary_msg + newest
     out_size = sum(_message_size(m) for m in out)
-    logger.info("Context trim: %d → %d tokens (kept %d of %d messages)",
-                total, out_size, len(out), len(messages))
+    logger.info("Context trim: %d → %d tokens (kept %d of %d messages, summary=%d)",
+                total, out_size, len(out), len(messages), len(summary_msg))
     return out
 
 
