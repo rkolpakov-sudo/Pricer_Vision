@@ -757,13 +757,35 @@ async def process_row(
                 result = _execute_graph_tool(tool_name, tool_args, graph_engine, memory_manager, spec_text=search_text)
             elif tool_name in ("browser_navigate", "navigate"):
                 new_site = tool_args.get("url", "")
-                # Жёсткий гейт: если на текущем сайте УЖЕ найдена цена-кандидат
-                # (товар выявлен в результатах/карточке), уходить на ДРУГОЙ домен запрещено,
-                # пока цена не сохранена через save_confirmed_price. Это защита от потери
-                # найденного товара (регрессия: позиция 36 — агент ушёл с santech при найденной цене).
                 leaving_domain = bool(new_site and current_site
                                       and _extract_domain(new_site) != _extract_domain(current_site))
                 if (leaving_domain and price_candidate_seen and not price_confirmed):
+                    if rounds_on_site > 5 and facts.price_candidate_data:
+                        pc = facts.price_candidate_data
+                        pc_conf = float(pc.get("confidence", 0) or 0)
+                        if 0.3 <= pc_conf < 0.6:
+                            logger.info("Anti-deadlock: force-saving low-conf candidate (conf=%.2f) after %d rounds on %s",
+                                        pc_conf, rounds_on_site, _extract_domain(current_site))
+                            try:
+                                _save_price_and_approach(
+                                    memory_manager, spec_text, product_type,
+                                    {"price": pc.get("price"), "confidence": pc_conf,
+                                     "url": pc.get("url", ""), "site": pc.get("site", ""),
+                                     "requires_review": True},
+                                    steps, record_soldat=False,
+                                    search_query=pc.get("search_query", ""),
+                                )
+                            except Exception as e:
+                                logger.warning("Anti-deadlock save failed: %s", e)
+                            price_candidate_seen = False
+                            price_confirmed = True
+                            messages.append({
+                                "role": "tool",
+                                "tool_call_id": tc.get("id", ""),
+                                "content": (f"✅ Резервный кандидат сохранён (conf={pc_conf:.2f}, "
+                                            f"requires_review). Переходи к следующему сайту."),
+                            })
+                            continue
                     logger.warning("🚫 Navigate blocked: price candidate seen on %s, not confirmed",
                                    _extract_domain(current_site))
                     facts.record_navblock()
