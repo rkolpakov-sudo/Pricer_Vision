@@ -75,6 +75,13 @@ class RowFacts:
             return ""
         return site["queries"][-1]
 
+    def unique_queries_on_site(self, domain: str) -> list[str]:
+        """Уникальные запросы, которые уже вводились на домене."""
+        site = self._sites.get(domain)
+        if not site:
+            return []
+        return list(dict.fromkeys(site["queries"]))
+
     def record_browser_call(self, domain: str, key: str, result_hash: str = "") -> None:
         """Учитывает вызов инструмента. Одинаковый вызов с одинаковым
         результатом подряд увеличивает счётчик повторов (для факта LLM)."""
