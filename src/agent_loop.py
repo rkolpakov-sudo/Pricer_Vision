@@ -769,32 +769,23 @@ async def process_row(
                 leaving_domain = bool(new_site and current_site
                                       and _extract_domain(new_site) != _extract_domain(current_site))
                 if (leaving_domain and price_candidate_seen and not price_confirmed):
-                    if rounds_on_site > 5 and facts.price_candidate_data:
-                        pc = facts.price_candidate_data
-                        pc_conf = float(pc.get("confidence", 0) or 0)
-                        if 0.3 <= pc_conf < 0.6:
-                            logger.info("Anti-deadlock: force-saving low-conf candidate (conf=%.2f) after %d rounds on %s",
-                                        pc_conf, rounds_on_site, _extract_domain(current_site))
-                            try:
-                                _save_price_and_approach(
-                                    memory_manager, spec_text, product_type,
-                                    {"price": pc.get("price"), "confidence": pc_conf,
-                                     "url": pc.get("url", ""), "site": pc.get("site", ""),
-                                     "requires_review": True},
-                                    steps, record_soldat=False,
-                                    search_query=pc.get("search_query", ""),
-                                )
-                            except Exception as e:
-                                logger.warning("Anti-deadlock save failed: %s", e)
-                            price_candidate_seen = False
-                            price_confirmed = True
-                            messages.append({
-                                "role": "tool",
-                                "tool_call_id": tc.get("id", ""),
-                                "content": (f"✅ Резервный кандидат сохранён (conf={pc_conf:.2f}, "
-                                            f"requires_review). Переходи к следующему сайту."),
-                            })
-                            continue
+                    # Anti-deadlock: после 5+ раундов на сайте с несохранённым кандидатом
+                    # НЕ блокируем навигацию — даём агенту уйти (кандидат-хинт остаётся
+                    # в RowFacts, агент видит его в фактах следующего раунда).
+                    if rounds_on_site > 5:
+                        logger.info("Anti-deadlock: unblocking navigation after %d rounds on %s (candidate not confirmed)",
+                                    rounds_on_site, _extract_domain(current_site))
+                        _pc = facts.price_candidate_hint
+                        _pc_part = f"\nЦена-кандидат: {_pc}." if _pc else ""
+                        price_candidate_seen = False
+                        messages.append({
+                            "role": "tool",
+                            "tool_call_id": tc.get("id", ""),
+                            "content": (f"ℹ️ Ты {rounds_on_site} раундов на этом сайте, цена-кандидат не подтверждена{_pc_part} "
+                                        "Навигация разблокирована — переходи к следующему сайту. "
+                                        "Если найдена точная цена — сохрани через save_confirmed_price."),
+                        })
+                        continue
                     logger.warning("🚫 Navigate blocked: price candidate seen on %s, not confirmed",
                                    _extract_domain(current_site))
                     facts.record_navblock()

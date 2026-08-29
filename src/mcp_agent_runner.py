@@ -417,6 +417,13 @@ class MCPAgentRunner(QThread):
                         logger.warning(f"Row {i+1} cancelled by user")
                         result = {"spec_text": spec_text, "price": None, "confidence": 0.0,
                                   "reason": "Cancelled by user", "requires_review": True, "error": "cancelled"}
+                    except Exception as e:
+                        # Любая ошибка агента не должна ронять весь прогон молча —
+                        # строка помечается ошибкой и прогон продолжается.
+                        logger.error(f"Row {i+1} agent error: {type(e).__name__}: {e}", exc_info=True)
+                        result = {"spec_text": spec_text, "price": None, "confidence": 0.0,
+                                  "reason": f"Agent error: {type(e).__name__}: {str(e)[:200]}",
+                                  "requires_review": True, "error": "agent_error"}
                     if result.get("error") and "bridge" in str(result.get("error", "")).lower():
                         logger.warning(f"Bridge error on row {i+1}, restarting (retry {retries+1})...")
                         await bridge.restart()
