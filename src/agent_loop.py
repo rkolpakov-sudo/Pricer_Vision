@@ -1678,7 +1678,10 @@ def _execute_graph_tool(name: str, args: dict, engine, mm, spec_text: str = "") 
             approaches = [a for a in approaches if approach_relevant(a, spec_text)]
             if not approaches:
                 return "Нет подходов, релевантных текущему товару"
-            lines = [f"Подходов: {len(approaches)}"]
+            level_names = {1: "точный тип+сайт", 2: "категория+сайт", 3: "только сайт", 4: "категория", 5: "тип товара"}
+            sl = approaches[0].get("source_level")
+            level_hint = f" (уровень: {level_names.get(sl, '?')})" if sl else ""
+            lines = [f"Подходов: {len(approaches)}{level_hint}"]
             for a in approaches[:5]:
                 # адаптируем подход к текущему товару: устаревший хардкод-текст
                 # в шагах ввода заменяется на актуальный spec_text
