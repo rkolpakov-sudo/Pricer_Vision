@@ -107,6 +107,7 @@ llm:
 mcp:
   call_timeout: 60
   restart_after_timeouts: 2
+  action_timeout_ms: 10000
 paths:
   backup: data/backup
   data_input: data/input

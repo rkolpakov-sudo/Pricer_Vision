@@ -633,6 +633,8 @@ async def process_row(
     content_only_rounds = 0
     CONTENT_ONLY_REMIND = 2
     CONTENT_ONLY_FORCE = 3
+    site_timeout_counts: dict[str, int] = {}
+    SITE_TIMEOUT_FAIL_FAST = 2
 
     def _shown_approach_ids(domain: str) -> list:
         """Подходы, показанные агенту для текущего сайта (для точечного штрафа)."""
@@ -804,6 +806,8 @@ async def process_row(
                             site_visit_callback(_extract_domain(new_site))
                     current_site = new_site
                     rounds_on_site = 0
+                    if new_site:
+                        site_timeout_counts[_extract_domain(new_site)] = 0
                 if rate_limiter is not None:
                     await rate_limiter.wait_if_needed(current_site or "")
                 result = await mcp_bridge.call_tool(tool_name, tool_args)
@@ -991,6 +995,32 @@ async def process_row(
                 if len(recent_errors) > 4:
                     recent_errors.pop(0)
                 facts.record_error(tool_content)
+                domain = _extract_domain(current_site)
+                if domain and "timed out" in tool_content:
+                    site_timeout_counts[domain] = site_timeout_counts.get(domain, 0) + 1
+                    if site_timeout_counts[domain] >= SITE_TIMEOUT_FAIL_FAST:
+                        logger.warning("Fail-fast: %d timeouts on %s — auto JS fallback", site_timeout_counts[domain], domain)
+                        try:
+                            fallback_js = ("() => { const inp = document.querySelector("
+                                           "'input[type=\"search\"], input[placeholder*=\"Поиск\"], "
+                                           "input[name*=\"search\"]'); "
+                                           "if (inp) { inp.value = ''; inp.dispatchEvent(new Event('input')); "
+                                           "return 'cleared'; } return 'no_input_found'; }")
+                            fb_result = await mcp_bridge.call_tool("browser_evaluate", {"function": fallback_js})
+                            if fb_result and not str(fb_result).startswith("error:"):
+                                tool_content = (f"⚠️ Таймаут поиска на {domain} ({site_timeout_counts[domain]} раз). "
+                                                f"Поле поиска очищено автоматически. Введи запрос заново или переключись на другой сайт.")
+                                messages.append({"role": "assistant", "content": tool_content})
+                            else:
+                                tool_content = (f"error: Таймаут на {domain} ({site_timeout_counts[domain]} раз). "
+                                                f"Переключись на другой сайт из списка.")
+                                messages.append({"role": "tool", "tool_call_id": tc.get("id", ""), "content": tool_content})
+                        except Exception as e:
+                            logger.warning("Fail-fast JS fallback failed: %s", e)
+                            tool_content = (f"error: Таймаут на {domain} ({site_timeout_counts[domain]} раз). "
+                                            f"Переключись на другой сайт из списка.")
+                            messages.append({"role": "tool", "tool_call_id": tc.get("id", ""), "content": tool_content})
+                        continue
             if tool_name == "browser_evaluate":
                 js_key = str(tool_args.get("function", ""))[:80]
                 result_hash = hashlib.md5(tool_content.encode("utf-8", "ignore")).hexdigest()[:8]
