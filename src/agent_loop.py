@@ -1062,9 +1062,32 @@ async def process_row(
                 result_hash = hashlib.md5(tool_content.encode("utf-8", "ignore")).hexdigest()[:8]
                 facts.record_browser_call(_extract_domain(current_site), "evaluate:" + js_key, result_hash)
             if tool_name == "browser_evaluate" and "SyntaxError" in tool_content:
-                tool_content += ("\n💡 JS-ошибка синтаксиса (SyntaxError). Перепиши код ПРОСТЫМ "
-                                 "однострочным выражением: без // комментариев в конце строки, "
-                                 "закрой все фигурные скобки, строки в кавычках.")
+                js_syntax_errors = facts._sites.get(_extract_domain(current_site), {}).get("js_syntax_errors", 0) if hasattr(facts, '_sites') else 0
+                js_syntax_errors += 1
+                site_domain = _extract_domain(current_site)
+                if site_domain not in facts._sites:
+                    facts._sites[site_domain] = {"queries": [], "extractions": 0, "evals_since_type": 0, "js_syntax_errors": 0}
+                facts._sites[site_domain]["js_syntax_errors"] = js_syntax_errors
+                if js_syntax_errors >= 2:
+                    fallback_js = """() => {
+                        const inp = document.querySelector('input[type="search"], input[placeholder*="Поиск"], input[name*="search"]');
+                        if (inp) { inp.value = ''; inp.dispatchEvent(new Event('input')); return 'cleared'; }
+                        const price = document.querySelector('[class*="price"], [data-price], .product-price');
+                        if (price) return price.textContent.trim();
+                        return 'no_data_found';
+                    }"""
+                    try:
+                        result = await mcp_bridge.call_tool("browser_evaluate", {"function": fallback_js})
+                        tool_content = (f"✅ JS-фолбэк выполнился: {str(result)[:200]}. "
+                                       "Если цена найдена — извлеки её. Если нет — переключись на другой сайт.")
+                        facts._sites[site_domain]["js_syntax_errors"] = 0
+                    except Exception as e:
+                        tool_content = (f"error: {js_syntax_errors} ошибки синтаксиса JS подряд. "
+                                       "Переключись на другой сайт — этот сайт нестабилен.")
+                else:
+                    tool_content += ("\n💡 JS-ошибка синтаксиса (SyntaxError). Перепиши код ПРОСТЫМ "
+                                     "однострочным выражением: без // комментариев в конце строки, "
+                                     "закрой все фигурные скобки, строки в кавычках.")
             if tool_name in ("browser_snapshot", "snapshot"):
                 tool_content = _clean_snapshot(tool_content)
                 # Sync current_site from snapshot URL (handles new tabs from browser_click)
