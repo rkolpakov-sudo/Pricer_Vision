@@ -350,6 +350,7 @@ class MCPAgentRunner(QThread):
                                  "qty": getattr(spec, "qty", None)} if hasattr(spec, 'article') else None
 
                     try:
+                        price_candidate_holder = {}
                         result = await _run_row_with_idle_timeout(
                             lambda: process_row(
                                 spec_text=spec_text,
@@ -371,6 +372,7 @@ class MCPAgentRunner(QThread):
                                 site_visit_callback=_site_visited,
                                 session_facts=session_facts,
                                 ductwork_enabled=self._ductwork_enabled,
+                                _price_candidate_holder=price_candidate_holder,
                             ),
                             idle_timeout=row_idle_timeout,
                             max_seconds=row_max_seconds,
@@ -378,9 +380,6 @@ class MCPAgentRunner(QThread):
                         )
                     except asyncio.TimeoutError:
                         logger.warning(f"Row {i+1} timed out (idle/max)")
-                        # Таймаут — сильный сигнал, что сайт «не подходит» для этого
-                        # типа/бренда: штрафуем его в сессионном блэклисте, чтобы
-                        # следующая строка не тратила раунды повторно.
                         if self._last_visited_site:
                             strikes = site_blacklist.strike(self._last_visited_site, reason="timeout")
                             logger.warning(
@@ -388,9 +387,27 @@ class MCPAgentRunner(QThread):
                                 self._last_visited_site, strikes, site_blacklist.limit,
                             )
                         self._last_visited_site = ""
-                        result = {"spec_text": spec_text, "price": None, "confidence": 0.0,
-                                  "reason": "Timeout after 300s", "requires_review": True, "error": "timeout",
-                                  "elapsed": 300.0}
+                        elapsed = row_max_seconds
+                        if price_candidate_holder.get("price") is not None:
+                            logger.info("Row %d: saving timeout candidate price=%s (conf=%.2f)",
+                                        i+1, price_candidate_holder["price"],
+                                        price_candidate_holder.get("confidence", 0))
+                            result = {
+                                "spec_text": spec_text,
+                                "price": price_candidate_holder["price"],
+                                "confidence": price_candidate_holder.get("confidence", 0.5),
+                                "url": price_candidate_holder.get("url", ""),
+                                "site": price_candidate_holder.get("site", ""),
+                                "product_name": price_candidate_holder.get("product_name", ""),
+                                "reason": f"Timeout {elapsed:.0f}s — saved best candidate",
+                                "requires_review": True,
+                                "error": "timeout_with_candidate",
+                                "elapsed": elapsed,
+                            }
+                        else:
+                            result = {"spec_text": spec_text, "price": None, "confidence": 0.0,
+                                      "reason": f"Timeout after {elapsed:.0f}s", "requires_review": True,
+                                      "error": "timeout", "elapsed": elapsed}
                         if not self._stop_event.is_set():
                             try:
                                 await asyncio.wait_for(bridge.restart(), timeout=20.0)
