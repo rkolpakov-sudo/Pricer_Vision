@@ -306,6 +306,16 @@ class GraphEngine:
 
     def get_approaches(self, product_type: str, site: str | None = None) -> list[dict]:
         self.build()
+        # Level 1: exact (product_type, site) — skip for unknown
+        if site and product_type and product_type != "unknown":
+            exact = self._filter_approaches(
+                self._approaches_index.get((product_type, site), [])
+            )
+            if exact:
+                for a in exact:
+                    a["source_level"] = 1
+                return exact
+        # Level 2: site + category
         category = None
         if product_type and product_type != "unknown":
             try:
@@ -323,18 +333,17 @@ class GraphEngine:
             )
             if cat_approaches:
                 for a in cat_approaches:
-                    a["source_level"] = 1
+                    a["source_level"] = 2
                 return cat_approaches
+        # Level 3: site only
         if site:
             site_approaches = self._filter_approaches(
                 self._approaches_by_site.get(site, [])
             )
             for a in site_approaches:
-                a["source_level"] = 2
-            if not category:
-                return site_approaches
-            seen_ids = {a.get("id") for a in (cat_approaches if site and category else [])}
-            return [a for a in site_approaches if a.get("id") not in seen_ids]
+                a["source_level"] = 3
+            return site_approaches
+        # Level 4: category (all sites)
         if category:
             cat_approaches = []
             for (s, c), apps in self._approaches_by_site_category.items():
@@ -343,8 +352,9 @@ class GraphEngine:
             if cat_approaches:
                 filtered = self._filter_approaches(cat_approaches)
                 for a in filtered:
-                    a["source_level"] = 3
+                    a["source_level"] = 4
                 return filtered
+        # Level 5: product_type only (fallback)
         result = self._filter_approaches(
             self._approaches_by_product.get(product_type, [])
         )
