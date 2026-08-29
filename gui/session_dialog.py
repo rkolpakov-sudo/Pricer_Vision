@@ -7,11 +7,11 @@ QDialog — показывает список последних сессий с
 import logging
 from datetime import datetime
 
-from PyQt6.QtWidgets import (
+from PySide6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QListWidget, QListWidgetItem,
     QPushButton, QLabel, QMessageBox, QAbstractItemView,
 )
-from PyQt6.QtCore import Qt
+from PySide6.QtCore import Qt
 
 logger = logging.getLogger("pricer.gui.session")
 
