@@ -33,6 +33,18 @@ def _is_invalid_price_url(url: str) -> bool:
         return True
     return False
 
+
+def _normalize_spec_tokens(text: str) -> str:
+    """Нормализует токены спецификации для лучшего матчинга цен."""
+    t = text
+    t = t.replace("х", "x").replace("Х", "X")
+    t = t.replace("Ø", "D").replace("ø", "d")
+    t = t.replace("№", "N").replace("高于", "mm")
+    t = t.replace(",", ".")
+    t = re.sub(r'\s+', ' ', t)
+    return t
+
+
 SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS product_types (
     id TEXT PRIMARY KEY,
@@ -240,7 +252,8 @@ class GraphEngine:
         self._prices_by_token.clear()
         for row in self._conn.execute("SELECT * FROM confirmed_prices ORDER BY confidence DESC"):
             p = dict(row)
-            tokens = set(re.findall(r'\w+', p["spec_text"].lower()))
+            normalized = _normalize_spec_tokens(p["spec_text"])
+            tokens = set(re.findall(r'\w+', normalized.lower()))
             for token in tokens:
                 if len(token) > 2:
                     self._prices_by_token.setdefault(token, []).append(p)
@@ -512,7 +525,8 @@ class GraphEngine:
                              strict_sizes: bool = True,
                              ignore_sizes: bool = False) -> list[dict]:
         self.build()
-        spec_tokens = {t.lower() for t in re.findall(r'\w+', spec_text) if len(t) > 2}
+        normalized = _normalize_spec_tokens(spec_text)
+        spec_tokens = {t.lower() for t in re.findall(r'\w+', normalized) if len(t) > 2}
         if not spec_tokens:
             return []
 
