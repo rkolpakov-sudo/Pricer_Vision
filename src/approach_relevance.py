@@ -326,8 +326,12 @@ def _product_tokens(text: str) -> set:
     """Значимые слова товара без размеров/номеров («ду15», «1/2», цифры)."""
     if not text:
         return set()
+    normalized = text
+    normalized = normalized.replace("Ø", "Ду").replace("ø", "ду")
+    normalized = normalized.replace("DN", "Ду").replace("dn", "ду")
+    normalized = normalized.replace("Ф", "Ду")
     tokens = set()
-    for w in _WORD_RE.findall(_context_normalize(text).lower()):
+    for w in _WORD_RE.findall(_context_normalize(normalized).lower()):
         if w in _STOPWORDS_SET or w in _STRUCTURAL_SET or len(w) < 3:
             continue
         if w.isdigit() or _SIZE_RE.match(w):
