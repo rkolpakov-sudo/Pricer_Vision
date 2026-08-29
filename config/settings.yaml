@@ -84,7 +84,7 @@ limits:
 llm:
   llama_cpp_url: http://localhost:8080/v1/chat/completions
   lm_studio_url: http://localhost:1234/v1/chat/completions
-  model: qwen3.8-27b@q3_k_xl
+  model: esatapedico/qwen3.8-27b-nvfp4-mtp-gguf/qwen3.8-27b-nvfp4-mtp-very-low.gguf
   ollama_url: http://localhost:11434/api/chat
   provider: lmstudio
   providers:
@@ -105,7 +105,7 @@ llm:
   temperature: 0.3
   timeout: 150
 mcp:
-  action_timeout_ms: 3000
+  action_timeout_ms: 10000
   call_timeout: 60
   restart_after_timeouts: 2
 paths:
@@ -138,7 +138,7 @@ run:
   max_study_rounds: 50
   reuse_price: true
   row_idle_timeout_seconds: 180
-  row_max_seconds: 450
+  row_max_seconds: 900
   study_temperature: 0.5
   summarize_max_chars: 8000
   use_approaches: true
