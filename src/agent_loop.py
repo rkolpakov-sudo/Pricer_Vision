@@ -412,6 +412,7 @@ async def process_row(
     site_visit_callback: Callable[[str], None] | None = None,
     session_facts: SessionFacts | None = None,
     ductwork_enabled: bool = False,
+    _price_candidate_holder: dict | None = None,
 ) -> dict:
     start_time = datetime.now()
     spec_brand = (spec_meta or {}).get("brand", "") or ""
@@ -1237,6 +1238,16 @@ async def process_row(
                     empty_probe_streak.clear()
                     elapsed = (datetime.now() - start_time).total_seconds()
                     logger.info("Row: price=%s validated=%.2f in %.1fs", validated['price'], validated['confidence'], elapsed)
+                    if _price_candidate_holder is not None:
+                        _price_candidate_holder.update({
+                            "price": validated.get("price"),
+                            "confidence": validated.get("confidence", 0.5),
+                            "url": validated.get("url", ""),
+                            "site": validated.get("site", ""),
+                            "product_name": found_name,
+                            "spec_text": spec_text,
+                            "product_type": product_type,
+                        })
                     try:
                         _save_price_and_approach(memory_manager, spec_text, product_type, validated, steps, record_soldat=False, search_query=search_text)
                     except Exception as e:
@@ -1561,11 +1572,45 @@ def _build_context(spec_text, product_type, approaches, confirmed_prices, sites,
     return "\n".join(parts)
 
 
+def _resolve_product_type(engine, mm, product_type: str, spec_text: str = "") -> str:
+    """Резолвит возможно-выдуманный product_type агента в реальный id из графа.
+
+    Агент (особенно qwen-27b) часто передаёт «человеческие»/переводные типы
+    («pipe», «water_gas_pipe», «трубы») вместо id из графа (plumbing_heating_pipes).
+    Последовательность:
+    1. Если тип уже существует в графе — возвращаем как есть.
+    2. Иначе классифицируем spec_text (реальный классификатор графа).
+    3. Иначе возвращаем исходный (чтобы не было петли).
+    """
+    if not product_type or product_type == UNKNOWN_PT:
+        return product_type
+    try:
+        if product_type in getattr(engine, "_all_products", {}):
+            return product_type
+    except Exception:
+        return product_type
+    if spec_text:
+        try:
+            classified = engine.classify_product_type(spec_text)
+            if classified and classified != UNKNOWN_PT:
+                return classified
+        except Exception:
+            pass
+    return product_type
+
+
 def _execute_graph_tool(name: str, args: dict, engine, mm, spec_text: str = "") -> str:
     try:
         if name == "get_approaches":
             pt = args.get("product_type", "")
             site = args.get("site")
+            # Агент часто передаёт «человеческий»/выдуманный тип («pipe»,
+            # «water_gas_pipe») вместо id из графа. Резолвим по спецификации.
+            if pt and pt != UNKNOWN_PT:
+                resolved = _resolve_product_type(engine, mm, pt, spec_text)
+                if resolved and resolved != pt:
+                    logger.info("get_approaches: resolved product_type %r -> %r", pt, resolved)
+                    pt = resolved
             if not pt and site:
                 approaches = mm.get_approaches_by_site(site)
             elif pt and site:
@@ -1650,6 +1695,13 @@ def _execute_graph_tool(name: str, args: dict, engine, mm, spec_text: str = "") 
         elif name == "search_sites":
             pt = args.get("product_type", "")
             sites = mm.get_sites(pt)
+            if not sites and pt and pt != UNKNOWN_PT:
+                # Агент передал выдуманный/человеческий тип — резолвим по спецификации.
+                resolved = _resolve_product_type(engine, mm, pt, spec_text)
+                if resolved and resolved != pt:
+                    logger.info("search_sites: resolved product_type %r -> %r", pt, resolved)
+                    pt = resolved
+                    sites = mm.get_sites(pt)
             if not sites:
                 return f"Нет сайтов для {pt}"
             return f"Сайты: {', '.join(s['id'] for s in sites[:10])}"

@@ -319,6 +319,11 @@ def _resolve_action_target(target: str):
     t = (target or "").strip()
     if not t:
         return ("error", "error: пустой target — укажи CSS-селектор или роль элемента.", "")
+    # Модель иногда передаёт целиком get_by_role(...) / locator(...) как target —
+    # вытаскиваем роль и имя, чтобы не парсить это как CSS-селектор.
+    m = re.search(r'get_by_role\(\s*["\'](\w+)["\']\s*,\s*(?:name\s*=\s*)?["\']([^"\']+)["\']', t)
+    if m:
+        return ("role", m.group(1), m.group(2))
     if _is_snapshot_ref(t):
         role, name = _ref_to_role_locator(t)
         if role and name:

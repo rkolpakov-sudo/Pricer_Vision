@@ -60,6 +60,17 @@ def _combo_value(combo) -> str:
     return text
 
 
+def _step_action(step) -> str:
+    """Безопасно извлекает имя действия из шага подхода.
+
+    Шаг может быть dict ({'action': ...}) или legacy-строкой
+    (например 'browser_navigate'). Возвращает строку в любом случае.
+    """
+    if isinstance(step, dict):
+        return str(step.get("action") or step.get("name") or "?")
+    return str(step or "?")
+
+
 # ═══════════════════════════════════════════════
 # SearchPage — поиск подходов
 # ═══════════════════════════════════════════════
@@ -173,7 +184,7 @@ class SearchPage(QWidget):
             fail = a.get("consecutive_failures", 0)
             last = _fmt_date(a.get("last_success_date"))
             dep = " [DEPRECATED]" if a.get("is_deprecated") else ""
-            pat = " → ".join(s.get("action", "?") for s in a.get("pattern", [])[:5])
+            pat = " → ".join(_step_action(s) for s in a.get("pattern", [])[:5])
             lines.append(f"\n[ID {aid}]{dep} {sid} (успехов: {suc}, неудач: {fail}, последний: {last})")
             lines.append(f"  шаги: {pat}")
         self.result_text.setText("\n".join(lines))
@@ -1025,7 +1036,7 @@ class ApproachPage(QWidget):
             self.table.setItem(row, 5, QTableWidgetItem(_fmt_date(a.get("last_success_date"))))
             self.table.setItem(row, 6, QTableWidgetItem((a.get("method", "") or "")[:20]))
             concrete = a.get("concrete", [])
-            pat = " → ".join(s.get("action", "?") for s in concrete[:4])
+            pat = " → ".join(_step_action(s) for s in concrete[:4])
             self.table.setItem(row, 7, QTableWidgetItem(pat[:60]))
         self.detail_text.clear()
 
@@ -1047,10 +1058,15 @@ class ApproachPage(QWidget):
         lines = [f"Подход ID {a.get('id', '?')} — {a.get('site_id', '?')} / {pname}"]
         concrete = a.get("concrete", [])
         for i, s in enumerate(concrete):
-            action = s.get("action", "?")
-            target = s.get("target") or s.get("element") or ""
-            text = s.get("text", "")
-            key = s.get("key", "")
+            action = _step_action(s)
+            if isinstance(s, dict):
+                target = s.get("target") or s.get("element") or ""
+                text = s.get("text", "")
+                key = s.get("key", "")
+            else:
+                target = ""
+                text = ""
+                key = ""
             part = action
             if target:
                 part += f"[{target}]"
@@ -1436,7 +1452,7 @@ class StudyPage(QWidget):
         self._appr_frame.setVisible(True)
 
         sections = [
-            ("approaches", "📋 Подходы", "site", lambda a: f"[{a.get('site', '?')}] {' → '.join(s.get('action', '?') for s in a.get('concrete_steps', [])[:4])}"),
+            ("approaches", "📋 Подходы", "site", lambda a: f"[{a.get('site', '?')}] {' → '.join(_step_action(s) for s in a.get('concrete_steps', [])[:4])}"),
             ("hints", "💡 Хинты", "hint_text", lambda a: f"[{a.get('product_type', '?')}] {a.get('hint_text', '')[:80]}"),
             ("concepts", "🔗 Концепты", "relation", lambda a: f"{a.get('child', '?')} {a.get('relation', '?')} {a.get('parent', '?')}"),
             ("sites", "🌐 Новые сайты", "domain", lambda a: f"{a.get('domain', '?')} ({a.get('name', '?')})"),

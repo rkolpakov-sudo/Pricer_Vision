@@ -552,10 +552,26 @@ class MainWindow(QMainWindow):
 
     def _check_last_session(self):
         """При запуске: показать диалог выбора сессии, если есть сохранённые."""
-        from src.session_manager import list_sessions
+        from src.session_manager import (
+            list_sessions, has_current_session, load_current_session, auto_save_path,
+        )
         sessions = list_sessions()
-        if not sessions:
+        current_has = has_current_session()
+        if not sessions and not current_has:
             return
+        if current_has:
+            # Автосохранённая сессия (_current.json) не попадает в list_sessions —
+            # добавляем её в начало списка, чтобы её можно было восстановить.
+            cur = load_current_session()
+            if cur and (cur.get("results") or cur.get("negative_cache")):
+                sessions.insert(0, {
+                    "path": auto_save_path(),
+                    "saved_at": cur.get("saved_at", ""),
+                    "spec_name": cur.get("spec_name", "Текущая (автосохранённая)"),
+                    "total_rows": cur.get("total_rows", 0),
+                    "processed_count": cur.get("processed_count", 0),
+                    "found_count": cur.get("found_count", 0),
+                })
         from gui.session_dialog import SessionDialog
         dlg = SessionDialog(sessions, self)
         if dlg.exec():
@@ -564,8 +580,10 @@ class MainWindow(QMainWindow):
 
     def _open_session_dialog(self):
         """Открыть диалог выбора сессии по кнопке «Сессия»."""
-        from src.session_manager import list_sessions, save_session, auto_save_path
-        from gui.session_dialog import SessionDialog
+        from src.session_manager import (
+            list_sessions, save_session, auto_save_path,
+            has_current_session, load_current_session,
+        )
         if self._spec_path and self._restored_results:
             state = self._build_session_state()
             try:
@@ -573,6 +591,17 @@ class MainWindow(QMainWindow):
             except Exception:
                 pass
         sessions = list_sessions()
+        if has_current_session():
+            cur = load_current_session()
+            if cur and (cur.get("results") or cur.get("negative_cache")):
+                sessions.insert(0, {
+                    "path": auto_save_path(),
+                    "saved_at": cur.get("saved_at", ""),
+                    "spec_name": cur.get("spec_name", "Текущая (автосохранённая)"),
+                    "total_rows": cur.get("total_rows", 0),
+                    "processed_count": cur.get("processed_count", 0),
+                    "found_count": cur.get("found_count", 0),
+                })
         dlg = SessionDialog(sessions, self)
         if dlg.exec():
             if dlg.selected_session:
