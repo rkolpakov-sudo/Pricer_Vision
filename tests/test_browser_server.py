@@ -186,14 +186,19 @@ class TestCamoufoxLaunchKwargs:
         kwargs = _camoufox_launch_kwargs(False, humanize=False)
         assert kwargs["humanize"] is False
 
-    def test_persistent_profile_enabled_by_default(self):
-        """Постоянный профиль включён по умолчанию: куки между сессиями сохраняются."""
+    def test_persistent_profile_disabled_by_default(self):
+        """Постоянный профиль ВЫКЛЮЧЕН по умолчанию: эфемерный браузер, один
+        экземпляр (persistent_context на общем профиле давал два браузера)."""
         kwargs = _camoufox_launch_kwargs(False)
+        assert "persistent_context" not in kwargs
+        assert "user_data_dir" not in kwargs
+
+    def test_persistent_profile_enabled_explicitly(self):
+        kwargs = _camoufox_launch_kwargs(False, persistent_profile=True)
         assert kwargs.get("persistent_context") is True
         assert kwargs.get("user_data_dir") == "data/camoufox_profile"
         assert kwargs.get("enable_cache") is True
         # session-restore отключён, чтобы Firefox не открывал прошлые окна
-        # («два браузера» после нечистого закрытия)
         prefs = kwargs.get("firefox_user_prefs", {})
         assert prefs.get("browser.sessionstore.resume_from_crash") is False
         assert prefs.get("browser.sessionstore.max_resumed_crashes") == 0
@@ -204,14 +209,19 @@ class TestCamoufoxLaunchKwargs:
         assert "persistent_context" not in kwargs
         assert "user_data_dir" not in kwargs
 
+    def test_pinned_fingerprint_disabled_by_default(self):
+        """pin отпечатка без постоянного профиля не нужен — дефолт False."""
+        kwargs = _camoufox_launch_kwargs(False)
+        assert kwargs.get("fingerprint_preset") is True
+
     def test_pinned_fingerprint_uses_deterministic_preset(self):
         """pinned_fingerprint подставляет конкретный Windows-пресет (стабильный индекс)."""
-        kwargs = _camoufox_launch_kwargs(False)
+        kwargs = _camoufox_launch_kwargs(False, pinned_fingerprint=True)
         preset = kwargs.get("fingerprint_preset")
         assert isinstance(preset, dict)
         assert preset.get("navigator", {}).get("platform") == "Win32"
         # одинаковый пресет при каждом вызове
-        again = _camoufox_launch_kwargs(False).get("fingerprint_preset")
+        again = _camoufox_launch_kwargs(False, pinned_fingerprint=True).get("fingerprint_preset")
         assert preset == again
 
     def test_pinned_fingerprint_disabled_uses_bool(self):

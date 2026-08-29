@@ -20,8 +20,8 @@ browser:
   hide_setters: true
   locale: ru-RU
   no_sandbox: true
-  persistent_profile: true
-  pinned_fingerprint: true
+  persistent_profile: false
+  pinned_fingerprint: false
   profile_dir: data/camoufox_profile
   timezone: Europe/Moscow
 deps:

@@ -220,9 +220,9 @@ def _pinned_windows_preset() -> dict | None:
 
 def _camoufox_launch_kwargs(headless: bool, *, locale: str = "ru-RU",
                             timezone: str = "Europe/Moscow", geoip: bool = False,
-                            humanize: bool = True, persistent_profile: bool = True,
+                            humanize: bool = True, persistent_profile: bool = False,
                             profile_dir: str = "data/camoufox_profile",
-                            pinned_fingerprint: bool = True) -> dict:
+                            pinned_fingerprint: bool = False) -> dict:
     """Параметры запуска AsyncCamoufox с консистентным отпечатком.
 
     Закрывает несоответствие «RU-сайт + RU-IP + en-US locale» (триггер ServicePipe):
@@ -401,13 +401,13 @@ class CamoufoxDriver(BaseDriver):
             geoip = bool(get_browser_config("geoip", False))
             humanize = bool(get_antidetect_config("humanize", True))
             self._hide_setters = bool(get_browser_config("hide_setters", True))
-            persistent_profile = bool(get_browser_config("persistent_profile", True))
+            persistent_profile = bool(get_browser_config("persistent_profile", False))
             profile_dir = str(get_browser_config("profile_dir", "data/camoufox_profile"))
-            pinned_fingerprint = bool(get_browser_config("pinned_fingerprint", True))
+            pinned_fingerprint = bool(get_browser_config("pinned_fingerprint", False))
         except Exception:
             locale, timezone, geoip, humanize = "ru-RU", "Europe/Moscow", False, True
             self._hide_setters = True
-            persistent_profile, profile_dir, pinned_fingerprint = True, "data/camoufox_profile", True
+            persistent_profile, profile_dir, pinned_fingerprint = False, "data/camoufox_profile", False
         if persistent_profile and not pinned_fingerprint:
             logger.warning("persistent_profile=true при pinned_fingerprint=false — "
                            "«тот же пользователь, другой компьютер» (issues #723), "
