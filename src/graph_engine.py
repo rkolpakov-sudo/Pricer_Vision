@@ -272,8 +272,22 @@ class GraphEngine:
     def get_approaches(self, product_type: str, site: str | None = None) -> list[dict]:
         self.build()
         if site:
-            return self._filter_approaches(self._approaches_index.get((product_type, site), []))
-        return self._filter_approaches(self._approaches_by_product.get(product_type, []))
+            approaches = self._filter_approaches(self._approaches_index.get((product_type, site), []))
+            if approaches and product_type != "unknown":
+                return approaches
+            site_approaches = self._filter_approaches(self._approaches_by_site.get(site, []))
+            if product_type == "unknown":
+                return site_approaches
+            seen_ids = {a.get("id") for a in approaches}
+            extra = [a for a in site_approaches if a.get("id") not in seen_ids]
+            return approaches + extra
+        approaches = self._filter_approaches(self._approaches_by_product.get(product_type, []))
+        if approaches or product_type != "unknown":
+            return approaches
+        all_approaches = []
+        for vals in self._approaches_by_site.values():
+            all_approaches.extend(vals)
+        return self._filter_approaches(all_approaches)
 
     def get_approaches_by_site(self, site: str) -> list[dict]:
         self.build()
