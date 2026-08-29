@@ -354,13 +354,15 @@ class GraphEngine:
                 for a in filtered:
                     a["source_level"] = 4
                 return filtered
-        # Level 5: product_type only (fallback)
-        result = self._filter_approaches(
-            self._approaches_by_product.get(product_type, [])
-        )
-        for a in result:
-            a["source_level"] = 4
-        return result
+        # Level 5: product_type only (fallback) — skip for unknown
+        if product_type and product_type != "unknown":
+            result = self._filter_approaches(
+                self._approaches_by_product.get(product_type, [])
+            )
+            for a in result:
+                a["source_level"] = 5
+            return result
+        return []
 
     def get_approaches_by_site(self, site: str) -> list[dict]:
         self.build()
