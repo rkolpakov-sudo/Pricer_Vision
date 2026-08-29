@@ -322,11 +322,15 @@ class GraphEngine:
                 self._approaches_by_site_category.get((site, category), [])
             )
             if cat_approaches:
+                for a in cat_approaches:
+                    a["source_level"] = 1
                 return cat_approaches
         if site:
             site_approaches = self._filter_approaches(
                 self._approaches_by_site.get(site, [])
             )
+            for a in site_approaches:
+                a["source_level"] = 2
             if not category:
                 return site_approaches
             seen_ids = {a.get("id") for a in (cat_approaches if site and category else [])}
@@ -337,10 +341,16 @@ class GraphEngine:
                 if c == category:
                     cat_approaches.extend(apps)
             if cat_approaches:
-                return self._filter_approaches(cat_approaches)
-        return self._filter_approaches(
+                filtered = self._filter_approaches(cat_approaches)
+                for a in filtered:
+                    a["source_level"] = 3
+                return filtered
+        result = self._filter_approaches(
             self._approaches_by_product.get(product_type, [])
         )
+        for a in result:
+            a["source_level"] = 4
+        return result
 
     def get_approaches_by_site(self, site: str) -> list[dict]:
         self.build()
