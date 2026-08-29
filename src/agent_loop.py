@@ -412,6 +412,7 @@ async def process_row(
     site_visit_callback: Callable[[str], None] | None = None,
     session_facts: SessionFacts | None = None,
     ductwork_enabled: bool = False,
+    _price_candidate_holder: dict | None = None,
 ) -> dict:
     start_time = datetime.now()
     spec_brand = (spec_meta or {}).get("brand", "") or ""
@@ -1237,6 +1238,16 @@ async def process_row(
                     empty_probe_streak.clear()
                     elapsed = (datetime.now() - start_time).total_seconds()
                     logger.info("Row: price=%s validated=%.2f in %.1fs", validated['price'], validated['confidence'], elapsed)
+                    if _price_candidate_holder is not None:
+                        _price_candidate_holder.update({
+                            "price": validated.get("price"),
+                            "confidence": validated.get("confidence", 0.5),
+                            "url": validated.get("url", ""),
+                            "site": validated.get("site", ""),
+                            "product_name": found_name,
+                            "spec_text": spec_text,
+                            "product_type": product_type,
+                        })
                     try:
                         _save_price_and_approach(memory_manager, spec_text, product_type, validated, steps, record_soldat=False, search_query=search_text)
                     except Exception as e:
