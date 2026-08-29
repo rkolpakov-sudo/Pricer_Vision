@@ -14,6 +14,21 @@ schema:
     tasks
 excluded_sites:
 - electro-mpo.ru
+site_incompatible_types:
+  tinko.ru:
+    - plumbing_heating_pipes
+    - plumbing_heating_fittings
+    - plumbing_heating_valves_armature
+    - plumbing_heating_pumps_water
+    - plumbing_heating_radiators
+  ridan.ru:
+    - plumbing_heating_pipes
+    - plumbing_heating_fittings
+    - plumbing_heating_valves_armature
+  pulsar-msk.ru:
+    - plumbing_heating_pipes
+    - plumbing_heating_fittings
+    - plumbing_heating_valves_armature
 hints:
   - product_type_id: unknown
     text: "vodokomfort.ru: корпоративный сайт НЕ РАБОТАЕТ через Playwright (JS-оверлей поиска). Используй shop.vodokomfort.ru — там работает стандартный поиск."

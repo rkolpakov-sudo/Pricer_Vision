@@ -1729,7 +1729,17 @@ def _execute_graph_tool(name: str, args: dict, engine, mm, spec_text: str = "") 
             sites = mm.get_sites(pt)
             if not sites:
                 return f"Нет сайтов для {pt}"
-            return f"Сайты: {', '.join(s['id'] for s in sites[:10])}"
+            incompatible = get_run_config("site_incompatible_types", {})
+            incompatible_sites = set()
+            for site_name, types in (incompatible or {}).items():
+                if pt in types:
+                    incompatible_sites.add(site_name)
+            filtered = [s for s in sites if s["id"] not in incompatible_sites]
+            if not filtered:
+                return f"Нет совместимых сайтов для {pt} (несовместимые: {', '.join(incompatible_sites)})"
+            if incompatible_sites:
+                logger.info("🚫 Filtered incompatible sites for %s: %s", pt, incompatible_sites)
+            return f"Сайты: {', '.join(s['id'] for s in filtered[:10])}"
 
         elif name == "save_discovered_site":
             domain = args.get("domain", "")
