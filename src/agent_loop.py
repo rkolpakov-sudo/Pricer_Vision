@@ -201,7 +201,7 @@ SYSTEM_PROMPT = """Ты — опытный пользователь с дост�
 9. Если ты сделал >10 шагов на одном сайте без результата — принудительно переключись на другой сайт из списка.
 10. Если не знаешь, как работать на сайте — вызови get_hints. В хинтах может быть написано, где искать цену, какие селекторы использовать.
 11. Если артикул не дал результата на первом сайте — на следующем сайте ищи уже по ПОЛНОМУ названию товара из спецификации, а не по артикулу.
-12. Яндекс — это ТОЛЬКО поисковик для нахождения сайта магазина. Если у тебя нет сайтов для товара — иди на yandex.ru, найди товар, кликни на ссылку магазина из результатов поиска и извлеки цену ИЗ КАРТОЧКИ ТОВАРА НА САЙТЕ МАГАЗИНА. НЕ извлекай цену из сниппета Яндекса — Яндекс не источник цен.
+12. НЕ переходи на yandex.ru/search — поисковик заблокирован. Используй только известные сайты магазинов из списка sites (полученного через search_sites) или из подходов графа.
 13. После save_confirmed_price можно продолжить поиск на других сайтах для лучшей цены, но базовая цена уже сохранена.
 14. Если сайт явно НЕ ПОДХОДИТ для товара (например, сантехнический сайт для кабеля, или производитель труб для электроники) — НЕМЕДЛЕННО переключайся на следующий сайт. Не трать больше 2 раундов на заведомо неподходящий сайт.
 15. НЕ собирай URL поиска вручную и НЕ делай percent-кодирование кириллицы руками
@@ -865,7 +865,7 @@ async def process_row(
                         unique_tried = facts.unique_queries_on_site(query_domain)
                         if dup_count >= QUERY_DUP_SKIP_AFTER:
                             if len(unique_tried) >= 2:
-                                _dup_msg = (f"error: На этом сайте УЖЕ尝试ованы {len(unique_tried)} "
+                                _dup_msg = (f"error: На этом сайте уже испробовано {len(unique_tried)} "
                                             f"варианта запроса: {', '.join(q[:40] for q in unique_tried[:3])}. "
                                             "Результатов НЕТ. ПЕРЕХОДИ к следующему сайту из списка.")
                             elif dup_count >= 2:
@@ -1057,12 +1057,8 @@ async def process_row(
                 result_hash = hashlib.md5(tool_content.encode("utf-8", "ignore")).hexdigest()[:8]
                 facts.record_browser_call(_extract_domain(current_site), "evaluate:" + js_key, result_hash)
             if tool_name == "browser_evaluate" and "SyntaxError" in tool_content:
-                js_syntax_errors = facts._sites.get(_extract_domain(current_site), {}).get("js_syntax_errors", 0) if hasattr(facts, '_sites') else 0
-                js_syntax_errors += 1
                 site_domain = _extract_domain(current_site)
-                if site_domain not in facts._sites:
-                    facts._sites[site_domain] = {"queries": [], "extractions": 0, "evals_since_type": 0, "js_syntax_errors": 0}
-                facts._sites[site_domain]["js_syntax_errors"] = js_syntax_errors
+                js_syntax_errors = facts.record_js_syntax_error(site_domain)
                 if js_syntax_errors >= 2:
                     fallback_js = """() => {
                         const inp = document.querySelector('input[type="search"], input[placeholder*="Поиск"], input[name*="search"]');
@@ -1075,7 +1071,7 @@ async def process_row(
                         result = await mcp_bridge.call_tool("browser_evaluate", {"function": fallback_js})
                         tool_content = (f"✅ JS-фолбэк выполнился: {str(result)[:200]}. "
                                        "Если цена найдена — извлеки её. Если нет — переключись на другой сайт.")
-                        facts._sites[site_domain]["js_syntax_errors"] = 0
+                        facts.reset_js_syntax_errors(site_domain)
                     except Exception as e:
                         tool_content = (f"error: {js_syntax_errors} ошибки синтаксиса JS подряд. "
                                        "Переключись на другой сайт — этот сайт нестабилен.")
@@ -1796,17 +1792,7 @@ def _execute_graph_tool(name: str, args: dict, engine, mm, spec_text: str = "") 
                     sites = mm.get_sites(pt)
             if not sites:
                 return f"Нет сайтов для {pt}"
-            incompatible = get_run_config("site_incompatible_types", {})
-            incompatible_sites = set()
-            for site_name, types in (incompatible or {}).items():
-                if pt in types:
-                    incompatible_sites.add(site_name)
-            filtered = [s for s in sites if s["id"] not in incompatible_sites]
-            if not filtered:
-                return f"Нет совместимых сайтов для {pt} (несовместимые: {', '.join(incompatible_sites)})"
-            if incompatible_sites:
-                logger.info("🚫 Filtered incompatible sites for %s: %s", pt, incompatible_sites)
-            return f"Сайты: {', '.join(s['id'] for s in filtered[:10])}"
+            return f"Сайты: {', '.join(s['id'] for s in sites[:10])}"
 
         elif name == "save_discovered_site":
             domain = args.get("domain", "")

@@ -14,21 +14,6 @@ schema:
     tasks
 excluded_sites:
 - electro-mpo.ru
-site_incompatible_types:
-  tinko.ru:
-    - plumbing_heating_pipes
-    - plumbing_heating_fittings
-    - plumbing_heating_valves_armature
-    - plumbing_heating_pumps_water
-    - plumbing_heating_radiators
-  ridan.ru:
-    - plumbing_heating_pipes
-    - plumbing_heating_fittings
-    - plumbing_heating_valves_armature
-  pulsar-msk.ru:
-    - plumbing_heating_pipes
-    - plumbing_heating_fittings
-    - plumbing_heating_valves_armature
 spa_sites:
   ridan.ru:
     search_url: "https://ridan.ru/search?term={query}"

@@ -58,6 +58,18 @@ class RowFacts:
         # Реальный ввод запроса — сбрасываем счётчик «извлечения без ввода».
         site["evals_since_type"] = 0
 
+    def record_js_syntax_error(self, domain: str) -> int:
+        """Увеличивает счётчик подряд идущих JS-ошибок на домене, возвращает новое значение."""
+        site = self._site(domain)
+        site["js_syntax_errors"] = site.get("js_syntax_errors", 0) + 1
+        return site["js_syntax_errors"]
+
+    def reset_js_syntax_errors(self, domain: str) -> None:
+        """Сбрасывает счётчик JS-ошибок (после успешного фолбэка)."""
+        site = self._sites.get(domain)
+        if site:
+            site["js_syntax_errors"] = 0
+
     def seen_query(self, domain: str, query: str) -> int:
         """Сколько раз этот ТОЧНЫЙ текст запроса уже вводился на домене."""
         q = (query or "").strip()
