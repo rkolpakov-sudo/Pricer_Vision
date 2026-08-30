@@ -122,7 +122,7 @@ C:\Projects\Pricer_Vision\
 │   ├── agent_loop.py            # Основной цикл (3-веточный routing, format_steps, negative feedback, _query_llm, StuckDetector, температуры фаз, контекстный бюджет, idle-таймаут, флаги режима поиска)
 │   ├── adaptive_limits.py       # AdaptiveRoundManager — динамические лимиты раундов per-site (Фаза 2)
 │   ├── approach_relevance.py    # Матчинг наименований + правила сопоставления (Фаза 8)
-│   ├── audit_logger.py          # Audit-лог JSONL (data/audit/session_*.jsonl)
+│   ├── audit_logger.py          # Audit-лог JSONL (data/audit/session_*.jsonl, привязка audit_session_id в session JSON)
 │   ├── config_loader.py         # Загрузчик config/settings.yaml (+ get_run_flags/save_run_flags)
 │   ├── ductwork_calculator.py   # Расчёт воздуховодов/фасонных частей без сети (20 типов, цена за изделие с L_ном 3000/1250мм, гейт+дисклаймер)
 │   ├── excel_writer.py          # SpecItem (row/spec/article/qty) + сборка spec_text из всех колонок
@@ -159,7 +159,7 @@ C:\Projects\Pricer_Vision\
 │   ├── test_*.py                # Тесты (pytest; включая test_main.py — панель «Режим поиска», test_row_idle_timeout.py, test_ductwork_calculator.py — модуль воздуховодов)
 │   └── integration/             # Интеграционные тесты агентного цикла (test_agent_flow.py, в т.ч. TestDuctworkModule)
 ├── logs/
-│   └── runtime.log              # Последний ран
+│   └── runtime.log              # RotatingFileHandler (5MB, 3 бэкапа, mode='a')
 └── venv/                        # Виртуальное окружение
 ```
 
@@ -385,7 +385,7 @@ pdf_parser:
 ### Circuit Breaker / Retry / StuckDetector / Audit
 - `src/resilience.py` — `CircuitBreaker` (синглтоны `llm_circuit` 3/30s, `mcp_circuit` 5/60s), `retry_with_backoff` (sync+async)
 - `src/stuck_detector.py` — детект зацикливания/блокировок (CRITICAL → force site switch при `rounds_on_site > 5`)
-- `src/audit_logger.py` — JSONL-лог в `data/audit/session_*.jsonl`, вызывается из `mcp_agent_runner.py`
+- `src/audit_logger.py` — JSONL-лог в `data/audit/session_*.jsonl`, вызывается из `mcp_agent_runner.py`; `audit_session_id` сохраняется в session JSON для привязки
 
 ### Конфиг
 - `llm.retry` (`max_attempts`, `backoff_seconds`) в `settings.yaml` подключён к `llm_client.py`
