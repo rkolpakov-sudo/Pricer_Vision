@@ -1580,7 +1580,7 @@ class MainWindow(QMainWindow):
 
         if hasattr(self, '_runner') and self._runner and self._runner.results:
             self._restored_results = self._runner.results
-            self._original_restored_results = []
+            self._original_restored_results = list(self._runner.results)
 
         self.add_log("INFO", "complete",
             f"Готово: {found}/{total} найдено, {errs} ошибок")
