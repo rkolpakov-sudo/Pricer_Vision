@@ -500,7 +500,25 @@ class MainWindow(QMainWindow):
         apply_theme(QApplication.instance(), self._current_theme)
         self.toast_manager = ToastManager(self)
 
-        QTimer.singleShot(100, self._check_last_session)
+        self._session_check_scheduled = False
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        # Проверка сохранённой сессии — только ПОСЛЕ того, как окно показано
+        # и event loop запущен. Раньше вызов шёл из __init__ через QTimer.singleShot(100)
+        # ДО showMaximized()/app.exec() — модальный dlg.exec() открывал вложенный
+        # event loop в неотрисованном окне, и последующие load_spec/QMessageBox
+        # зависали (UI «не отвечает»).
+        if not self._session_check_scheduled:
+            self._session_check_scheduled = True
+            QTimer.singleShot(200, self._safe_check_last_session)
+
+    def _safe_check_last_session(self):
+        """Запуск проверки сессии с защитой: ошибка не должна вешать UI."""
+        try:
+            self._check_last_session()
+        except Exception as e:
+            logger.error("Session restore check failed: %s", e, exc_info=True)
 
     def closeEvent(self, event):
         if self._processing_active and hasattr(self, '_runner') and self._runner:
@@ -576,7 +594,11 @@ class MainWindow(QMainWindow):
         dlg = SessionDialog(sessions, self)
         if dlg.exec():
             if dlg.selected_session:
-                self._restore_session(dlg.selected_session)
+                try:
+                    self._restore_session(dlg.selected_session)
+                except Exception as e:
+                    logger.error("Session restore failed: %s", e, exc_info=True)
+                    self.add_log("ERR", "session", f"Ошибка восстановления сессии: {e}")
 
     def _open_session_dialog(self):
         """Открыть диалог выбора сессии по кнопке «Сессия»."""
@@ -605,7 +627,11 @@ class MainWindow(QMainWindow):
         dlg = SessionDialog(sessions, self)
         if dlg.exec():
             if dlg.selected_session:
-                self._restore_session(dlg.selected_session)
+                try:
+                    self._restore_session(dlg.selected_session)
+                except Exception as e:
+                    logger.error("Session restore failed: %s", e, exc_info=True)
+                    self.add_log("ERR", "session", f"Ошибка восстановления сессии: {e}")
 
     def _restore_session(self, session_path: str):
         """Восстанавливает сессию из JSON-файла."""
