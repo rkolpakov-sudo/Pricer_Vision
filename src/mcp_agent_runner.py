@@ -245,6 +245,11 @@ class MCPAgentRunner(QThread):
             def _on_site_visited(site_id: str):
                 self._last_visited_site = site_id
 
+            _restore_specs = {r.get("spec_text") for r in self._restored_results if r.get("price") is not None}
+            logger.info("Runner: %d specs to process, %d restored with price (%s)",
+                        len(ordered), len(self._restored_results),
+                        ", ".join(sorted(_restore_specs)[:3]) if _restore_specs else "none")
+
             for i, spec in enumerate(ordered):
                 if self._restart_bridge.is_set():
                     self._restart_bridge.clear()
@@ -297,12 +302,10 @@ class MCPAgentRunner(QThread):
                             result["excel_row"] = getattr(spec, "row", 0) or (original_index.get(id(spec), i) + 2)
                             result["restored"] = True
                             self.results.append(result)
-                            row_idx = original_index.get(id(spec), i)
                             self._processed += 1
                             self._found += 1
                             self.metrics_signal.emit(self._current_metrics())
-                            self.monitor_signal.emit({"type": "row_done", "idx": i + 1, "total": total})
-                            self.row_done_signal.emit(row_idx, result)
+                            # Не emitting row_done_signal — строка уже в таблице
                             logger.info("Row %d: restored from session — '%s' = %s",
                                         i + 1, spec_text[:40], prev.get("price"))
                             break
