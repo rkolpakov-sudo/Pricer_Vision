@@ -702,6 +702,7 @@ class MainWindow(QMainWindow):
                 return
             result = _pending.pop(0)
             try:
+                result["restored"] = True
                 self._on_row_done((result.get("excel_row") or 0) - 2, result)
             except Exception as e:
                 logger.error("Session restore row failed: %s", e, exc_info=True)
