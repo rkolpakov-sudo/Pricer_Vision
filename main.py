@@ -1244,6 +1244,7 @@ class MainWindow(QMainWindow):
         self.config = self._load_config()
         self._processing_active = True
         self.results_table.setRowCount(0)
+        self._restored_results = []
         self.log_browser.clear()
         self.progress_bar.setValue(0)
         self._center_tabs.setCurrentIndex(0)  # switch to Результаты
@@ -1262,6 +1263,7 @@ class MainWindow(QMainWindow):
             ductwork_enabled=self.ductwork_cb.isChecked(),
             skip_registry=self._skip_registry,
             restored_caches=self._restored_caches,
+            restored_results=self._restored_results,
         )
         mode_str = (
             f"цены={'вкл' if self.reuse_price_cb.isChecked() else 'выкл'}, "
@@ -1317,7 +1319,8 @@ class MainWindow(QMainWindow):
         self.metrics_panel.update_metrics(stats)
 
     def _on_row_done(self, idx, result):
-        self._restored_results.append(result)
+        if not result.get("restored"):
+            self._restored_results.append(result)
         row = self.results_table.rowCount()
         self.results_table.insertRow(row)
 

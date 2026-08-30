@@ -103,7 +103,8 @@ class MCPAgentRunner(QThread):
 
     def __init__(self, specs: list, llm_client, db_path: str = DB_PATH, parent=None, fresh: bool = True,
                  skip_registry=None, use_approaches: bool = True, use_site_ranking: bool = True,
-                 ductwork_enabled: bool = False, restored_caches: dict | None = None):
+                 ductwork_enabled: bool = False, restored_caches: dict | None = None,
+                 restored_results: list | None = None):
         super().__init__(parent)
         self.specs = specs
         self.llm_client = llm_client
@@ -114,6 +115,7 @@ class MCPAgentRunner(QThread):
         self._ductwork_enabled = ductwork_enabled
         self._skip_registry = skip_registry
         self._restored_caches = restored_caches
+        self._restored_results = restored_results or []
         self._stop_event = threading.Event()
         self._restart_bridge = threading.Event()
         self._restart_bridge_value = None
@@ -287,6 +289,27 @@ class MCPAgentRunner(QThread):
                     self.monitor_signal.emit({"type": "row_done", "idx": i + 1, "total": total})
                     self.row_done_signal.emit(row_idx, result)
                     continue
+                # Товар уже найден в предыдущей сессии — восстанавливаем результат без поиска
+                if self._restored_results:
+                    for prev in self._restored_results:
+                        if prev.get("spec_text") == spec_text and prev.get("price") is not None:
+                            result = dict(prev)
+                            result["excel_row"] = getattr(spec, "row", 0) or (original_index.get(id(spec), i) + 2)
+                            result["restored"] = True
+                            self.results.append(result)
+                            row_idx = original_index.get(id(spec), i)
+                            self._processed += 1
+                            self._found += 1
+                            self.metrics_signal.emit(self._current_metrics())
+                            self.monitor_signal.emit({"type": "row_done", "idx": i + 1, "total": total})
+                            self.row_done_signal.emit(row_idx, result)
+                            logger.info("Row %d: restored from session — '%s' = %s",
+                                        i + 1, spec_text[:40], prev.get("price"))
+                            break
+                    else:
+                        result = None  # not found in restored — will process normally
+                    if result is not None:
+                        continue
                 # Товар уже дважды не найден в этой сессии — пропускаем без поиска
                 if negative_cache.is_blocked(spec_text):
                     result = {"spec_text": spec_text, "price": None, "confidence": 0.0,
