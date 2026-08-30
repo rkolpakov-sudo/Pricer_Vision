@@ -487,6 +487,7 @@ class MainWindow(QMainWindow):
         self._restored_row_indices = set()
         self._restored_caches = None
         self._restored_audit_id = ""
+        self._original_restored_results = []
         self._session_log_entries = []
         from src.approach_relevance import load_rules
         load_rules()
@@ -665,6 +666,7 @@ class MainWindow(QMainWindow):
         self._skip_registry.from_dict(state.get("skip_registry", {}))
 
         self._restored_results = state.get("results", [])
+        self._original_restored_results = list(self._restored_results)
         self._restored_row_indices = set()
         for result in self._restored_results:
             excel_row = result.get("excel_row", 0)
@@ -1044,6 +1046,7 @@ class MainWindow(QMainWindow):
             self._restored_row_indices = set()
             self._restored_caches = None
             self._restored_audit_id = ""
+            self._original_restored_results = []
             self._session_log_entries = []
             self.start_btn.setEnabled(True)
             self._show_preview()
@@ -1264,7 +1267,7 @@ class MainWindow(QMainWindow):
             ductwork_enabled=self.ductwork_cb.isChecked(),
             skip_registry=self._skip_registry,
             restored_caches=self._restored_caches,
-            restored_results=self._restored_results,
+            restored_results=self._original_restored_results,
         )
         mode_str = (
             f"цены={'вкл' if self.reuse_price_cb.isChecked() else 'выкл'}, "
@@ -1565,6 +1568,7 @@ class MainWindow(QMainWindow):
 
         if hasattr(self, '_runner') and self._runner and self._runner.results:
             self._restored_results = self._runner.results
+            self._original_restored_results = []
 
         self.add_log("INFO", "complete",
             f"Готово: {found}/{total} найдено, {errs} ошибок")
