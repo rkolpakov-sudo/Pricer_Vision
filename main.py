@@ -666,6 +666,18 @@ class MainWindow(QMainWindow):
         self._skip_registry.from_dict(state.get("skip_registry", {}))
 
         self._restored_results = state.get("results", [])
+        # Дедупликация: артефакт предыдущих багов — в файле могли оказаться
+        # дублирующиеся записи. Оставляем первый экземпляр каждого spec_text
+        # (с ценой приоритетнее, но порядок в JSON и так ставит их раньше).
+        _seen_specs = set()
+        _deduped = []
+        for r in self._restored_results:
+            st = r.get("spec_text", "")
+            if st and st in _seen_specs:
+                continue
+            _seen_specs.add(st)
+            _deduped.append(r)
+        self._restored_results = _deduped
         self._original_restored_results = list(self._restored_results)
         self._restored_row_indices = set()
         for result in self._restored_results:
