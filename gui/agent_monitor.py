@@ -4,8 +4,10 @@
 текущее действие, прогресс по строкам и историю действий.
 """
 
+import time
 from datetime import datetime
 
+from PySide6.QtCore import QTimer
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QProgressBar,
     QListWidget, QListWidgetItem, QPushButton,
@@ -21,6 +23,8 @@ class AgentMonitorPanel(QWidget):
 
     def __init__(self, parent=None):
         super().__init__(parent)
+        self._row_start_time: float | None = None
+        self._position_text: str = ""
         self._init_ui()
 
     def _init_ui(self):
@@ -72,14 +76,33 @@ class AgentMonitorPanel(QWidget):
         self.history_list.setMaximumHeight(180)
         layout.addWidget(self.history_list, 1)
 
+        self._timer = QTimer(self)
+        self._timer.setInterval(1000)
+        self._timer.timeout.connect(self._tick_timer)
+
+    def _tick_timer(self):
+        if self._row_start_time is None:
+            return
+        elapsed = int(time.time() - self._row_start_time)
+        if elapsed < 60:
+            t_str = f"{elapsed}с"
+        else:
+            t_str = f"{elapsed // 60}м{elapsed % 60:02d}с"
+        self.position_label.setText(f"Позиция: {self._position_text}  [{t_str}]")
+
     def reset(self):
         """Сброс панели перед новым прогоном."""
+        self._stop_timer()
         self.row_label.setText("Строка: — / —")
         self.position_label.setText("Позиция: —")
         self.progress_bar.setValue(0)
         self.action_label.setText("Запуск...")
         self.history_list.clear()
         self._spinner.hide()
+
+    def _stop_timer(self):
+        self._timer.stop()
+        self._row_start_time = None
 
     def clear_history(self):
         self.history_list.clear()
@@ -106,6 +129,10 @@ class AgentMonitorPanel(QWidget):
             self.position_label.setText(f"Позиция {idx}/{total}: {position}")
             self.action_label.setText(f"Обработка: {preview}")
             self._add_history(f"▶ Строка {idx}/{total}: {preview}")
+            self._row_start_time = time.time()
+            self._position_text = f"{idx}/{total}: {position}"
+            if not self._timer.isActive():
+                self._timer.start()
         elif etype == "action":
             text = event.get("text", "")
             idx = event.get("idx")
@@ -119,7 +146,9 @@ class AgentMonitorPanel(QWidget):
             idx = event.get("idx", 0)
             total = event.get("total", 0)
             self.progress_bar.setValue(idx)
+            self._stop_timer()
         elif etype == "done":
+            self._stop_timer()
             self._spinner.hide()
             self.position_label.setText("Позиция: —")
             found = event.get("found", 0)
@@ -129,6 +158,7 @@ class AgentMonitorPanel(QWidget):
             self.action_label.setText(f"Готово: {found}/{total} найдено, {errors} ошибок")
             self._add_history(f"✓ Прогон завершён: {found}/{total} найдено")
         elif etype == "stop":
+            self._stop_timer()
             self._spinner.hide()
             self.position_label.setText("Позиция: —")
             self.action_label.setText("Остановлен пользователем")

@@ -1,3 +1,5 @@
+import time
+
 import pytest
 from PySide6.QtWidgets import QApplication
 
@@ -102,3 +104,52 @@ class TestAgentMonitorPanel:
         panel.handle_event({"type": "row", "idx": 1, "total": 2, "position": "Товар X"})
         panel.handle_event({"type": "done", "total": 2, "found": 1, "errors": 0})
         assert "Позиция: —" in panel.position_label.text()
+
+    def test_timer_starts_on_row_event(self, qapp):
+        panel = AgentMonitorPanel()
+        panel.handle_event({"type": "row", "idx": 1, "total": 3, "position": "Кабель"})
+        assert panel._timer.isActive()
+        assert panel._row_start_time is not None
+
+    def test_timer_stops_on_row_done(self, qapp):
+        panel = AgentMonitorPanel()
+        panel.handle_event({"type": "row", "idx": 1, "total": 3, "position": "Кабель"})
+        assert panel._timer.isActive()
+        panel.handle_event({"type": "row_done", "idx": 1, "total": 3})
+        assert not panel._timer.isActive()
+        assert panel._row_start_time is None
+
+    def test_timer_stops_on_done(self, qapp):
+        panel = AgentMonitorPanel()
+        panel.handle_event({"type": "row", "idx": 1, "total": 2, "position": "X"})
+        panel.handle_event({"type": "done", "total": 2, "found": 1, "errors": 0})
+        assert not panel._timer.isActive()
+
+    def test_timer_stops_on_stop(self, qapp):
+        panel = AgentMonitorPanel()
+        panel.handle_event({"type": "row", "idx": 1, "total": 2, "position": "X"})
+        panel.handle_event({"type": "stop"})
+        assert not panel._timer.isActive()
+
+    def test_elapsed_time_appears_in_position_label(self, qapp):
+        panel = AgentMonitorPanel()
+        panel._row_start_time = time.time() - 37
+        panel._position_text = "1/3: Труба"
+        panel._tick_timer()
+        assert "[37с]" in panel.position_label.text()
+        assert "Труба" in panel.position_label.text()
+
+    def test_elapsed_time_minutes_format(self, qapp):
+        panel = AgentMonitorPanel()
+        panel._row_start_time = time.time() - 125
+        panel._position_text = "2/5: Фитинг"
+        panel._tick_timer()
+        assert "[2м05с]" in panel.position_label.text()
+
+    def test_timer_stops_on_reset(self, qapp):
+        panel = AgentMonitorPanel()
+        panel.handle_event({"type": "row", "idx": 1, "total": 3, "position": "X"})
+        assert panel._timer.isActive()
+        panel.reset()
+        assert not panel._timer.isActive()
+        assert panel._row_start_time is None
