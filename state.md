@@ -4809,3 +4809,36 @@ SemCache — всего 18.
 - Урок: НЕ менять поведение работающего агента без прогона против реальных данных; не менять конфиг/модель без запроса.
 - Ветки refactor/v3-phase1/2/3 оставлены для истории, НЕ используются.
 
+
+## 2026-08-30 - Исправление механизма логирования (audit → session linkage)
+
+### Проблема
+Две системы логов полностью разомкнуты:
+- **Audit-логи** (`data/audit/session_{uuid}.jsonl`) — UUID случайный, нигде не сохраняется.
+  35 файлов-сирот, невозможно привязать к сессии.
+- **runtime.log** — `mode="w"` стирает лог при каждом запуске.
+- **UI-логи** — сохраняются 200, восстанавливаются 50 (75% контекста теряется).
+- **Мёртвый код** — `log_llm_request()`, `log_browser_action()` определены, но не вызываются.
+
+### Решение
+
+| Файл | Изменение |
+|------|-----------|
+| `src/audit_logger.py` | Удалены `log_llm_request`, `log_browser_action`, `_read_events`, `_calc_avg_duration`.
+Упрощён `get_session_summary` (только extraction/found). |
+| `src/mcp_agent_runner.py` | `self.audit_session_id = audit.session_id` — UUID доступен через runner. |
+| `main.py` | `RotatingFileHandler` (5MB, 3 бэкапа, mode='a') вместо `FileHandler(mode='w')`.
+Сохранение `audit_session_id` в session JSON.
+Восстановление ВСЕХ UI-логов (не только 50). |
+| `tests/test_audit_logger.py` | Обновлены тесты под новый API (6/6 pass). |
+
+### Связь audit ↔ session
+```
+session JSON:
+  audit_session_id: "06acea47"
+data/audit/session_06acea47.jsonl  ← привязка по UUID
+```
+
+### Тесты
+**1107 passed, 8 failed (pre-existing PDF), 2 skipped.**
+

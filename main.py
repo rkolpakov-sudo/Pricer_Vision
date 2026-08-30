@@ -53,7 +53,10 @@ logging.getLogger().addHandler(UiLogHandler())
 
 _log_dir = Path(__file__).parent / "logs"
 _log_dir.mkdir(parents=True, exist_ok=True)
-_file_handler = logging.FileHandler(_log_dir / "runtime.log", encoding="utf-8", mode="w")
+_file_handler = logging.handlers.RotatingFileHandler(
+    _log_dir / "runtime.log", encoding="utf-8",
+    maxBytes=5*1024*1024, backupCount=3, delay=True
+)
 _file_handler.setLevel(logging.DEBUG)
 _file_handler.setFormatter(logging.Formatter('%(asctime)s [%(levelname)s] [%(name)s] %(message)s'))
 logging.getLogger().addHandler(_file_handler)
@@ -483,6 +486,7 @@ class MainWindow(QMainWindow):
         self._restored_results = []
         self._restored_row_indices = set()
         self._restored_caches = None
+        self._restored_audit_id = ""
         self._session_log_entries = []
         from src.approach_relevance import load_rules
         load_rules()
@@ -550,6 +554,11 @@ class MainWindow(QMainWindow):
             caches = runner._restored_caches
         elif self._restored_caches:
             caches = self._restored_caches
+        audit_id = ""
+        if runner and hasattr(runner, 'audit_session_id'):
+            audit_id = runner.audit_session_id
+        elif self._restored_audit_id:
+            audit_id = self._restored_audit_id
         return {
             "spec_path": self._spec_path or "",
             "total_rows": self._total_rows,
@@ -566,6 +575,7 @@ class MainWindow(QMainWindow):
             },
             "metrics": {},
             "log_entries": self._session_log_entries[-200:],
+            "audit_session_id": audit_id,
         }
 
     def _check_last_session(self):
@@ -673,8 +683,10 @@ class MainWindow(QMainWindow):
             "session_facts": state.get("session_facts", {}),
         }
 
+        self._restored_audit_id = state.get("audit_session_id", "")
+
         self._session_log_entries = state.get("log_entries", [])
-        for entry in self._session_log_entries[-50:]:
+        for entry in self._session_log_entries:
             self.add_log(entry.get("level", "INFO"), entry.get("phase", "session"),
                          entry.get("msg", ""))
 
@@ -1030,6 +1042,7 @@ class MainWindow(QMainWindow):
             self._restored_results = []
             self._restored_row_indices = set()
             self._restored_caches = None
+            self._restored_audit_id = ""
             self._session_log_entries = []
             self.start_btn.setEnabled(True)
             self._show_preview()

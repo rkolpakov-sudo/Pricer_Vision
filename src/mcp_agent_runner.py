@@ -169,6 +169,7 @@ class MCPAgentRunner(QThread):
         engine.build()
         mm = MemoryManager(engine)
         audit = AuditLogger()
+        self.audit_session_id = audit.session_id
         semantic_cache = SemanticCache()
         learning_loop = LearningLoop(engine, mm)
 
