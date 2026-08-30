@@ -302,10 +302,12 @@ class MCPAgentRunner(QThread):
                             result["excel_row"] = getattr(spec, "row", 0) or (original_index.get(id(spec), i) + 2)
                             result["restored"] = True
                             self.results.append(result)
+                            row_idx = original_index.get(id(spec), i)
                             self._processed += 1
                             self._found += 1
                             self.metrics_signal.emit(self._current_metrics())
-                            # Не emitting row_done_signal — строка уже в таблице
+                            self.monitor_signal.emit({"type": "row_done", "idx": i + 1, "total": total})
+                            self.row_done_signal.emit(row_idx, result)
                             logger.info("Row %d: restored from session — '%s' = %s",
                                         i + 1, spec_text[:40], prev.get("price"))
                             break

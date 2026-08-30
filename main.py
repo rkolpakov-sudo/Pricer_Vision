@@ -1259,9 +1259,7 @@ class MainWindow(QMainWindow):
 
         self.config = self._load_config()
         self._processing_active = True
-        has_restored = bool(self._original_restored_results)
-        if not has_restored:
-            self.results_table.setRowCount(0)
+        self.results_table.setRowCount(0)
         self._restored_results = []
         self.log_browser.clear()
         self.progress_bar.setValue(0)
