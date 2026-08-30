@@ -659,9 +659,7 @@ class MainWindow(QMainWindow):
         for result in self._restored_results:
             excel_row = result.get("excel_row", 0)
             if excel_row >= 2:
-                idx = excel_row - 2
-                self._restored_row_indices.add(idx)
-                self._on_row_done(idx, result)
+                self._restored_row_indices.add(excel_row - 2)
 
         flags = state.get("run_flags", {})
         self.reuse_price_cb.setChecked(flags.get("reuse_price", True))
@@ -680,10 +678,33 @@ class MainWindow(QMainWindow):
             self.add_log(entry.get("level", "INFO"), entry.get("phase", "session"),
                          entry.get("msg", ""))
 
+        # Заполнение таблицы результатов ОТЛОЖЕННО (по одной строке на итерацию
+        # event loop). При старте окно ещё в процессе раскладки — синхронный
+        # _on_row_done → results_table.scrollToBottom() в QTimer-колбэке вызывает
+        # re-entrancy deadlock (UI «не отвечает»).
+        _pending = [r for r in self._restored_results if (r.get("excel_row") or 0) >= 2]
+
+        def _populate():
+            if not _pending:
+                self._finish_restore()
+                return
+            result = _pending.pop(0)
+            try:
+                self._on_row_done((result.get("excel_row") or 0) - 2, result)
+            except Exception as e:
+                logger.error("Session restore row failed: %s", e, exc_info=True)
+            QTimer.singleShot(0, _populate)
+
+        QTimer.singleShot(0, _populate)
+
+    def _finish_restore(self):
         self.add_log("INFO", "session",
                      f"Сессия восстановлена: {len(self._restored_results)} результатов, "
                      f"{len(self._restored_row_indices)} строк обработано")
-        self.toast_manager.success(f"Сессия восстановлена ({len(self._restored_results)} результатов)")
+        try:
+            self.toast_manager.success(f"Сессия восстановлена ({len(self._restored_results)} результатов)")
+        except Exception:
+            pass
 
     def _load_config(self):
         config_path = Path(__file__).parent / "config" / "settings.yaml"
