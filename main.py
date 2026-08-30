@@ -1579,8 +1579,19 @@ class MainWindow(QMainWindow):
         errs = spec_result.get("error_count", 0)
 
         if hasattr(self, '_runner') and self._runner and self._runner.results:
-            self._restored_results = self._runner.results
-            self._original_restored_results = list(self._runner.results)
+            _old_by_spec = {r.get("spec_text"): r for r in self._restored_results
+                           if r.get("spec_text") and r.get("price") is not None}
+            _new_results = []
+            for r in self._runner.results:
+                st = r.get("spec_text", "")
+                if r.get("price") is not None:
+                    _new_results.append(r)
+                elif st in _old_by_spec:
+                    _new_results.append(_old_by_spec[st])
+                else:
+                    _new_results.append(r)
+            self._restored_results = _new_results
+            self._original_restored_results = list(_new_results)
 
         self.add_log("INFO", "complete",
             f"Готово: {found}/{total} найдено, {errs} ошибок")

@@ -246,9 +246,10 @@ class MCPAgentRunner(QThread):
                 self._last_visited_site = site_id
 
             _restore_specs = {r.get("spec_text") for r in self._restored_results if r.get("price") is not None}
-            logger.info("Runner: %d specs to process, %d restored with price (%s)",
+            _all_restore_specs = {r.get("spec_text") for r in self._restored_results}
+            logger.info("Runner: %d specs to process, %d restored (%d with price, %d without)",
                         len(ordered), len(self._restored_results),
-                        ", ".join(sorted(_restore_specs)[:3]) if _restore_specs else "none")
+                        len(_restore_specs), len(_all_restore_specs) - len(_restore_specs))
 
             for i, spec in enumerate(ordered):
                 if self._restart_bridge.is_set():
@@ -296,6 +297,7 @@ class MCPAgentRunner(QThread):
                     continue
                 # Товар уже найден в предыдущей сессии — восстанавливаем результат без поиска
                 if self._restored_results:
+                    _matched = False
                     for prev in self._restored_results:
                         if prev.get("spec_text") == spec_text and prev.get("price") is not None:
                             result = dict(prev)
@@ -310,7 +312,12 @@ class MCPAgentRunner(QThread):
                             self.row_done_signal.emit(row_idx, result)
                             logger.info("Row %d: restored from session — '%s' = %s",
                                         i + 1, spec_text[:40], prev.get("price"))
+                            _matched = True
                             break
+                    if not _matched and self._restored_results:
+                        _restore_texts = [r.get("spec_text", "")[:30] for r in self._restored_results[:3]]
+                        logger.debug("Row %d: NOT restored — spec_text=%r not in %s",
+                                     i + 1, spec_text[:40], _restore_texts)
                     else:
                         result = None  # not found in restored — will process normally
                     if result is not None:
