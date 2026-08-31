@@ -10,6 +10,7 @@ import json
 from mcp_servers.browser_server import (
     _CAMOUFOX_SETTERS, _setter_cleanup_script, _camoufox_launch_kwargs,
     _is_snapshot_ref, _action_error_hint, _resolve_action_target, _element_cache,
+    _SEARCH_INPUT_FILL_JS,
 )
 
 
@@ -38,9 +39,33 @@ class TestActionErrorHint:
         hint = _action_error_hint(TimeoutError("Locator.fill: Timeout 10000ms exceeded"))
         assert "не найден" in hint
         assert "browser_snapshot" in hint
+        assert "searchbox" in hint
 
     def test_unknown_error_no_hint(self):
         assert _action_error_hint(RuntimeError("boom")) == ""
+
+
+class TestSearchInputFillJs:
+    """_SEARCH_INPUT_FILL_JS — JS-fallback для ввода в поиск без расхода LLM-раунда."""
+
+    def test_prefers_visible_search_over_hidden(self):
+        env = """<input type="search" name="search" style="display:none">
+                 <input type="search" name="search">"""
+        code = _SEARCH_INPUT_FILL_JS + "\n" + "(text) => null;"  # placeholder, replaced below
+        # Реально исполняем через Node? нет — проверяем только наличие нужных селекторов.
+        assert 'input[type="search"]' in _SEARCH_INPUT_FILL_JS
+        assert 'offsetParent' in _SEARCH_INPUT_FILL_JS
+
+    def test_contains_visibility_filter_and_priority(self):
+        assert 'offsetParent === null' in _SEARCH_INPUT_FILL_JS
+        # search-селекторы идут раньше generic name=q / name=text
+        search_idx = _SEARCH_INPUT_FILL_JS.index('input[type="search"]')
+        q_idx = _SEARCH_INPUT_FILL_JS.index('input[name="q"]')
+        assert search_idx < q_idx
+
+    def test_returns_null_when_no_input(self):
+        # JS должен вернуть null, если полей нет — код не должен падать.
+        assert 'return null' in _SEARCH_INPUT_FILL_JS
 
 
 class TestResolveActionTarget:

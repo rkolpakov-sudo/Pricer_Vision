@@ -1335,8 +1335,7 @@ class MainWindow(QMainWindow):
         self.metrics_panel.update_metrics(stats)
 
     def _on_row_done(self, idx, result):
-        if not result.get("restored"):
-            self._restored_results.append(result)
+        self._restored_results.append(result)
         row = self.results_table.rowCount()
         self.results_table.insertRow(row)
 

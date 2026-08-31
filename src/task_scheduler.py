@@ -69,7 +69,7 @@ class TaskScheduler:
         def _site_has_relevant_approach(site_id):
             try:
                 for a in self.mm.get_site_approaches(product_type, site_id):
-                    if approach_relevant(a, spec_text):
+                    if approach_relevant(a, spec_text, product_type=product_type):
                         return True
             except Exception:
                 pass

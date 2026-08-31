@@ -3,6 +3,8 @@ import logging
 from datetime import datetime, timedelta
 from urllib.parse import urlparse
 
+from src.mcp_bridge import _is_hash_ref
+
 logger = logging.getLogger("pricer.memory")
 
 
@@ -23,8 +25,9 @@ class MemoryManager:
 
     def deduplicate_approaches(self, product_type: str, site: str, pattern: list) -> list[dict]:
         existing = self._engine.get_approaches(product_type, site)
-        sig = json.dumps(pattern, sort_keys=True, ensure_ascii=False)
-        return [a for a in existing if json.dumps(a.get("pattern", []), sort_keys=True, ensure_ascii=False) == sig]
+        if existing:
+            return [max(existing, key=lambda a: a.get("success_count", 0))]
+        return []
 
     def get_approaches_by_site(self, site: str) -> list[dict]:
         return self._engine.get_approaches_by_site(site)
@@ -45,19 +48,33 @@ class MemoryManager:
 
     @staticmethod
     def clean_steps(steps: list[dict]) -> list[dict]:
-        """Filter out wasted steps before saving (screenshots, redundant snapshots)."""
+        """Clean approach steps for replay: remove hash refs, hallucinated tools, and trim length."""
         if not steps:
             return steps
         cleaned = []
-        prev_action = None
+        seen_urls = set()
         for s in steps:
             action = s.get("action", "")
-            if action in ("browser_take_screenshot",):
+            # Skip screenshot and hallucinated tools
+            if action in ("browser_take_screenshot", "browser_find"):
                 continue
-            if action in ("browser_snapshot", "snapshot") and prev_action in ("browser_snapshot", "snapshot", "browser_take_screenshot"):
+            # Skip duplicate consecutive snapshots
+            if action in ("browser_snapshot", "snapshot") and cleaned and cleaned[-1].get("action") in ("browser_snapshot", "snapshot"):
                 continue
+            # Remove hash refs — they're ephemeral per session
+            target = s.get("target", "")
+            if _is_hash_ref(target):
+                s = {k: v for k, v in s.items() if k != "target"}
+            # Deduplicate navigates to same URL
+            if action == "browser_navigate":
+                url = s.get("url", "")
+                if url in seen_urls:
+                    continue
+                seen_urls.add(url)
             cleaned.append(s)
-            prev_action = action
+        # Cap approach length — longer approaches are just failed attempts
+        if len(cleaned) > 8:
+            cleaned = cleaned[:8]
         return cleaned
 
     @staticmethod
@@ -122,9 +139,13 @@ class MemoryManager:
                 ps["param"] = step["param_slot"]
             pattern.append(ps)
 
-        dupes = self.deduplicate_approaches(product_type, site, pattern)
-        if dupes:
-            existing = dupes[0]
+        # Проверяем, есть ли подход с ИДЕНТИЧНЫМ паттерном (та же стратегия).
+        # Старая логика: deduplicate_approaches возвращал ЛЮБОЙ подход для пары (pt, site)
+        # и перезаписывала его → в graph хранился только 1 подход на пару.
+        # Новая логика: перезаписываем ТОЛЬКО при полном совпадении паттерна
+        # (те же действия в том же порядке) —allows different strategies to coexist.
+        existing = self._find_matching_approach(product_type, site, pattern)
+        if existing:
             existing["concrete"] = concrete_steps
             existing["selectors_cache"] = selectors_cache or {}
             existing["param_slots"] = param_slots or {}
@@ -144,6 +165,26 @@ class MemoryManager:
             "search_query": search_query,
             "notes": notes,
         })
+
+    def _find_matching_approach(self, product_type: str, site: str,
+                                 pattern: list) -> dict | None:
+        """Найти существующий подход с идентичным паттерном (для обновления).
+        Возвращает None, если подхода с таким паттерном нет — тогда создаётся новый."""
+        existing = self._engine.get_approaches(product_type, site)
+        if not existing:
+            return None
+        for appr in existing:
+            old_pattern = appr.get("pattern", [])
+            if len(old_pattern) != len(pattern):
+                continue
+            match = all(
+                old_p.get("action") == p.get("action")
+                and old_p.get("intent") == p.get("intent")
+                for old_p, p in zip(old_pattern, pattern)
+            )
+            if match:
+                return appr
+        return None
 
     def record_success(self, approach_id: int):
         self._engine.update_approach_success(approach_id)

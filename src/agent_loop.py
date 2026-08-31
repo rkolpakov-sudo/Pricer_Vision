@@ -196,6 +196,7 @@ SYSTEM_PROMPT = """Ты — опытный пользователь с дост�
 4. После поиска на сайте: кликни на карточку товара → откроется страница с ценой. Если цены нет в карточке — ищи на странице через browser_evaluate.
 5. Если точного совпадения нет — сохрани лучший найденный АНАЛОГ через save_confirmed_price с confidence 0.3-0.5 и requires_review=True, НО только если это товар ТОГО ЖЕ ТИПА (кран для крана, клапан для клапана, воздуховод для воздуховода). НЕ подставляй товар другого типа даже как аналог. Укажи в reason расхождение в названии. Можно найти лучшую цену на другом сайте — она перезапишет эту. НЕ трать раунды на поиск более точного совпадения на том же сайте.
 6. После нахождения цены: save_confirmed_price + save_approach.
+6. После нахождения цены: save_confirmed_price + save_approach.
 7. Если цена не найдена — верни null, не выдумывай.
 8. Если get_confirmed_prices вернул цену с confidence >= 0.9 — используй её как финальную, НЕ проверяй в браузере. Сразу вызови save_confirmed_price.
 9. Если ты сделал >10 шагов на одном сайте без результата — принудительно переключись на другой сайт из списка.
@@ -752,9 +753,36 @@ async def process_row(
             _nav_hint = ""
 
             if tool_name in GRAPH_TOOL_NAMES:
-                result = _execute_graph_tool(tool_name, tool_args, graph_engine, memory_manager, spec_text=search_text)
+                result = _execute_graph_tool(tool_name, tool_args, graph_engine, memory_manager,
+                                             spec_text=search_text, classified_product_type=product_type)
             elif tool_name in ("browser_navigate", "navigate"):
                 new_site = tool_args.get("url", "")
+                # Жёсткий белый список сайтов: запрещаем уходить на домены вне
+                # product_sites для типа товара (регрессия: агент уходил на ozon.ru,
+                # propribory.ru и т.п., которых нет в графе). Разрешены только:
+                # сайты из белого списка типа + поисковики (yandex/google).
+                # Исключение — переход С ПОИСКОВИКА на найденный в выдаче магазин
+                # (легитимный flow правила 12 «найти новый сайт через yandex»).
+                new_domain = _extract_domain(new_site)
+                current_domain = _extract_domain(current_site)
+                leaving_search_engine = bool(current_domain and current_domain in _SEARCH_ENGINE_DOMAINS)
+                if new_domain and new_domain not in _SEARCH_ENGINE_DOMAINS:
+                    allowed_site_ids = [s.get("id", "") for s in sites] if sites else []
+                    # Если белый список пуст — не блокируем (агент ищет через поисковик).
+                    if (allowed_site_ids and not _is_site_allowed(new_site, allowed_site_ids)
+                            and not leaving_search_engine):
+                        logger.warning("🚫 Navigate blocked: domain %s not in whitelist for %s",
+                                       new_domain, product_type)
+                        _wanted = ", ".join(sorted({_domain_of_site(a) for a in allowed_site_ids}))
+                        messages.append({
+                            "role": "tool",
+                            "tool_call_id": tc.get("id", ""),
+                            "content": (f"error: сайт {new_domain} НЕ в белом списке для типа «{product_type}». "
+                                        f"Доступные сайты: {_wanted}. Если нужно найти новый сайт — "
+                                        "используй yandex.ru как поисковик и переходи на карточку магазина из "
+                                        "результатов, ИЛИ добавь сайт через save_discovered_site.")
+                        })
+                        continue
                 # Жёсткий гейт: если на текущем сайте УЖЕ найдена цена-кандидат
                 # (товар выявлен в результатах/карточке), уходить на ДРУГОЙ домен запрещено,
                 # пока цена не сохранена через save_confirmed_price. Это защита от потери
@@ -1431,7 +1459,8 @@ def _build_context(spec_text, product_type, approaches, confirmed_prices, sites,
     # фильтр релевантности: подходы, обученные на ДРУГИХ товарах того же типа
     # (например регуляторы скорости для воздуховодов), не показываются
     extra = (spec_meta or {}).get("article", "")
-    approaches = [a for a in (approaches or []) if approach_relevant(a, spec_text, extra)]
+    approaches = [a for a in (approaches or []) if approach_relevant(a, spec_text, extra,
+                                                                     product_type=product_type)]
     parts = [f"ТОВАР ДЛЯ ПОИСКА: {spec_text}"]
     # Ключевые токены (ОТОБРАЖЕНИЕ, не скриптовый запрос): бренд/тип/размер/Ду —
     # дифференциаторы, которые LLM не должен терять при составлении запроса.
@@ -1599,7 +1628,8 @@ def _resolve_product_type(engine, mm, product_type: str, spec_text: str = "") ->
     return product_type
 
 
-def _execute_graph_tool(name: str, args: dict, engine, mm, spec_text: str = "") -> str:
+def _execute_graph_tool(name: str, args: dict, engine, mm, spec_text: str = "",
+                        classified_product_type: str = "") -> str:
     try:
         if name == "get_approaches":
             pt = args.get("product_type", "")
@@ -1611,6 +1641,13 @@ def _execute_graph_tool(name: str, args: dict, engine, mm, spec_text: str = "") 
                 if resolved and resolved != pt:
                     logger.info("get_approaches: resolved product_type %r -> %r", pt, resolved)
                     pt = resolved
+            # Защита от обхода белого списка: ЛЛМ вызывает get_approaches
+            # с другим product_type (напр. plumbing_heating_pipes вместо
+            # tube_galvanized), получает подходы для чужого типа и идёт
+            # на неподходящий сайт.
+            if classified_product_type and pt and pt != classified_product_type:
+                logger.info("get_approaches: rejected type %r (classified=%r)", pt, classified_product_type)
+                return f"Подходы для типа «{pt}» не подходят — товар относится к «{classified_product_type}»"
             if not pt and site:
                 approaches = mm.get_approaches_by_site(site)
             elif pt and site:
@@ -1620,7 +1657,8 @@ def _execute_graph_tool(name: str, args: dict, engine, mm, spec_text: str = "") 
             if not approaches:
                 return "Нет сохранённых подходов"
             # релевантность текущему товару: чужие подходы того же типа не показываем
-            approaches = [a for a in approaches if approach_relevant(a, spec_text)]
+            approaches = [a for a in approaches if approach_relevant(a, spec_text,
+                                                                    product_type=classified_product_type)]
             if not approaches:
                 return "Нет подходов, релевантных текущему товару"
             lines = [f"Подходов: {len(approaches)}"]
@@ -1694,6 +1732,10 @@ def _execute_graph_tool(name: str, args: dict, engine, mm, spec_text: str = "") 
 
         elif name == "search_sites":
             pt = args.get("product_type", "")
+            # Защита от обхода белого списка: не показываем сайты для чужого типа.
+            if classified_product_type and pt and pt != classified_product_type:
+                logger.info("search_sites: rejected type %r (classified=%r)", pt, classified_product_type)
+                return f"Сайты для типа «{pt}» не подходят — товар относится к «{classified_product_type}»"
             sites = mm.get_sites(pt)
             if not sites and pt and pt != UNKNOWN_PT:
                 # Агент передал выдуманный/человеческий тип — резолвим по спецификации.
@@ -1886,6 +1928,28 @@ def _extract_domain(url: str) -> str:
         return host.removeprefix("www.") if host else ""
     except Exception:
         return url.replace("https://", "").replace("http://", "").replace("www.", "").split("/")[0]
+
+
+# Поисковики — единственные домены вне белого списка, куда агент может ходить
+# (правило 12: yandex для поиска сайта магазина). Google тоже допустим.
+_SEARCH_ENGINE_DOMAINS = {"yandex.ru", "ya.ru", "google.com", "google.ru"}
+
+
+def _domain_of_site(site_id: str) -> str:
+    """site_id в графе может быть 'santech.ru' или 'https://proconsim.ru/' —
+    нормализуем к домену для сравнения с URL."""
+    return _extract_domain(site_id)
+
+
+def _is_site_allowed(site_id: str, allowed_ids: list[str]) -> bool:
+    """True, если site_id входит в белый список (по домену, без www/протокола)."""
+    target = _domain_of_site(site_id)
+    if not target:
+        return False
+    for a in (allowed_ids or []):
+        if _domain_of_site(a) == target:
+            return True
+    return False
 
 
 def _is_product_card_url(url: str) -> bool:

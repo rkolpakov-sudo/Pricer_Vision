@@ -25,13 +25,21 @@ STUDY_PROMPT = """Ты — аналитик по настройке поиска
 Тебе дали URL товара на КОНКРЕТНОМ САЙТЕ. Твоя задача — создать ИНФРАСТРУКТУРУ, чтобы система находила ЛЮБОЙ товар этого типа на этом сайте.
 
 ПЛАН РАБОТЫ:
-1. Открой URL → найди цену → save_confirmed_price.
-2. Изучи сайт: как работает поиск, где находится цена в карточке, как выглядит каталог.
-3. Сохрани 3+ подхода через save_approach (с param_slots).
-4. Сохрани 2+ хинта через save_hint.
-5. Сохрани концепт (save_concept): тип товара SOLD_AT site.
+1. Открой URL → изучи карточку товара (цену, название, атрибуты). НЕ сохраняй цену сразу.
+2. Определи поисковый запрос: ключевые слова из названия товара (без артикула/модели).
+3. Найди товар через ПОИСК САЙТА: введи запрос в поисковую строку или перейди по URL поиска. Убедись, что товар нашёлся в результатах.
+4. Если поиск не сработал — попробуй через каталог (категории, фильтры).
+5. ТЕПЕРЬ сохрани цену через save_confirmed_price.
+6. Сохрани 3+ РАЗЛИЧНЫХ подхода через save_approach (с param_slots):
+   - Подход 1: прямой URL поиска (/search/?what={query})
+   - Подход 2: обход категории с пагинацией
+   - Подход 3: фильтры/tag-страницы
+   Каждый подход ДОЛЖЕН отличаться по strategy/method — не дублируй одни и те же шаги.
+7. Сохрани 2+ хинта через save_hint (селекторы, структура страниц, нюансы поиска).
+8. Сохрани концепт (save_concept): тип товара SOLD_AT site.
 
-ВАЖНО: НЕ переходи на другие сайты. Работай ТОЛЬКО с сайтом из URL."""
+ВАЖНО: НЕ переходи на другие сайты. Работай ТОЛЬКО с сайтом из URL.
+КЛЮЧЕВОЕ: Обязательно протестируй ПОИСК на сайте — это главная цель обучения."""
 
 GRAPH_TOOL_DEFS = [
     {
@@ -560,9 +568,31 @@ class StudyRunner(QThread):
     def _proposal_key(self, proposal: dict) -> str:
         site = proposal.get("site", "")
         pt = proposal.get("product_type", "")
+        method = proposal.get("method", "")
+        # Ключ = site + type + method + уникальная часть (URL/path/query).
+        # Старый ключ по first_3_actions был слишком грубый: navigate→snapshot→evaluate
+        # — одинаковый для ВСЕХ подходов → все считались дубликатами.
         steps = proposal.get("concrete_steps", [])
-        first_actions = [s.get("action", "") for s in steps[:3] if s.get("action")]
-        return f"{site}|{pt}|{','.join(first_actions)}"
+        sig_parts: list[str] = []
+        for s in steps:
+            action = s.get("action", "")
+            if action == "browser_navigate":
+                url = s.get("url", "")
+                # Извлекаем path/query — уникальную часть URL
+                try:
+                    from urllib.parse import urlparse
+                    p = urlparse(url)
+                    sig_parts.append(p.path.rstrip("/") or "/")
+                    if p.query:
+                        sig_parts.append(p.query[:60])
+                except Exception:
+                    sig_parts.append(url[-60:])
+                break  # только первый navigate — он определяет стратегию
+        search_q = proposal.get("search_query", "")
+        if search_q:
+            sig_parts.append(search_q[:40])
+        sig = "|".join(sig_parts) if sig_parts else method
+        return f"{site}|{pt}|{method}|{sig}"
 
     async def _exec_graph_tool(self, name: str, args: dict, engine, mm, site_fallback: str, study_steps: list[dict] | None = None) -> str:
         try:

@@ -325,23 +325,46 @@ class GraphEngine:
                 "INSERT OR IGNORE INTO sites (id, name, base_url) VALUES (?, ?, ?)",
                 (data["site_id"], data["site_id"], f"https://{data['site_id']}")
             )
-            cur = self._conn.execute(
-                """INSERT INTO approaches
-                (product_type_id, site_id, pattern, concrete, selectors_cache,
-                param_slots, method, search_query, notes)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                (
-                    data["product_type_id"], data["site_id"],
-                    json.dumps(data.get("pattern", []), ensure_ascii=False),
-                    json.dumps(data.get("concrete", []), ensure_ascii=False),
-                    json.dumps(data.get("selectors_cache", {}), ensure_ascii=False),
-                    json.dumps(data.get("param_slots", {}), ensure_ascii=False),
-                    data.get("method", ""), data.get("search_query", ""),
-                    data.get("notes", ""),
+
+            existing_id = data.get("id")
+
+            if existing_id:
+                self._conn.execute(
+                    """UPDATE approaches SET
+                    pattern=?, concrete=?, selectors_cache=?, param_slots=?,
+                    method=?, search_query=?, notes=?
+                    WHERE id=?""",
+                    (
+                        json.dumps(data.get("pattern", []), ensure_ascii=False),
+                        json.dumps(data.get("concrete", []), ensure_ascii=False),
+                        json.dumps(data.get("selectors_cache", {}), ensure_ascii=False),
+                        json.dumps(data.get("param_slots", {}), ensure_ascii=False),
+                        data.get("method", ""), data.get("search_query", ""),
+                        data.get("notes", ""),
+                        existing_id,
+                    )
                 )
-            )
-            self._conn.commit()
-            aid = cur.lastrowid
+                self._conn.commit()
+                aid = existing_id
+            else:
+                cur = self._conn.execute(
+                    """INSERT INTO approaches
+                    (product_type_id, site_id, pattern, concrete, selectors_cache,
+                    param_slots, method, search_query, notes)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    (
+                        data["product_type_id"], data["site_id"],
+                        json.dumps(data.get("pattern", []), ensure_ascii=False),
+                        json.dumps(data.get("concrete", []), ensure_ascii=False),
+                        json.dumps(data.get("selectors_cache", {}), ensure_ascii=False),
+                        json.dumps(data.get("param_slots", {}), ensure_ascii=False),
+                        data.get("method", ""), data.get("search_query", ""),
+                        data.get("notes", ""),
+                    )
+                )
+                self._conn.commit()
+                aid = cur.lastrowid
+
             entry = {
                 "id": aid,
                 "product_type_id": data["product_type_id"],
@@ -352,21 +375,27 @@ class GraphEngine:
                 "param_slots": data.get("param_slots", {}),
                 "method": data.get("method", ""),
                 "search_query": data.get("search_query", ""),
-                "success_count": 1,
-                "failures_count": 0,
-                "consecutive_failures": 0,
-                "cooldown_until": None,
-                "is_deprecated": 0,
-                "last_success_date": None,
-                "last_failure_date": None,
+                "success_count": data.get("success_count", 1),
+                "failures_count": data.get("failures_count", 0),
+                "consecutive_failures": data.get("consecutive_failures", 0),
+                "cooldown_until": data.get("cooldown_until"),
+                "is_deprecated": data.get("is_deprecated", 0),
+                "last_success_date": data.get("last_success_date"),
+                "last_failure_date": data.get("last_failure_date"),
                 "notes": data.get("notes", ""),
-                "created_at": datetime.now().isoformat(),
+                "created_at": data.get("created_at", datetime.now().isoformat()),
             }
             key = (entry["product_type_id"], entry["site_id"])
-            self._approaches_index.setdefault(key, []).append(entry)
-            self._approaches_by_product.setdefault(entry["product_type_id"], []).append(entry)
-            self._approaches_by_site.setdefault(entry["site_id"], []).append(entry)
-            self._approaches_by_id[aid] = entry
+
+            if existing_id:
+                old = self._approaches_by_id.get(aid)
+                if old:
+                    self._approaches_by_id[aid] = entry
+            else:
+                self._approaches_index.setdefault(key, []).append(entry)
+                self._approaches_by_product.setdefault(entry["product_type_id"], []).append(entry)
+                self._approaches_by_site.setdefault(entry["site_id"], []).append(entry)
+                self._approaches_by_id[aid] = entry
         return aid
 
     def update_approach_success(self, approach_id: int):
@@ -526,6 +555,20 @@ class GraphEngine:
                   priority: float = 0.5, expires_at: str | None = None) -> int:
         self.build()
         with self._lock:
+            existing = self._conn.execute(
+                "SELECT ROWID, priority FROM hints "
+                "WHERE product_type_id = ? AND site_id IS ? AND hint_text = ?",
+                (product_type, site, text)
+            ).fetchone()
+            if existing:
+                rid, old_pri = existing
+                if priority > old_pri:
+                    self._conn.execute(
+                        "UPDATE hints SET priority = ? WHERE ROWID = ?",
+                        (priority, rid)
+                    )
+                    self._conn.commit()
+                return rid
             cur = self._conn.execute(
                 "INSERT INTO hints (product_type_id, site_id, hint_text, priority, expires_at) "
                 "VALUES (?, ?, ?, ?, ?)",

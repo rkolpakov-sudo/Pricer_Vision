@@ -176,13 +176,18 @@ def tokenize(text: str) -> set:
     return {w for w in _WORD_RE.findall(text.lower()) if w not in _STOPWORDS_SET}
 
 
-def approach_relevant(approach: dict, spec_text: str, extra_text: str = "") -> bool:
+def approach_relevant(approach: dict, spec_text: str, extra_text: str = "",
+                      product_type: str = "") -> bool:
     """True, если подход имеет отношение к текущему товару.
 
     Сравниваются значимые слова сохранённого search_query подхода со словами
     товара (наименование + артикул). Если у подхода нет запроса или у товара
     нет значимых слов — True (не можем оценить, показываем).
+
+    Если product_type указан — подход должен относиться к тому же типу товара.
     """
+    if product_type and approach.get("product_type") and approach["product_type"] != product_type:
+        return False
     query = approach.get("search_query") or ""
     a_tokens = tokenize(query)
     s_tokens = tokenize((spec_text or "") + " " + (extra_text or ""))

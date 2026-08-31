@@ -277,6 +277,38 @@ def _ref_to_role_locator(ref: str):
 
 _SNAPSHOT_REF_RE = re.compile(r"^e\d+$")
 
+# Заполняет первый ВИДИМЫЙ поисковый input на странице (тип search / name*=search /
+# placeholder с «Поиск»/«Искать»). Возвращает описание найденного поля или null.
+_SEARCH_INPUT_FILL_JS = r"""
+(text) => {
+  const SELECTORS = [
+    'input[type="search"]',
+    'input[name*="search" i]',
+    'input[name="q"]',
+    'input[name="text"]',
+    'input[placeholder*="Поиск" i]',
+    'input[placeholder*="Искать" i]',
+    'input[aria-label*="Поиск" i]',
+  ];
+  const seen = new Set();
+  for (const sel of SELECTORS) {
+    for (const inp of document.querySelectorAll(sel)) {
+      const key = inp.name + '|' + inp.type + '|' + (inp.placeholder || '');
+      if (seen.has(key)) continue;
+      seen.add(key);
+      if (inp.offsetParent === null && !inp.matches(':focus')) continue;
+      const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
+      setter.call(inp, text);
+      inp.dispatchEvent(new Event('input', {bubbles: true}));
+      inp.dispatchEvent(new Event('change', {bubbles: true}));
+      const desc = [inp.type, inp.name, inp.placeholder].filter(Boolean).join(' ');
+      return desc || ('input ' + sel);
+    }
+  }
+  return null;
+}
+"""
+
 
 def _is_snapshot_ref(target: str) -> bool:
     """target вида e1234 — ref из accessibility-снапшота (не CSS-селектор)."""
@@ -299,8 +331,9 @@ def _action_error_hint(exc: Exception) -> str:
                 "(например 'button \"Найти\"' / 'textbox \"Поиск\"').")
     if "Timeout" in msg or "timeout" in msg:
         return ("элемент не найден/недоступен по указанному target в отведённое время. "
-                "Обнови browser_snapshot и используй CSS-селектор (например "
-                "'input[name=\"search\"]') или роль (например 'textbox \"Поиск\"').")
+                "Обнови browser_snapshot и используй CSS-селектор. Для поисковой строки "
+                "подойдёт 'input[type=\"search\"]' / 'input[name=\"search\"]' — НЕ роль "
+                "'textbox', т.к. поисковые поля имеют роль 'searchbox'.")
     return ""
 
 
@@ -549,7 +582,16 @@ class CamoufoxDriver(BaseDriver):
                 await page.locator(kind[1]).fill(text, timeout=10000)
             return "ok"
         except Exception as e:
+            # Fallback для поисковых полей: роль/CSS не совпали (см. hint ниже).
+            # Пытаемся заполнить первый ВИДИМЫЙ поисковый input через JS — это то же,
+            # что агент делает вручную browser_evaluate, но без расхода LLM-раунда.
             hint = _action_error_hint(e)
+            try:
+                filled = await page.evaluate(_SEARCH_INPUT_FILL_JS, text)
+                if filled:
+                    return f"ok (search-fallback: {filled})"
+            except Exception:
+                pass
             return f"error: type failed: {e}{(' — ' + hint) if hint else ''}"
 
     async def hover(self, page, target: str) -> str:

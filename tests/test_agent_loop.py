@@ -16,6 +16,7 @@ from src.agent_loop import (
     TEMP_EXPLORATION, TEMP_NAVIGATION, TEMP_EXTRACTION, TEMP_RECOVERY,
     _penalize_approaches, _deprecate_site_approaches, _inject_facts_block,
     _normalize_js, _query_lost_tokens, _keep_newest_exchanges,
+    _extract_domain, _domain_of_site, _is_site_allowed, _SEARCH_ENGINE_DOMAINS,
 )
 from src.session_facts import RowFacts, SessionFacts
 
@@ -423,6 +424,39 @@ class TestStandardReference:
 
     def test_empty_not_filtered(self):
         assert _is_standard_reference("") is False
+
+
+class TestSiteWhitelist:
+    """Жёсткий белый список сайтов: агент не должен уходить на домены вне
+    product_sites для типа товара (регрессия: ozon.ru / propribory.ru)."""
+
+    def test_extract_domain_strips_protocol_www(self):
+        assert _extract_domain("https://www.santech.ru/") == "santech.ru"
+        assert _extract_domain("santech.ru") == "santech.ru"
+        assert _extract_domain("https://proconsim.ru/") == "proconsim.ru"
+        assert _extract_domain("") == ""
+
+    def test_domain_of_site_normalizes_forms(self):
+        # site_id в графе бывает 'santech.ru' и 'https://proconsim.ru/'
+        assert _domain_of_site("santech.ru") == "santech.ru"
+        assert _domain_of_site("https://proconsim.ru/") == "proconsim.ru"
+
+    def test_is_site_allowed_matches_domain(self):
+        allowed = ["santech.ru", "https://proconsim.ru/", "dn.ru"]
+        assert _is_site_allowed("https://www.santech.ru/", allowed) is True
+        assert _is_site_allowed("https://dn.ru/nasosy", allowed) is True
+        assert _is_site_allowed("proconsim.ru", allowed) is True
+        assert _is_site_allowed("ozon.ru", allowed) is False
+        assert _is_site_allowed("yandex.ru", allowed) is False
+
+    def test_empty_allowed_list_rejects(self):
+        assert _is_site_allowed("santech.ru", []) is False
+
+    def test_search_engines_not_whitelisted_but_special(self):
+        # Поисковики обрабатываются отдельно (не через белый список)
+        assert "yandex.ru" in _SEARCH_ENGINE_DOMAINS
+        assert "google.com" in _SEARCH_ENGINE_DOMAINS
+        assert "ozon.ru" not in _SEARCH_ENGINE_DOMAINS
 
 
 class TestStuckTarget:

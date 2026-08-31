@@ -295,33 +295,39 @@ class MCPAgentRunner(QThread):
                     self.monitor_signal.emit({"type": "row_done", "idx": i + 1, "total": total})
                     self.row_done_signal.emit(row_idx, result)
                     continue
-                # Товар уже найден в предыдущей сессии — восстанавливаем результат без поиска
+                # Товар уже найден в предыдущей сессии — восстанавливаем результат без поиска.
+                # Матчинг ПО ПОЗИЦИИ (excel_row), не по spec_text: spec_text может отличаться
+                # (иначе форматирование кавычек/знаков) — exact-сравнение строк ломало
+                # восстановление (регрессия: «Кран трехходовой MV25-015» и «Бобышка» не
+                # восстанавливались из сессии, хотя цены в ней были).
                 if self._restored_results:
-                    _matched = False
+                    spec_row = getattr(spec, "row", 0)
+                    _match = None
                     for prev in self._restored_results:
-                        if prev.get("spec_text") == spec_text and prev.get("price") is not None:
-                            result = dict(prev)
-                            result["excel_row"] = getattr(spec, "row", 0) or (original_index.get(id(spec), i) + 2)
-                            result["restored"] = True
-                            self.results.append(result)
-                            row_idx = original_index.get(id(spec), i)
-                            self._processed += 1
-                            self._found += 1
-                            self.metrics_signal.emit(self._current_metrics())
-                            self.monitor_signal.emit({"type": "row_done", "idx": i + 1, "total": total})
-                            self.row_done_signal.emit(row_idx, result)
-                            logger.info("Row %d: restored from session — '%s' = %s",
-                                        i + 1, spec_text[:40], prev.get("price"))
-                            _matched = True
+                        if prev.get("price") is None:
+                            continue
+                        prev_row = prev.get("excel_row", 0)
+                        if spec_row and prev_row and prev_row == spec_row:
+                            _match = prev
                             break
-                    if not _matched and self._restored_results:
-                        _restore_texts = [r.get("spec_text", "")[:30] for r in self._restored_results[:3]]
-                        logger.debug("Row %d: NOT restored — spec_text=%r not in %s",
-                                     i + 1, spec_text[:40], _restore_texts)
-                    else:
-                        result = None  # not found in restored — will process normally
-                    if result is not None:
+                        if prev.get("spec_text") == spec_text:
+                            _match = prev
+                            break
+                    if _match is not None:
+                        result = dict(_match)
+                        result["excel_row"] = spec_row or (original_index.get(id(spec), i) + 2)
+                        result["restored"] = True
+                        self.results.append(result)
+                        row_idx = original_index.get(id(spec), i)
+                        self._processed += 1
+                        self._found += 1
+                        self.metrics_signal.emit(self._current_metrics())
+                        self.monitor_signal.emit({"type": "row_done", "idx": i + 1, "total": total})
+                        self.row_done_signal.emit(row_idx, result)
+                        logger.info("Row %d: restored from session — '%s' = %s",
+                                    i + 1, spec_text[:40], _match.get("price"))
                         continue
+                    result = None
                 # Товар уже дважды не найден в этой сессии — пропускаем без поиска
                 if negative_cache.is_blocked(spec_text):
                     result = {"spec_text": spec_text, "price": None, "confidence": 0.0,
