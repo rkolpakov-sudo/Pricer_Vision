@@ -1,5 +1,19 @@
 # State Log
 
+## 2026-09-02 — FIX: _last_shown_approach_id никогда не обновлялся (approach penalty = no-op)
+
+### Баг
+
+`_execute_graph_tool()` — module-level функция. Присваивание `_last_shown_approach_id = approaches[-1].get("id")` создавало локальную переменную, которая немедленно уничтожалась. Внешняя переменная оставалась `None` → штраф подходов после force-switch всегда получала пустой список `[]`.
+
+### Фикс
+
+Сделан mutable: `_last_shown_approach_id = [None]` → `_execute_graph_tool` обновляет `[0]`, `process_row` читает `[0]`.
+
+**1146 passed, 2 skipped** — baseline сохранён.
+
+---
+
 ## 2026-09-02 — FIX: результаты сессии уничтожались при запуске/остановке/краше
 
 ### Баг
