@@ -1,5 +1,26 @@
 # State Log
 
+## 2026-09-02 — FIX: загруженная сессия + запуск уничтожала результаты
+
+### Баг
+
+При загрузке сессии → нажатии «Старт» результаты предыдущей сессии терялись.
+
+**Корень:** `_on_all_done` (line 1581) читал `_old_by_spec` из `self._restored_results` — но этот список был очищен в `start_processing` (line 1263). Вторичный баг: `stop_processing` не мержил результаты — при остановке текущие результаты тоже терялись.
+
+### Фикс
+
+| Что | Где | Описание |
+|-----|-----|----------|
+| `_on_all_done` merge source | `main.py:1581` | `_restored_results` → `_original_restored_results` (неизменный снимок при загрузке) |
+| `stop_processing` merge | `main.py:1305-1325` | Добавлен merge runner.results с _original_restored_results перед сохранением |
+
+### Результат
+
+**1146 passed, 2 skipped** — baseline сохранён.
+
+---
+
 ## 2026-09-02 — REFACTORING: все 5 проблем исправлены, 1146 passed
 
 ### Результат

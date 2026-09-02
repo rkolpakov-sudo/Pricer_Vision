@@ -1310,6 +1310,21 @@ class MainWindow(QMainWindow):
             return
         if hasattr(self, '_runner') and self._runner:
             self._runner.stop()
+            # Merge runner results with restored results so nothing is lost
+            if self._runner.results:
+                _old_by_spec = {r.get("spec_text"): r for r in self._original_restored_results
+                               if r.get("spec_text") and r.get("price") is not None}
+                _merged = []
+                for r in self._runner.results:
+                    st = r.get("spec_text", "")
+                    if r.get("price") is not None:
+                        _merged.append(r)
+                    elif st in _old_by_spec:
+                        _merged.append(_old_by_spec[st])
+                    else:
+                        _merged.append(r)
+                self._restored_results = _merged
+                self._original_restored_results = list(_merged)
         self._spinner_timer.stop()
         self._spinner.setFixedSize(0, 0)
         self.start_btn.setEnabled(True)
@@ -1578,7 +1593,7 @@ class MainWindow(QMainWindow):
         errs = spec_result.get("error_count", 0)
 
         if hasattr(self, '_runner') and self._runner and self._runner.results:
-            _old_by_spec = {r.get("spec_text"): r for r in self._restored_results
+            _old_by_spec = {r.get("spec_text"): r for r in self._original_restored_results
                            if r.get("spec_text") and r.get("price") is not None}
             _new_results = []
             for r in self._runner.results:
