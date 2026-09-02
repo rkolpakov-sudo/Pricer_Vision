@@ -234,11 +234,11 @@ class TestAgentFlow:
         assert mm.get_all_approaches_calls >= 1
 
     async def test_cannot_leave_site_when_price_candidate_seen(self):
-        """Критичная регрессия (позиция 36): если на сайте найдена цена-кандидат,
+        """Критичная регрессия (позиция 36): если на карточке товара найдена цена-кандидат,
         агент НЕ может уйти browser_navigate на другой домен, пока цена не сохранена."""
         llm, bridge, engine, mm, cache = make_env(
             responses=[
-                llm_tool_call("browser_navigate", {"url": "https://santech.ru"}),
+                llm_tool_call("browser_navigate", {"url": "https://santech.ru/catalog/otoplenie/i12345/"}),
                 llm_tool_call("browser_evaluate", {"function": "return prices;"}),
                 llm_tool_call("browser_navigate", {"url": "https://other-site.ru"}),
                 llm_final(4415.59),
@@ -782,7 +782,7 @@ class TestPhase5Verification:
         )
         # последний вызов LLM (финальный) содержит факт-блок с повтором
         last_text = _all_message_text(llm.calls[-1])
-        assert "извлечение страницы повторено 3 раз подряд" in last_text
+        assert "повтор ×3" in last_text
 
     async def test_clean_search_hides_session_facts(self):
         """Все флажки сняты — сессионные факты не подмешиваются."""

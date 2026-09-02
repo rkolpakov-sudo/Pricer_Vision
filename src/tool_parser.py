@@ -4,6 +4,21 @@ import logging
 logger = logging.getLogger("pricer.tools")
 
 
+_KNOWN_TOOL_NAMES = frozenset({
+    "browser_navigate", "navigate", "browser_snapshot", "snapshot",
+    "browser_click", "click", "browser_type", "type_text",
+    "browser_press_key", "press_key", "browser_wait_for", "wait",
+    "browser_evaluate", "evaluate", "browser_run_code_unsafe",
+    "browser_extract", "browser_take_screenshot", "browser_close",
+    "browser_resize", "browser_console_messages", "browser_handle_dialog",
+    "browser_file_upload", "browser_drag", "browser_fill_form",
+    "browser_navigate_back", "browser_network_requests", "browser_network_request",
+    "browser_tabs", "browser_hover", "browser_select_option", "browser_drop",
+    "get_approaches", "search_sites", "get_confirmed_prices", "get_hints",
+    "save_confirmed_price", "save_approach", "save_discovered_site",
+})
+
+
 def parse_tool_calls(response: dict) -> list[dict]:
     choice = (response.get("choices") or [{}])[0]
     message = choice.get("message", {})
@@ -99,6 +114,24 @@ def parse_text_tools(content: str) -> list[dict]:
         if not isinstance(args, dict):
             args = {}
         if name:
+            parsed.append({"name": name, "arguments": args, "id": name})
+    if parsed:
+        return parsed
+    # Fallback: LLM (gemma) возвращает размышления в JSON-блоках без метки
+    # TOOL:/RESULT: (например ` ```json {"tool": "...", "arguments": {...}} ``` `).
+    # Извлекаем любой JSON с полем tool/name + arguments и без price.
+    for js in _extract_json_objects(content):
+        try:
+            cmd = json.loads(js)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(cmd, dict) or cmd.get("price") is not None:
+            continue
+        name = cmd.get("name") or cmd.get("tool") or cmd.get("tool_name") or cmd.get("function", "")
+        args = cmd.get("arguments") or cmd.get("args") or cmd.get("parameters")
+        if not isinstance(args, dict):
+            args = {}
+        if name and name in _KNOWN_TOOL_NAMES:
             parsed.append({"name": name, "arguments": args, "id": name})
     return parsed
 

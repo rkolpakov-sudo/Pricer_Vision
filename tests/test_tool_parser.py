@@ -1,6 +1,6 @@
 import json
 import pytest
-from src.tool_parser import parse_tool_calls, parse_final_response
+from src.tool_parser import parse_tool_calls, parse_final_response, parse_text_tools
 from tests.conftest import llm_response, llm_tool_call
 
 
@@ -92,3 +92,33 @@ class TestParseFinalResponse:
         )
         result = parse_final_response(resp)
         assert "site1.ru" in result["alternative_sites"]
+
+
+class TestParseTextTools:
+    def test_labeled_tool_json(self):
+        content = 'TOOL: {"name": "browser_navigate", "arguments": {"url": "https://x.ru"}}'
+        assert parse_text_tools(content)[0]["name"] == "browser_navigate"
+
+    def test_unlabeled_tool_json(self):
+        """gemma-стиль: JSON без метки TOOL: с полем tool/arguments."""
+        content = '```json\n{"tool": "browser_navigate", "arguments": {"url": "https://x.ru"}}\n```'
+        tools = parse_text_tools(content)
+        assert len(tools) == 1
+        assert tools[0]["name"] == "browser_navigate"
+        assert tools[0]["arguments"]["url"] == "https://x.ru"
+
+    def test_unlabeled_name_json(self):
+        content = '{"name": "save_confirmed_price", "arguments": {"price": 153, "product_name": "X"}}'
+        tools = parse_text_tools(content)
+        assert len(tools) == 1
+        assert tools[0]["name"] == "save_confirmed_price"
+
+    def test_unknown_tool_ignored(self):
+        """Неизвестный инструмент не извлекается (защита от мусора)."""
+        content = '{"tool": "do_something_weird", "arguments": {}}'
+        assert parse_text_tools(content) == []
+
+    def test_price_json_not_tool(self):
+        """JSON с ценой — это результат, не tool-call."""
+        content = '{"price": 153, "confidence": 0.9}'
+        assert parse_text_tools(content) == []

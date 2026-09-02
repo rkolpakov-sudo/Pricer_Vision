@@ -1,5 +1,40 @@
 # State Log
 
+## 2026-09-02 — REFACTORING: все 5 проблем исправлены, 1146 passed
+
+### Результат
+
+**1146 passed, 2 skipped** — полный зелёный набор (baseline).
+
+### Что сделано
+
+| # | Проблема | Фикс | Файлы |
+|---|----------|------|-------|
+| **P0** | `price_candidate_seen` без проверки URL → navigate blocker ловит на ложных ценах | Только `_is_product_card_url()` + сброс при 3 rejection-путях + escape hatch при navblocks≥2 | `agent_loop.py` |
+| **P0** | vseinstrumenti.ru: скобки `[e706]` в ref, неверный placeholder, агрессивный rate limit | Strip `[e\d+]`→`e\d+`, placeholder `Оригинальные`, last-resort `<input>`, cooldown 900→300с | `browser_server.py`, `settings.yaml` |
+| **P1** | Playwright/nodriver запускаются при camoufox | `failover: false` → `resolve_backends()` возвращает только primary; `restart()` сохраняет backend | `settings.yaml`, `mcp_bridge.py` |
+| **P1** | Context trim убивает память агента | Расширенный `to_prompt_block()` (~600 токенов): журнал сайтов, кандидаты, рекомендации, фаза поиска + `StrategyTracker` | `session_facts.py` |
+| **P2** | Нет механизма «товар не существует» | Глобальные `_global_empty_probes`/`_global_empty_sites`, hard finish ≥5 зондов ≥2 сайтов, guidance ≥3, fast path `all_sites_exhausted()` | `agent_loop.py`, `session_facts.py` |
+
+### Изменённые файлы (12)
+
+```
+config/settings.yaml          — failover:false, vseinstrumenti cooldown
+mcp_servers/browser_server.py — bracket strip, placeholder, last-resort fallback
+src/agent_loop.py             — P0+P2 фиксы, facts tracking
+src/approach_relevance.py     — (pre-existing uncommitted)
+src/mcp_bridge.py             — failover, restart preserving backend
+src/session_facts.py          — расширенный RowFacts, StrategyTracker, all_sites_exhausted
+src/tool_parser.py            — (pre-existing uncommitted)
+tests/integration/test_agent_flow.py — обновлены под новый формат
+tests/test_agent_loop.py      — обновлены под новый формат
+tests/test_approach_relevance.py — (pre-existing uncommitted)
+tests/test_session_facts.py   — обновлены под новый формат
+tests/test_tool_parser.py     — (pre-existing uncommitted)
+```
+
+---
+
 ## 2026-09-02 — REFACTORING_PLAN.md: план исправления 5 критических проблем
 
 ### Результаты прогона 2026-09-02

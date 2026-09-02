@@ -12,6 +12,7 @@ from src.agent_loop import (
     _pick_best_fallback, _fallback_result,
     _mismatch_warning_content,
     _portable_step_target, format_steps, format_steps_detailed,
+    _extract_search_url, _site_search_url,
     CONTEXT_TOKEN_BUDGET, EMPTY_PROBE_LIMIT,
     TEMP_EXPLORATION, TEMP_NAVIGATION, TEMP_EXTRACTION, TEMP_RECOVERY,
     _penalize_approaches, _deprecate_site_approaches, _inject_facts_block,
@@ -865,7 +866,7 @@ class TestFactsBlock:
         facts = RowFacts()
         facts.record_site_visit("satro-paladin.com")
         out = _inject_facts_block(trimmed, facts.to_prompt_block())
-        assert any("ФАКТЫ СЕССИИ" in m.get("content", "") for m in out)
+        assert any("ПАМЯТЬ СТРОКИ" in m.get("content", "") for m in out)
 
     def test_facts_block_replaces_not_accumulates(self):
         messages = [{"role": "system", "content": "s"}, {"role": "user", "content": "u"}]
@@ -990,3 +991,39 @@ class TestQueryLostTokens:
 
     def test_empty_new_query(self):
         assert _query_lost_tokens("Кран Ду15", "") == ["размер"]
+
+
+class TestExtractSearchUrl:
+    def test_location_href_pattern(self):
+        approach = {"concrete": [{"action": "browser_evaluate",
+                                  "function": "location.href='/catalog/search/?search='+encodeURIComponent(document.getElementById('q').value)"}]}
+        assert _extract_search_url(approach) == "/catalog/search/?search="
+
+    def test_form_action_pattern(self):
+        approach = {"concrete": [{"action": "browser_evaluate",
+                                  "function": "location.href='/search/?q='+encodeURIComponent(document.getElementById('search').value)"}]}
+        assert _extract_search_url(approach) == "/search/?q="
+
+    def test_no_search_url_returns_empty(self):
+        approach = {"concrete": [{"action": "browser_navigate", "url": "https://example.com/"}]}
+        assert _extract_search_url(approach) == ""
+
+    def test_site_search_url_picks_successful(self):
+        approaches = [
+            {"site_id": "santech.ru", "success_count": 3,
+             "concrete": [{"action": "browser_evaluate",
+                           "function": "location.href='/catalog/search/?search='+encodeURIComponent(x)"}]},
+            {"site_id": "other.ru", "success_count": 0, "concrete": []},
+        ]
+        assert _site_search_url(approaches, "santech.ru") == "/catalog/search/?search="
+
+    def test_site_search_url_falls_back(self):
+        approaches = [
+            {"site_id": "santech.ru", "success_count": 0,
+             "concrete": [{"action": "browser_evaluate",
+                           "function": "location.href='/search/?q='+encodeURIComponent(x)"}]},
+        ]
+        assert _site_search_url(approaches, "santech.ru") == "/search/?q="
+
+    def test_site_search_url_unknown_site_empty(self):
+        assert _site_search_url([], "santech.ru") == ""

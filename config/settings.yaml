@@ -6,15 +6,16 @@ antidetect:
   rate_limit_min_interval: 1.5
   site_overrides:
     vseinstrumenti.ru:
-      cooldown_seconds: 900
-      max_requests_per_minute: 6
-      min_interval: 6.0
+      cooldown_seconds: 300
+      max_requests_per_minute: 10
+      min_interval: 3.0
 browser:
   backend: camoufox
   backends:
   - camoufox
   - playwright
   - nodriver
+  failover: false
   geoip: false
   headless: false
   hide_setters: true
@@ -135,7 +136,7 @@ run:
   max_rounds: 40
   max_rounds_per_site: 15
   max_study_rounds: 50
-  reuse_price: false
+  reuse_price: true
   row_idle_timeout_seconds: 180
   row_max_seconds: 900
   study_temperature: 0.5

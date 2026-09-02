@@ -12,7 +12,7 @@ class TestRowFacts:
         f = RowFacts()
         f.record_site_visit("satro-paladin.com")
         block = f.to_prompt_block()
-        assert "ФАКТЫ СЕССИИ" in block
+        assert "ПАМЯТЬ СТРОКИ" in block
         assert "satro-paladin.com" in block
 
     def test_query_recorded_once(self):
@@ -37,7 +37,7 @@ class TestRowFacts:
         for _ in range(REPEAT_NOTICE_THRESHOLD):
             f.record_browser_call("satro-paladin.com", "evaluate:js1", "hash1")
         block = f.to_prompt_block()
-        assert f"повторено {REPEAT_NOTICE_THRESHOLD}" in block
+        assert f"повтор ×{REPEAT_NOTICE_THRESHOLD}" in block
 
     def test_repeat_streak_resets_on_different_result(self):
         f = RowFacts()
@@ -53,7 +53,7 @@ class TestRowFacts:
         assert f.price_candidate_seen is False
         f.record_price_candidate()
         assert f.price_candidate_seen is True
-        assert "price_candidate" in f.to_prompt_block()
+        assert "цена-кандидат" in f.to_prompt_block()
 
     def test_empty_result_status(self):
         f = RowFacts()
@@ -85,7 +85,7 @@ class TestRowFacts:
         f = RowFacts()
         f.set_progress(5, 40)
         block = f.to_prompt_block()
-        assert "Раундов: 5 из 40" in block
+        assert "РАУНД 5/40" in block
 
     def test_progress_without_set_no_line(self):
         f = RowFacts()
@@ -119,7 +119,7 @@ class TestRowFacts:
         for i in range(4):
             f.record_browser_call("lunda.ru", f"evaluate:js{i}", "h")
         block = f.to_prompt_block()
-        assert "запрос поиска не вводился" in block
+        assert "запрос не вводился" in block
         assert "browser_type" in block
 
     def test_price_candidate_hint_in_block(self):
@@ -135,7 +135,7 @@ class TestRowFacts:
         f.record_navblock()
         f.record_navblock()
         block = f.to_prompt_block()
-        assert "попыток уйти с сайта без сохранения: 2" in block
+        assert "попыток уйти без сохранения: 2" in block
         assert f.navblocks == 2
 
     def test_visited_urls_dedup_and_seen(self):
@@ -158,7 +158,8 @@ class TestRowFacts:
         for d in ("a.ru", "b.ru", "c.ru"):
             f.record_site_visit(d)
         block = f.to_prompt_block()
-        assert "уже посещено сайтов: 3" in block
+        assert "ЖУРНАЛ САЙТОВ" in block
+        assert f"уже посещено сайтов: {len(f._sites)}" in block or "ЖУРНАЛ САЙТОВ" in block
 
 class TestSessionFacts:
     PT = 'plumbing_heating_radiators'

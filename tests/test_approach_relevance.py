@@ -307,9 +307,42 @@ class TestSizeKeySlashDimensions:
     def test_triple_slash_extracted(self):
         assert _size_key("Тройник полипропиленовый 20/20/16") == {"20/20/16"}
 
-    def test_inch_fraction_not_slash_dim(self):
+    def test_inch_fraction_normalized(self):
         sizes = _size_key('Труба стальная водогазопроводная 1/2"')
-        assert "1/2" not in {s for s in sizes if "/" in s and '"' not in s}
+        assert sizes == {"1/2"}
+        # G-резьба 1/2" и 1/2" — один размер
+        assert _size_key('G1/2') == {"1/2"}
+        # Слеш-размер изоляции НЕ дюймовая дробь
+        assert _size_key('60/40-2') == {"60/40"}
+
+    def test_du_normalized_from_diameter_symbol(self):
+        """Ø40 и дн40 — один размер (диаметр)."""
+        assert _size_key('Труба Ø40') == {'ду40'}
+        assert _size_key('Труба дн40') == {'ду40'}
+        assert _size_key('Труба Ø50') == _size_key('Труба дн50') == {'ду50'}
+
+    def test_ppr_synonym_polypropylene(self):
+        """PPR в названии покрывает «полипропиленовая» из спецификации."""
+        assert product_name_matches(
+            'Труба полипропиленовая PPR PN10 PRO Aqua Ø40',
+            'Pro Aqua труба PPR Pro Aqua дн40 PN10 SDR11') is True
+
+    def test_g_thread_equals_inch(self):
+        """G1/2 в названии товара = 1/2" в спецификации."""
+        assert product_name_matches(
+            'Бобышка 1/2" НР',
+            'Бобышка сталь №4 БП-КР-40 вварная прямая НР G1/2') is True
+
+    def test_socket_pipe_synonym(self):
+        """«Труба с раструбом ПП» = «Труба полипропиленовая канализационная»."""
+        assert product_name_matches(
+            'Труба полипропиленовая канализационная PRO Aqua COMFORT Ø50',
+            'Труба с раструбом ПП, Pro Aqua Comfort') is True
+
+    def test_short_pp_token_kept_as_synonym(self):
+        """«ПП» (2 буквы) сохраняется как токен-синоним полипропилена."""
+        from src.approach_relevance import _product_tokens
+        assert 'пп' in _product_tokens('Труба с раструбом ПП')
 
     def test_isolation_vs_tube_rejected_default(self):
         spec = "Трубка ENERGOFLEX Super SK 60/40-2"

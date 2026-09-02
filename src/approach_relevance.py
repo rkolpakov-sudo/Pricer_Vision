@@ -206,14 +206,14 @@ _BRAND_RE = re.compile(
     re.IGNORECASE,
 )
 
-_DU_RE = re.compile(r"(?:ду|дн|dn|dp)\s?(\d{2,3})", re.IGNORECASE)
+_DU_RE = re.compile(r"(?:ду|дн|dn|dp|Ø|ø|⌀|∅)\s?(\d{2,3})", re.IGNORECASE)
 _DIM_RE = re.compile(r"(\d{1,3})\s?(?:х|x)\s?(\d{1,4})(?:\s?(?:х|x)\s?(\d{1,4}))?", re.IGNORECASE)
-_MM_RE = re.compile(r"(?:[øØ⌀∅]\s?(\d{2,4})|(\d{2,4})\s?мм\b)")
+_MM_RE = re.compile(r"(\d{2,4})\s?мм\b")
 _SLASH_DIM_RE = re.compile(
     r"(?<![\d\"/])(\d{1,3}(?:\s*/\s*\d{1,3}){1,2})(?:\s*-\s*\d+)?(?![\d\"/])"
 )
 _FRAC_RE = re.compile(r"(\d+(?:\s+\d+)?\s*/\s*\d+)\s*\"")
-_INCH_RE = re.compile(r"\b(\d+)\"")
+_INCH_RE = re.compile(r"(?<![\d/])(\d+)\"")
 _OUTLET_RE = re.compile(r"на\s+(\d+)\s+выход\w*", re.IGNORECASE)
 
 
@@ -228,7 +228,7 @@ def _size_key(text: str) -> set | None:
     for m in _DU_RE.finditer(low):
         sizes.add(f"ду{m.group(1)}")
     for m in _MM_RE.finditer(low):
-        sizes.add(f"мм{m.group(1) or m.group(2)}")
+        sizes.add(f"мм{m.group(1)}")
     for m in _DIM_RE.finditer(low):
         # «500x600», «10х500х600» (тип × высота × ширина — берём последнюю пару),
         # «20/20/16» не захватывается (слеш — отдельный паттерн).
@@ -239,9 +239,9 @@ def _size_key(text: str) -> set | None:
     for m in _SLASH_DIM_RE.finditer(low):
         sizes.add(m.group(1).replace(" ", ""))
     for m in _FRAC_RE.finditer(low):
-        sizes.add(f"\"{m.group(1).replace(' ', '')}")
+        sizes.add(m.group(1).replace(" ", ""))
     for m in _INCH_RE.finditer(low):
-        sizes.add(f"\"{m.group(1)}\"")
+        sizes.add(m.group(1))
     for m in _OUTLET_RE.finditer(low):
         sizes.add(f"на{m.group(1)}выходов")
     return sizes or None
@@ -332,12 +332,20 @@ def _product_tokens(text: str) -> set:
     if not text:
         return set()
     tokens = set()
-    for w in _WORD_RE.findall(_context_normalize(text).lower()):
-        if w in _STOPWORDS_SET or w in _STRUCTURAL_SET or len(w) < 3:
+    low = _context_normalize(text).lower()
+    for w in _WORD_RE.findall(low):
+        if w in _STOPWORDS_SET or w in _STRUCTURAL_SET:
+            continue
+        if len(w) < 3 and w not in _SHORT_SYNONYM_TOKENS:
             continue
         if w.isdigit() or _SIZE_RE.match(w):
             continue
         tokens.add(w)
+    # Короткие синонимы (ПП, ПВХ, ПНД, ОЦ, нерж) — `_WORD_RE` требует >= 3 символа
+    # и их не захватывает. Ищем как отдельные слова.
+    for w in _SHORT_SYNONYM_TOKENS:
+        if re.search(rf"(?<![а-яёa-z0-9]){re.escape(w)}(?![а-яёa-z0-9])", low):
+            tokens.add(w)
     return tokens
 
 
@@ -386,7 +394,29 @@ def _prefix_match(tok: str, found_tokens: set) -> bool:
             tt.startswith(tf) or tf.startswith(tt) or tt[:4] == tf[:4]
         ):
             return True
+        # Синонимы: PPR ≈ полипропилен, ПНД ≈ полиэтилен низкого давления и т.д.
+        # Сайт часто пишет материал аббревиатурой, а спецификация — словом.
+        pair = (tok, f)
+        if pair in _SYNONYM_PAIRS or (pair[1], pair[0]) in _SYNONYM_PAIRS:
+            return True
     return False
+
+
+_SYNONYM_PAIRS = frozenset({
+    ("ppr", "полипропиленовая"), ("ppr", "полипропиленовый"),
+    ("ppr", "полипропилен"),
+    ("пп", "полипропиленовая"), ("пп", "полипропиленовый"),
+    ("пп", "полипропилен"),
+    ("пвх", "поливинилхлорид"), ("пвх", "поливинилхлоридный"),
+    ("пэ", "полиэтиленовая"), ("пэ", "полиэтилен"),
+    ("пнд", "полиэтиленовая"), ("пнд", "полиэтилен"),
+    ("нерж", "нержавеющая"), ("нерж", "нержавеющий"),
+    ("оц", "оцинкованная"), ("оц", "оцинкованный"),
+    ("раструбом", "канализационная"), ("раструбная", "канализационная"),
+    ("канализация", "канализационная"),
+})
+
+_SHORT_SYNONYM_TOKENS = frozenset({w for pair in _SYNONYM_PAIRS for w in pair if len(w) < 3})
 
 
 def _is_optional_token(w: str) -> bool:

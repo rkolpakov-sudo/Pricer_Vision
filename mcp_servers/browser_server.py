@@ -120,10 +120,66 @@ _DOM_SCAN_SCRIPT = """
 })();
 """
 
+_EXTRACT_SCRIPT = """
+(() => {
+  const out = { url: location.href, price: null, name: null, article: null, availability: null };
+  try {
+    const scripts = document.querySelectorAll('script[type="application/ld+json"]');
+    for (const s of scripts) {
+      try {
+        const data = JSON.parse(s.textContent);
+        const items = Array.isArray(data) ? data : [data];
+        for (const it of items) {
+          const prod = it['@type'] === 'Product' ? it : (it.mainEntity && it.mainEntity['@type'] === 'Product' ? it.mainEntity : null);
+          if (!prod) continue;
+          if (!out.price && prod.offers) {
+            const offers = Array.isArray(prod.offers) ? prod.offers : [prod.offers];
+            for (const o of offers) {
+              if (o && o.price && !out.price) { out.price = String(o.price); }
+              if (o && o.availability && !out.availability) { out.availability = String(o.availability); }
+            }
+          }
+          if (!out.name && prod.name) out.name = String(prod.name);
+          if (!out.article && prod.sku) out.article = String(prod.sku);
+        }
+      } catch (e) {}
+    }
+    if (!out.price) {
+      const m = document.querySelector('[itemprop="price"]');
+      if (m) out.price = m.getAttribute('content') || m.textContent.trim();
+    }
+    if (!out.price) {
+      const dp = document.querySelector('[data-price]');
+      if (dp) out.price = dp.getAttribute('data-price') || dp.textContent.trim();
+    }
+    if (!out.price) {
+      const el = document.querySelector('[class*="price"] [class*="current"], .product-price, [class*="price"]');
+      if (el) out.price = el.textContent.trim();
+    }
+    if (!out.name) {
+      const og = document.querySelector('meta[property="og:title"]');
+      if (og) out.name = og.getAttribute('content');
+    }
+    if (!out.name) {
+      const h1 = document.querySelector('h1');
+      if (h1) out.name = h1.textContent.trim();
+    }
+    if (!out.name) out.name = document.title;
+    if (!out.article) {
+      const sku = document.querySelector('[itemprop="sku"], [data-sku], [class*="article"]');
+      if (sku) out.article = sku.textContent.trim();
+    }
+  } catch (e) { out.error = String(e); }
+  return JSON.stringify(out);
+})();
+"""
+
 TOOL_DEFS = [
     types.Tool(name="browser_navigate", description="Navigate to URL. Returns accessibility tree.",
                inputSchema={"type": "object", "properties": {"url": {"type": "string"}}, "required": ["url"]}),
     types.Tool(name="browser_snapshot", description="Get accessibility tree snapshot of current page.",
+               inputSchema={"type": "object", "properties": {}}),
+    types.Tool(name="browser_extract", description="Structured extraction of current page: JSON {url, price, name, article, availability}. Uses JSON-LD, microdata, data-price, DOM classes.",
                inputSchema={"type": "object", "properties": {}}),
     types.Tool(name="browser_click", description="Click element by CSS selector, Playwright role locator, or snapshot ref.",
                inputSchema={"type": "object", "properties": {"target": {"type": "string"}}, "required": ["target"]}),
@@ -288,6 +344,7 @@ _SEARCH_INPUT_FILL_JS = r"""
     'input[name="text"]',
     'input[placeholder*="Поиск" i]',
     'input[placeholder*="Искать" i]',
+    'input[placeholder*="Оригинальные" i]',
     'input[aria-label*="Поиск" i]',
   ];
   const seen = new Set();
@@ -304,6 +361,21 @@ _SEARCH_INPUT_FILL_JS = r"""
       const desc = [inp.type, inp.name, inp.placeholder].filter(Boolean).join(' ');
       return desc || ('input ' + sel);
     }
+  }
+  return null;
+}
+"""
+# Last-resort: берём первый видимый <input> на странице (кроме hidden/submit/button/reset).
+_SEARCH_INPUT_FALLBACK_JS = r"""
+() => {
+  for (const inp of document.querySelectorAll('input')) {
+    if (['hidden','submit','button','reset','file','image'].includes(inp.type)) continue;
+    if (inp.offsetParent === null && !inp.matches(':focus')) continue;
+    const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
+    setter.call(inp, '');
+    inp.dispatchEvent(new Event('input', {bubbles: true}));
+    const desc = [inp.type, inp.name, inp.placeholder].filter(Boolean).join(' ');
+    return desc || ('input[' + (inp.type || 'text') + ']');
   }
   return null;
 }
@@ -352,6 +424,8 @@ def _resolve_action_target(target: str):
     t = (target or "").strip()
     if not t:
         return ("error", "error: пустой target — укажи CSS-селектор или роль элемента.", "")
+    # LLM иногда оборачивает ref в скобки: [e706] → e706
+    t = re.sub(r'^\[(e\d+)\]$', r'\1', t)
     # Модель иногда передаёт целиком get_by_role(...) / locator(...) как target —
     # вытаскиваем роль и имя, чтобы не парсить это как CSS-селектор.
     m = re.search(r'get_by_role\(\s*["\'](\w+)["\']\s*,\s*(?:name\s*=\s*)?["\']([^"\']+)["\']', t)
@@ -590,6 +664,13 @@ class CamoufoxDriver(BaseDriver):
                 filled = await page.evaluate(_SEARCH_INPUT_FILL_JS, text)
                 if filled:
                     return f"ok (search-fallback: {filled})"
+            except Exception:
+                pass
+            try:
+                fallback = await page.evaluate(_SEARCH_INPUT_FALLBACK_JS)
+                if fallback:
+                    await page.locator(fallback).fill(text, timeout=5000)
+                    return f"ok (last-resort-fallback: {fallback})"
             except Exception:
                 pass
             return f"error: type failed: {e}{(' — ' + hint) if hint else ''}"
@@ -1001,6 +1082,16 @@ async def _dispatch(name: str, args: dict) -> str:
             return await _snapshot_text(_driver, page)
         elif name == "browser_snapshot":
             return await _snapshot_text(_driver, page)
+        elif name == "browser_extract":
+            try:
+                raw = await _driver.evaluate(page, _EXTRACT_SCRIPT)
+                if raw.startswith("__JS_ERR__") or not raw.strip():
+                    raw = await _driver.evaluate(page, _DOM_SCAN_SCRIPT)
+                    return raw
+                return raw
+            except Exception:
+                raw = await _driver.evaluate(page, _DOM_SCAN_SCRIPT)
+                return raw
         elif name == "browser_click":
             return await _driver.click(page, args.get("target", ""))
         elif name == "browser_type":

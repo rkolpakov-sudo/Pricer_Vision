@@ -23,12 +23,19 @@ def resolve_backends(cfg: dict | None = None) -> list[str]:
     """Ordered backend chain from settings.
 
     ``browser.backend`` is the preferred/default backend (always first);
-    ``browser.backends`` is the full failover order. Unknown names are dropped
-    and the default set is always completed, so the result is never empty.
+    ``browser.backends`` is the full failover order. When
+    ``browser.failover`` is false, only the primary backend is returned.
+    Unknown names are dropped and the default set is always completed,
+    so the result is never empty.
     """
     cfg = cfg if cfg is not None else load_settings()
     browser = cfg.get("browser", {}) or {}
     primary = browser.get("backend") or "camoufox"
+    failover = browser.get("failover", True)
+
+    if not failover:
+        return [primary] if primary in _BACKENDS else ["camoufox"]
+
     chain = browser.get("backends") or list(_DEFAULT_BACKENDS)
 
     out: list[str] = []
@@ -513,9 +520,12 @@ class MCPBridge:
         return alive
 
     async def restart(self) -> bool:
-        logger.info("MCP bridge restarting...")
+        logger.info("MCP bridge restarting (backend=%s)...", self._backend)
         await self.stop()
         await asyncio.sleep(1.0)
+        # Restart with the same backend — don't re-run full failover chain
+        if self._backend and self._backend in _BACKENDS:
+            self._backend_override = self._backend
         return await self.start()
 
     async def _restart_safe(self) -> None:

@@ -40,12 +40,23 @@ class RowFacts:
         self._rounds_total: int | None = None
         self._navblocks = 0
         self._visited_urls: list[str] = []
+        # --- P1: расширенная память ---
+        self._queries_per_site: dict[str, list[dict]] = {}
+        self._strategy_phase: str = "exploration"
+        self._confirmed_price: dict | None = None
+        self._candidate_prices: list[dict] = []
+        self._current_site: str = ""
+        self._rounds_on_site: int = 0
 
     # --- запись фактов (детерминированно) ---
 
     def record_site_visit(self, domain: str) -> None:
         if domain:
             self._site(domain)
+
+    def seen_site(self, domain: str) -> bool:
+        """Был ли домен уже посещён в этой строке (для предупреждения о повторном заходе)."""
+        return bool(domain and domain in self._sites)
 
     def record_query(self, domain: str, query: str) -> None:
         q = (query or "").strip()
@@ -137,6 +148,53 @@ class RowFacts:
         self._rounds_used = rounds_used
         self._rounds_total = rounds_total
 
+    # --- P1: расширенная память ---
+
+    def record_query_result(self, domain: str, query: str, result: str, round_num: int) -> None:
+        """Записывает результат запроса на сайте (найдено/пусто/ошибка)."""
+        if not domain:
+            return
+        site = self._queries_per_site.setdefault(domain, [])
+        site.append({"q": query[:80], "r": result[:40], "rnd": round_num})
+        if len(site) > 6:
+            self._queries_per_site[domain] = site[-6:]
+
+    def set_strategy_phase(self, phase: str) -> None:
+        """Устанавливает текущую фазу поиска."""
+        if phase in ("exploration", "yandex_fallback", "save_analog", "finished"):
+            self._strategy_phase = phase
+
+    def record_confirmed_price(self, price: float, site: str, confidence: float) -> None:
+        """Фиксирует подтверждённую цену."""
+        self._confirmed_price = {"price": price, "site": site, "conf": confidence}
+
+    def record_candidate_price(self, price: float, site: str, hint: str = "") -> None:
+        """Добавляет цену-кандидата (не подтверждена)."""
+        self._candidate_prices.append({"price": price, "site": site, "hint": hint[:60]})
+        if len(self._candidate_prices) > 5:
+            self._candidate_prices = self._candidate_prices[-5:]
+
+    def set_current_site(self, domain: str, rounds_on_site: int = 0) -> None:
+        """Фиксирует текущий сайт и глубину на нём."""
+        self._current_site = domain
+        self._rounds_on_site = rounds_on_site
+
+    def _recommendation(self) -> str:
+        """Детерминированная рекомендация на основе накопленных фактов."""
+        n_sites = len(self._sites)
+        n_empty = sum(1 for s in self._sites.values() if s["status"] == "пустой результат")
+        if self._confirmed_price:
+            return "Цена сохранена — можно завершать строку."
+        if self._candidate_prices and n_sites >= 3:
+            best = max(self._candidate_prices, key=lambda c: c["price"])
+            return (f"Лучший кандидат: {best['price']}₽@{best['site']} — "
+                    "рассмотри сохранение с пониженным confidence.")
+        if n_empty >= 3 and n_sites >= 3:
+            return "3+ сайта без цены — попробуй Яндекс или сохрани аналог."
+        if self._rounds_on_site >= 8:
+            return f"{self._rounds_on_site} шагов на сайте — пора переключиться."
+        return ""
+
     @property
     def price_candidate_seen(self) -> bool:
         return self._price_candidate_seen
@@ -156,38 +214,64 @@ class RowFacts:
 
     def to_prompt_block(self) -> str:
         parts = []
+        # Прогресс
         if self._rounds_total is not None and self._rounds_used is not None:
-            parts.append(f"  Раундов: {self._rounds_used} из {self._rounds_total} (если цена найдена — сохраняй сразу, не жди конца)")
-        for domain, site in list(self._sites.items())[:MAX_SITES_IN_BLOCK]:
-            line = f"  {domain}: {site['status']}"
-            if site["queries"]:
-                line += "; запросы: «" + "» / «".join(site["queries"]) + "»"
-            if site["repeat_streak"] >= REPEAT_NOTICE_THRESHOLD:
-                line += (f"; извлечение страницы повторено {site['repeat_streak']} "
-                         "раз подряд с одинаковым результатом")
-            if site.get("evals_since_type", 0) >= EVALS_WITHOUT_TYPE_NOTICE:
-                line += (f"; запрос поиска не вводился уже {site['evals_since_type']} "
-                         "извлечений подряд — только browser_evaluate; для реального поиска "
-                         "используй browser_type с текстом запроса")
+            pct = int(self._rounds_used / self._rounds_total * 100) if self._rounds_total else 0
+            parts.append(f"  РАУНД {self._rounds_used}/{self._rounds_total} ({pct}%) "
+                         "— если цена найдена — сохраняй сразу, не жди конца")
+        # Текущий сайт
+        if self._current_site:
+            line = f"  сайт: {self._current_site}"
+            if self._rounds_on_site:
+                line += f" ({self._rounds_on_site} шагов)"
+            if self._strategy_phase != "exploration":
+                line += f" | фаза: {self._strategy_phase}"
             parts.append(line)
+        # Журнал сайтов
+        if self._sites:
+            parts.append("  ЖУРНАЛ САЙТОВ:")
+            for domain, site in list(self._sites.items())[:MAX_SITES_IN_BLOCK]:
+                status_icon = "🟢" if site["status"] == "посещён" else "🔴"
+                line = f"    {status_icon} {domain}: {site['status']}"
+                if site["queries"]:
+                    q_strs = [f"«{q}»→{'✓' if site['status'] != 'пустой результат' else 'пусто'}"
+                              for q in site["queries"]]
+                    line += " | " + ", ".join(q_strs)
+                if site["repeat_streak"] >= REPEAT_NOTICE_THRESHOLD:
+                    line += f" | ⚠ повтор ×{site['repeat_streak']}"
+                if site.get("evals_since_type", 0) >= EVALS_WITHOUT_TYPE_NOTICE:
+                    line += (f" | ⚠ запрос не вводился {site['evals_since_type']} "
+                             "извлечений — используй browser_type")
+                parts.append(line)
+        # Кандидаты
+        if self._candidate_prices:
+            cands = "; ".join(f"{c['price']}₽@{c['site']}" for c in self._candidate_prices[-3:])
+            parts.append(f"  КАНДИДАТЫ: {cands} — НЕ СОХРАНЕНЫ")
         if self._price_candidate_seen:
-            line = "  уже видели цену-кандидата (price_candidate)"
+            line = "  цена-кандидат"
             if self._price_candidate_hint:
                 line += f": {self._price_candidate_hint}"
             if self._navblocks:
-                line += f"; попыток уйти с сайта без сохранения: {self._navblocks}"
+                line += f" | попыток уйти без сохранения: {self._navblocks}"
             parts.append(line)
-        if len(self._sites) >= SITES_WITHOUT_RESULT_NOTICE:
-            parts.append(f"  уже посещено сайтов: {len(self._sites)} — при отсутствии результата "
-                         "лучше сохранить лучший аналог (сниженный conf) или завершить строку")
+        # Подтверждённая цена
+        if self._confirmed_price:
+            cp = self._confirmed_price
+            parts.append(f"  ✅ СОХРАНЕНО: {cp['price']}₽@{cp['site']} (conf={cp['conf']:.0%})")
+        # Карточка
         if self._card_open:
             parts.append("  открыта карточка товара")
+        # Ошибки
         if self._recent_errors:
             errs = " | ".join(self._recent_errors)
             parts.append(f"  последние ошибки: {errs}")
+        # Рекомендация
+        rec = self._recommendation()
+        if rec:
+            parts.append(f"  💡 РЕКОМЕНДАЦИЯ: {rec}")
         if not parts:
             return ""
-        return "ФАКТЫ СЕССИИ (операционная память, не забывай):\n" + "\n".join(parts)
+        return "ПАМЯТЬ СТРОКИ (переживает обрезку контекста):\n" + "\n".join(parts)
 
     def _site(self, domain: str) -> dict:
         site = self._sites.get(domain)
@@ -289,3 +373,10 @@ class SessionFacts:
             else:
                 neg.append(f"  {dom}: товара этого типа/бренда не найдено")
         return ("\n".join(pos), "\n".join(neg))
+
+    def all_sites_exhausted(self, product_type: str, brand: str,
+                            min_sites: int = 3) -> bool:
+        """True, если ≥min_sites доменов помечены no_product для данного типа/бренда."""
+        relevant = self._relevant(product_type, brand)
+        no_product_count = sum(1 for _, status in relevant if status == "no_product")
+        return no_product_count >= min_sites

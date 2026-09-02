@@ -190,9 +190,9 @@ SYSTEM_PROMPT = """Ты — опытный пользователь с дост�
 - get_hints: подсказки по работе на сайтах
 
 Правила:
-1. Сначала проверь get_approaches. Если есть подход — используй его target/element (CSS-селекторы) и последовательность действий. НО: url для browser_navigate должен вести на ГЛАВНУЮ сайта или страницу поиска, а не на конкретный товар из подхода. Текст для поиска (query, text) бери из КЛЮЧЕВЫХ ТОКЕНОВ и ТОВАР ДЛЯ ПОИСКА: вводи запрос, сохраняющий бренд + серию + тип + размер/Ду (например «LEMAX Premium C10 500x600»). Шаблонный хвост («в компл. с краном…», «с боковым подключением») можно опускать, НО размер/тип/Ду — НИКОГДА. При пустом результате ТОЧНОГО запроса (с размером/Ду) сначала проверь загрузку выдачи (browser_wait_for 2с + повторное извлечение) и ТОЛЬКО после повтора упрощай запрос, ОБЯЗАТЕЛЬНО сохраняя размер/тип/Ду.
+1. Сначала проверь get_approaches. Если есть подход — используй его target/element (CSS-селекторы) и последовательность действий. НО: url для browser_navigate должен вести на ГЛАВНУЮ сайта или страницу поиска, а не на конкретный товар из подхода. Если в контексте есть «ПРЯМЫЕ URL ПОИСКА» для сайта — НЕ вводи в форму и НЕ жми Enter: сразу открой browser_navigate с этим URL и подставь запрос через encodeURIComponent. Текст для поиска (query, text) бери из КЛЮЧЕВЫХ ТОКЕНОВ и ТОВАР ДЛЯ ПОИСКА: вводи запрос, сохраняющий бренд + серию + тип + размер/Ду (например «LEMAX Premium C10 500x600»). Шаблонный хвост («в компл. с краном…», «с боковым подключением») можно опускать, НО размер/тип/Ду — НИКОГДА. При пустом результате ТОЧНОГО запроса (с размером/Ду) сначала проверь загрузку выдачи (browser_wait_for 2с + повторное извлечение) и ТОЛЬКО после повтора упрощай запрос, ОБЯЗАТЕЛЬНО сохраняя размер/тип/Ду.
 2. Работай с ОДНИМ сайтом за раз. НЕ переключайся между сайтами без причины.
-3. browser_snapshot даёт accessibility-tree. Если цены не видны — используй browser_evaluate с JS (querySelectorAll) для прямого извлечения данных из DOM.
+3. browser_snapshot даёт accessibility-tree. Если цены не видны — используй browser_extract (структурированное извлечение: JSON-LD/microdata/цена/имя/артикул) или browser_evaluate с JS (querySelectorAll) для прямого извлечения данных из DOM.
 4. После поиска на сайте: кликни на карточку товара → откроется страница с ценой. Если цены нет в карточке — ищи на странице через browser_evaluate.
 5. Если точного совпадения нет — сохрани лучший найденный АНАЛОГ через save_confirmed_price с confidence 0.3-0.5 и requires_review=True, НО только если это товар ТОГО ЖЕ ТИПА (кран для крана, клапан для клапана, воздуховод для воздуховода). НЕ подставляй товар другого типа даже как аналог. Укажи в reason расхождение в названии. Можно найти лучшую цену на другом сайте — она перезапишет эту. НЕ трать раунды на поиск более точного совпадения на том же сайте.
 6. После нахождения цены: save_confirmed_price + save_approach.
@@ -335,11 +335,92 @@ def _apply_approach(approach: dict, spec_text: str) -> dict:
     return adapted
 
 
+_SEARCH_URL_PATTERNS = [
+    re.compile(r"location\.href\s*=\s*['\"]([^'\"]*search[^'\"]*)['\"]\s*\+\s*encodeURIComponent", re.IGNORECASE),
+    re.compile(r"location\.href\s*=\s*['\"]([^'\"]*search[^'\"]*)['\"]\s*\+\s*", re.IGNORECASE),
+    re.compile(r"['\"](/[^'\"]*search[^'\"]*)['\"]\s*\+\s*encodeURIComponent", re.IGNORECASE),
+]
+
+
+def _extract_search_url(approach: dict) -> str:
+    """Извлекает шаблон прямого URL поиска из JS-шагов подхода.
+
+    Паттерны: `location.href='/catalog/search/?search='+encodeURIComponent(...)`,
+    `form[action*=...search...]`. Нормализует до готового `?search=` (без параметра),
+    агент подставит encodeURIComponent(запрос).
+    """
+    if not approach:
+        return ""
+    steps = approach.get("concrete") or approach.get("pattern") or []
+    for step in steps:
+        act = str(step.get("action", ""))
+        if act not in ("browser_evaluate", "evaluate", "browser_navigate", "navigate"):
+            continue
+        text = str(step.get("function") or step.get("code") or step.get("url") or "")
+        for pat in _SEARCH_URL_PATTERNS:
+            m = pat.search(text)
+            if m:
+                base = m.group(1)
+                # Нормализуем до готового шаблона «?search=» / «&search=».
+                base = base.rstrip("&?= ").strip("'\"")
+                if "?" in base:
+                    if base.rstrip("/").endswith("search"):
+                        return base + "="
+                    if "=" not in base.split("?", 1)[1]:
+                        return base + "="
+                    return base + "&search="
+                return base + "?search="
+    return ""
+
+
+def _site_search_url(approaches: list[dict], site_id: str) -> str:
+    """Прямой URL поиска для сайта из успешных подходов."""
+    if not approaches:
+        return ""
+    for a in approaches:
+        if (a.get("site_id") or "") == site_id and (a.get("success_count") or 0) > 0:
+            url = _extract_search_url(a)
+            if url:
+                return url
+    # второй проход — любой подход этого сайта
+    for a in approaches:
+        if (a.get("site_id") or "") == site_id:
+            url = _extract_search_url(a)
+            if url:
+                return url
+    return ""
+
+
+def _find_card_url(approaches: list[dict], site_id: str, spec_text: str = "") -> str:
+    """Прямая ссылка на карточку товара из подходов для сайта.
+
+    Подходы иногда содержат browser_navigate на конкретную карточку
+    (.../product/... или .../item/...). Если агент не может найти товар
+    через поиск, но такая карточка известна — открываем её напрямую.
+    Карточка возвращается ТОЛЬКО если подход релевантен текущему товару
+    (иначе для конвектора подскажем карточку трубы — ложная наводка).
+    """
+    if not approaches:
+        return ""
+    for a in approaches:
+        if (a.get("site_id") or "") != site_id:
+            continue
+        if spec_text and not approach_relevant(a, spec_text):
+            continue
+        for s in (a.get("concrete") or []):
+            u = s.get("url", "")
+            if s.get("action") == "browser_navigate" and ("/product/" in u or "/item/" in u):
+                return u
+    return ""
+
+
 def _summarize_tool(name: str, args: dict) -> str:
     if name == "browser_navigate":
         return f"🌐 Открываю {args.get('url', '...')}"
     if name == "browser_snapshot" or name == "snapshot":
         return "📄 Смотрю что на странице..."
+    if name == "browser_extract":
+        return "🔎 Извлекаю структурированные данные (JSON-LD/microdata)"
     if name == "browser_type" or name == "type_text":
         return f"📝 Ввожу '{args.get('text', '')}'"
     if name == "browser_click" or name == "click":
@@ -537,6 +618,23 @@ async def process_row(
             return _result_to_schema(result)
 
     sites = memory_manager.get_sites(product_type)
+    # Fallback для unknown-типа: сайты, где УЖЕ есть успешные подходы/цены,
+    # подтягиваются в список (иначе агент для «Бобышки» не видит santech
+    # и блуждает через yandex — потеря раундов).
+    if not sites and use_approaches:
+        _flat_sites = memory_manager.get_all_approaches_flat()
+        _site_meta: dict[str, dict] = {}
+        for a in _flat_sites:
+            sid = a.get("site_id", "")
+            if sid and (a.get("success_count") or 0) > 0:
+                if not approach_relevant(a, search_text):
+                    continue
+                _site_meta.setdefault(sid, {
+                    "id": sid, "priority": 0, "consecutive_failures": 0,
+                })
+        sites = list(_site_meta.values())
+        if sites:
+            logger.info("Sites fallback from approaches: %s", sorted(s["id"] for s in sites))
     if site_blacklist is not None:
         blocked = site_blacklist.blocked_sites()
         if blocked:
@@ -632,8 +730,12 @@ async def process_row(
     # и без цены (регрессия: позиция 36 — агент 4 раза повторил «ЦМО МС-40 = полка»,
     # не двигаясь дальше). При пороге добавляем напоминание/force-совет.
     content_only_rounds = 0
-    CONTENT_ONLY_REMIND = 2
-    CONTENT_ONLY_FORCE = 3
+    CONTENT_ONLY_REMIND = 1
+    CONTENT_ONLY_FORCE = 2
+    _content_only_total = 0
+    CONTENT_ONLY_HARD_CAP = 6
+    _last_was_null = False
+    _hinted_card_urls: set[str] = set()
 
     def _shown_approach_ids(domain: str) -> list:
         """Подходы, показанные агенту для текущего сайта (для точечного штрафа)."""
@@ -648,11 +750,17 @@ async def process_row(
     yandex_price_saved = False
     price_confirmed = False
     price_candidate_seen = False
+    _yandex_fallback_sent = False
+    _min_rounds_on_site = 3
     recent_errors: list[str] = []
     diagnostic_prompts = 0
     empty_probe_streak: dict[str, int] = {}
     empty_probe_guidance_sent: set[str] = set()
     search_page_retry_guided: set[str] = set()
+    # P2: глобальные пустые зонды (跨-сайтовые)
+    _global_empty_probes: int = 0
+    _global_empty_sites: set[str] = set()
+    _global_empty_guidance_sent: bool = False
     fallback_candidates: list[dict] = []
     rate_limiter = DomainRateLimiter(
         min_interval=get_antidetect_config("rate_limit_min_interval", 1.5),
@@ -665,6 +773,13 @@ async def process_row(
     while rounds < MAX_ROUNDS:
         rounds += 1
         _stop_check()
+
+        # P2: быстрый путь — если все сайты исчерпаны для данного типа товара
+        if (session_facts is not None and product_type != UNKNOWN_PT
+                and rounds >= 6 and session_facts.all_sites_exhausted(product_type, spec_brand, min_sites=3)):
+            logger.info("🔴 All sites exhausted for %s|%s — fast finish at round %d",
+                        product_type, spec_brand, rounds)
+            break
 
         tool_calls = parse_tool_calls(response)
         content = (response.get("choices") or [{}])[0].get("message", {}).get("content", "")
@@ -715,7 +830,32 @@ async def process_row(
 
         if not tool_calls:
             content_only_rounds += 1
+            rounds_on_site += 1
+            facts.set_current_site(_extract_domain(current_site or ''), rounds_on_site)
+            _content_only_total += 1
+            _content_is_null = (content or "").strip().lower() in ("null", "none", "''", '""')
             messages.append({"role": "assistant", "content": content or "(no output)"})
+            if _content_only_total >= CONTENT_ONLY_HARD_CAP:
+                # gemma деградирует в ```json```-цикл размышлений (без tool_calls и без
+                # цены). После N пустых/JSON-ответов подряд — принудительно завершаем
+                # строку, иначе она жжёт раунды до MAX_ROUNDS.
+                logger.warning("⚠️ Content-only hard cap (%d) reached for spec=%s",
+                               CONTENT_ONLY_HARD_CAP, spec_text[:50])
+                result = {"price": None, "confidence": 0.0, "requires_review": True,
+                          "reason": "LLM: content-only loop (JSON thinking, no tools)",
+                          "site": "", "url": ""}
+                final = {"spec_text": spec_text, "product_type": product_type,
+                         **result, "elapsed": (datetime.now() - start_time).total_seconds()}
+                return _result_to_schema(final)
+            if _content_is_null and _last_was_null:
+                logger.warning("⚠️ Null content twice after FORCE — hard abort for spec=%s",
+                               spec_text[:50])
+                result = {"price": None, "confidence": 0.0, "requires_review": True,
+                          "reason": "LLM: repeated null output", "site": "", "url": ""}
+                final = {"spec_text": spec_text, "product_type": product_type,
+                         **result, "elapsed": (datetime.now() - start_time).total_seconds()}
+                return _result_to_schema(final)
+            _last_was_null = _content_is_null
             if content_only_rounds >= CONTENT_ONLY_FORCE:
                 logger.warning("⚠️ Content-only loop (%d rounds) — forcing a decision", content_only_rounds)
                 content_only_rounds = 0
@@ -735,13 +875,15 @@ async def process_row(
                                 "с текущего сайта (карточка/save_confirmed_price), либо переключись на "
                                 "другой сайт. Не повторяй один и тот же вывод разными словами."),
                 })
-            messages.append({"role": "user", "content": "Верни JSON с результатом поиска цены.\nФормат: {\"price\": число|null, \"confidence\": 0.0-1.0, \"url\": \"...\", \"site\": \"...\", \"reason\": \"...\", \"requires_review\": bool}"})
+            messages.append({"role": "user", "content": "НЕ возвращай JSON-размышления. Вызови ОДИН инструмент: browser_navigate на другой сайт, browser_evaluate/extract для цены, ИЛИ save_confirmed_price если цена известна. Пустой ответ недопустим."})
             _stop_check()
             response = await _llm_call(messages, TEMP_EXTRACTION)
             if "error" in response:
                 return _error_result(spec_text, f"LLM: {response['error']}")
             continue
         content_only_rounds = 0
+        _last_was_null = False
+        _content_only_total = 0
         msg = (response.get("choices") or [{}])[0].get("message", {})
 
         messages.append(msg)
@@ -789,30 +931,51 @@ async def process_row(
                 # найденного товара (регрессия: позиция 36 — агент ушёл с santech при найденной цене).
                 leaving_domain = bool(new_site and current_site
                                       and _extract_domain(new_site) != _extract_domain(current_site))
-                if (leaving_domain and price_candidate_seen and not price_confirmed):
-                    logger.warning("🚫 Navigate blocked: price candidate seen on %s, not confirmed",
-                                   _extract_domain(current_site))
-                    facts.record_navblock()
-                    _pc = facts.price_candidate_hint
-                    _pc_part = f"\nЦена-кандидат: {_pc}." if _pc else ""
-                    if facts.navblocks >= 2:
-                        _block_msg = (f"error: на текущем сайте УЖЕ найдена цена-кандидат{_pc_part} "
-                                      f"Ты {facts.navblocks} раз пытался уйти без сохранения. НЕМЕДЛЕННО: "
-                                      "если карточка открыта — извлеки h1 и цену и вызови save_confirmed_price "
-                                      "(confirm=true при расхождении только в описательных словах). Только ПОСЛЕ "
-                                      "сохранения переходи на другой сайт.")
-                    else:
-                        _block_msg = (f"error: на текущем сайте уже найдена цена-кандидат{_pc_part} "
-                                      "НЕ уходи с этого сайта, пока цена не сохранена. Сейчас: либо открой "
-                                      "карточку найденного товара и извлеки цену, либо сохрани её через "
-                                      "save_confirmed_price с product_name (полное название с карточки). "
-                                      "Только ПОСЛЕ сохранения цены можно переходить на другой сайт.")
+                # Совет: минимум раундов на сайте. Агент не должен уходить с сайта
+                # после 1 поиска — нужно попробовать ≥ _min_rounds_on_site запросов.
+                if (leaving_domain and rounds_on_site > 0
+                        and rounds_on_site < _min_rounds_on_site
+                        and not _yandex_fallback_sent
+                        and new_domain not in _SEARCH_ENGINE_DOMAINS):
+                    _rounds_left = _min_rounds_on_site - rounds_on_site
                     messages.append({
                         "role": "tool",
                         "tool_call_id": tc.get("id", ""),
-                        "content": _block_msg,
+                        "content": (f"ℹ️ Ты на этом сайте всего {rounds_on_site} раунд(ов). "
+                                    f"Рекомендуется минимум {_min_rounds_on_site} раунда. "
+                                    f"Попробуй ещё {_rounds_left} поисковых запросов на ЭТОМ сайте "
+                                    "(другой артикул, упрощённый запрос, русское название, "
+                                    "browser_evaluate для JS-извлечения) прежде чем переключаться. "
+                                    "Если совсем ничего нет — тогда переключайся."),
                     })
-                    continue
+                if (leaving_domain and price_candidate_seen and not price_confirmed):
+                    if facts.navblocks >= 2 and _is_product_card_url(current_site):
+                        logger.info("🔓 Navigate allowed: navblocks=%d on product card — "
+                                    "allowing escape to save elsewhere", facts.navblocks)
+                    else:
+                        logger.warning("🚫 Navigate blocked: price candidate seen on %s, not confirmed",
+                                       _extract_domain(current_site))
+                        facts.record_navblock()
+                        _pc = facts.price_candidate_hint
+                        _pc_part = f"\nЦена-кандидат: {_pc}." if _pc else ""
+                        if facts.navblocks >= 2:
+                            _block_msg = (f"error: на текущем сайте УЖЕ найдена цена-кандидат{_pc_part} "
+                                          f"Ты {facts.navblocks} раз пытался уйти без сохранения. НЕМЕДЛЕННО: "
+                                          "если карточка открыта — извлеки h1 и цену и вызови save_confirmed_price "
+                                          "(confirm=true при расхождении только в описательных словах). Только ПОСЛЕ "
+                                          "сохранения переходи на другой сайт.")
+                        else:
+                            _block_msg = (f"error: на текущем сайте уже найдена цена-кандидат{_pc_part} "
+                                          "НЕ уходи с этого сайта, пока цена не сохранена. Сейчас: либо открой "
+                                          "карточку найденного товара и извлеки цену, либо сохрани её через "
+                                          "save_confirmed_price с product_name (полное название с карточки). "
+                                          "Только ПОСЛЕ сохранения цены можно переходить на другой сайт.")
+                        messages.append({
+                            "role": "tool",
+                            "tool_call_id": tc.get("id", ""),
+                            "content": _block_msg,
+                        })
+                        continue
                 # Soft Yandex reminder: warn but do NOT block navigation
                 if "yandex" in current_site and not yandex_price_saved and new_site and "yandex" not in new_site.lower():
                     logger.info("ℹ️ Leaving Yandex for %s (yandex_price_saved=%s)", new_site, yandex_price_saved)
@@ -828,6 +991,11 @@ async def process_row(
                         price_candidate_seen = False
                         recent_errors = []
                         empty_probe_streak.clear()
+                        facts.set_current_site(_extract_domain(new_site), 0)
+                        if facts.seen_site(_extract_domain(new_site)):
+                            _nav_hint = (f"⚠️ Ты УЖЕ посещал сайт {_extract_domain(new_site)} в этой строке. "
+                                         "НЕ заходи повторно ради того же запроса — только если нашёл новый "
+                                         "артикул/URL. Лучше работай с текущей страницей или заверши строку.")
                         if site_visit_callback:
                             site_visit_callback(_extract_domain(new_site))
                     current_site = new_site
@@ -841,15 +1009,58 @@ async def process_row(
                 if _is_product_card_url(current_site):
                     facts.record_card_open()
                 # B7: уже посещено несколько сайтов без результата — guidance (не запрет).
+                # Не適用 для Яндекса — агент должен иметь время искать на Яндексе.
+                _cur_domain = _extract_domain(current_site or "")
+                _is_yandex = _cur_domain in _SEARCH_ENGINE_DOMAINS
                 if (moved_to_new_domain and facts.distinct_sites() >= 3
-                        and not price_candidate_seen and not price_confirmed):
-                    messages.append({
-                        "role": "user",
-                        "content": (f"⚠️ Уже посещено {facts.distinct_sites()} сайтов без найденной цены. "
-                                    "Если на текущем сайте нет подходящего товара — лучше сохранить лучший "
-                                    "аналог (confidence снизится) или завершить строку, чем продолжать "
-                                    "перебор сайтов."),
-                    })
+                        and not price_candidate_seen and not price_confirmed
+                        and not _is_yandex):
+                    _n_sites = facts.distinct_sites()
+                    if _n_sites >= 5:
+                        # Все прямые сайты исчерпаны — МАНДАТНЫЙ фолбэк на Яндекс.
+                        if not _yandex_fallback_sent:
+                            _yandex_fallback_sent = True
+                            logger.info("⚠️ %d sites visited — forcing Yandex fallback for spec=%s",
+                                       _n_sites, spec_text[:50])
+                            messages.append({
+                                "role": "user",
+                                "content": (
+                                    f"⚠️ Все {_n_sites} прямых сайтов исчерпаны без цены. "
+                                    "СЕЙЧАС ОБЯЗАТЕЛЬНО: открой yandex.ru и найди товар через поиск. "
+                                    f"Запрос: {spec_text[:80]}. "
+                                    "Найди ссылку на магазин → перейди на сайт магазина → извлеки цену из "
+                                    "карточки товара. НЕ извлекай цену из сниппета Яндекса. "
+                                    "После поиска на Яндексе заверши строку (сохрани цену или верни null)."
+                            )})
+                            rounds_on_site = 0
+                            current_site = ""
+                            continue
+                        else:
+                            # Яндекс уже был, агент вернулся на прямой сайт — завершаем
+                            logger.warning("⚠️ %d sites + Yandex visited — hard finish for spec=%s",
+                                           _n_sites, spec_text[:50])
+                            _result_hard = {
+                                "price": None, "confidence": 0.0, "requires_review": True,
+                                "reason": f"товар не найден на {_n_sites} сайтах + Яндекс", "site": "", "url": "",
+                            }
+                            _fin = {"spec_text": spec_text, "product_type": product_type,
+                                    **_result_hard, "elapsed": (datetime.now() - start_time).total_seconds()}
+                            return _result_to_schema(_fin)
+                    elif _n_sites >= 4:
+                        messages.append({
+                            "role": "user",
+                            "content": (f"⚠️ УЖЕ ПОСЕЩЕНО {_n_sites} САЙТОВ без цены. "
+                                        "СЕЙЧАС сохрани лучший аналог (confidence снизится) или заверши "
+                                        "строку (верни null). НЕ переходи на следующий сайт."),
+                        })
+                    else:
+                        messages.append({
+                            "role": "user",
+                            "content": (f"⚠️ Уже посещено {_n_sites} сайтов без найденной цены. "
+                                        "Если на текущем сайте нет подходящего товара — лучше сохранить лучший "
+                                        "аналог (confidence снизится) или завершить строку, чем продолжать "
+                                        "перебор сайтов."),
+                        })
             else:
                 # Rate limit EVERY browser action (not just navigate): клики, печать,
                 # evaluate, снапшоты идут на тот же домен и тоже ловят бан при частых
@@ -1044,6 +1255,23 @@ async def process_row(
                             if _is_product_card_url(current_site):
                                 facts.record_card_open()
                         break
+                # Подсказка: для сайта известна прямая карточка товара — предложить
+                # открыть её напрямую вместо блуждания по форме (регрессия: агент
+                # вводит запрос, получает пусто и не знает, что карточка уже
+                # известна из подхода). Срабатывает на любой странице сайта.
+                if not _is_product_card_url(current_site):
+                    _card_url = _find_card_url(all_flat, _extract_domain(current_site), spec_text)
+                    if _card_url and _card_url not in _hinted_card_urls:
+                        _hinted_card_urls.add(_card_url)
+                        logger.warning("💡 Known product card for %s — hinting direct URL",
+                                       _extract_domain(current_site))
+                        messages.append({
+                            "role": "user",
+                            "content": (f"💡 Для этого товара на сайте {_extract_domain(current_site)} "
+                                        f"уже известна прямая карточка: {_card_url}. "
+                                        "Открой её через browser_navigate и извлеки цену (browser_extract), "
+                                        "НЕ ищи через поиск — товар точно есть на этой карточке."),
+                        })
 
             # Captcha/block detection — skip site immediately
             if (any(kw in tool_content.lower() for kw in CAPTCHA_KEYWORDS)
@@ -1095,11 +1323,19 @@ async def process_row(
             # Подсветка найденной цены — агент не должен её потерять в большом ответе
             price_hint = None
             if tool_name not in GRAPH_TOOL_NAMES:
+                # Цена-кандидат из ПУСТОГО поиска/JS-мусора не должна блокировать
+                # уход с сайта (регрессия: на странице без товара JS содержит «руб»,
+                # price_candidate_seen=True → navigate-block → агент застревает).
+                _content_is_empty_probe = _is_empty_search_result(tool_name, tool_content)
                 price_hint = _extract_price_candidate(tool_content)
-                if price_hint and _price_is_relevant(spec_text, spec_meta, tool_content):
+                if (price_hint and not _content_is_empty_probe
+                        and _price_is_relevant(spec_text, spec_meta, tool_content)
+                        and _is_product_card_url(current_site)):
                     price_candidate_seen = True
                     empty_probe_streak.clear()
                     facts.record_price_candidate(str(price_hint))
+                    facts.record_candidate_price(float(price_hint) if price_hint.replace('.','').replace('-','').isdigit() else 0,
+                                                  _extract_domain(current_site), str(price_hint))
             content_to_send = tool_content[:10000]
             if tool_name == "browser_evaluate" and len(tool_content) > EVALUATE_MESSAGE_CAP:
                 content_to_send = tool_content[:EVALUATE_MESSAGE_CAP] + "\n…(результат усечён; цена-кандидат выше, если была)"
@@ -1138,7 +1374,30 @@ async def process_row(
                         })
                     else:
                         _session_no_product(probe_domain)
+                        _global_empty_probes += 1
+                        _global_empty_sites.add(probe_domain)
                         empty_probe_streak[probe_domain] = empty_probe_streak.get(probe_domain, 0) + 1
+                        # P2: жёсткий выход при ≥5 зондов + ≥2 сайтов
+                        if _global_empty_probes >= 5 and len(_global_empty_sites) >= 2:
+                            logger.warning("🔴 Global empty cap: %d probes on %d sites — hard finish",
+                                           _global_empty_probes, len(_global_empty_sites))
+                            messages.append({
+                                "role": "user",
+                                "content": (f"🔴 Товар не найден ни на одном из {len(_global_empty_sites)} сайтов "
+                                            f"({_global_empty_probes} пустых зондов). Товар вероятно не существует "
+                                            "в интернет-магазинах. Заверши строку, сохрани null-цену."),
+                            })
+                            # Принудительный выход из цикла
+                            break
+                        # P2: guidance при ≥3 зондах
+                        if _global_empty_probes >= 3 and not _global_empty_guidance_sent:
+                            _global_empty_guidance_sent = True
+                            messages.append({
+                                "role": "user",
+                                "content": (f"⚠️ Уже {_global_empty_probes} пустых зонда на "
+                                            f"{len(_global_empty_sites)} сайтах. Товар вероятно не существует. "
+                                            "Попробуй Яндекс или заверши строку."),
+                            })
                         if empty_probe_streak[probe_domain] >= EMPTY_PROBE_LIMIT and probe_domain not in empty_probe_guidance_sent:
                             empty_probe_guidance_sent.add(probe_domain)
                             empty_probe_streak[probe_domain] = 0
@@ -1158,6 +1417,7 @@ async def process_row(
                 found_name = (tool_args.get("product_name") or "").strip()
                 if not found_name:
                     logger.warning("⚠️ Product name missing: spec=%s", spec_text[:50])
+                    price_candidate_seen = False
                     messages.append({
                         "role": "tool",
                         "tool_call_id": tc.get("id", ""),
@@ -1168,6 +1428,7 @@ async def process_row(
                 save_url = tool_args.get("url") or current_site or ""
                 if _is_family_page(save_url) or _is_family_page(current_site):
                     logger.warning("⚠️ Family page save rejected: spec=%s url=%s", spec_text[:50], save_url)
+                    price_candidate_seen = False
                     messages.append({
                         "role": "tool",
                         "tool_call_id": tc.get("id", ""),
@@ -1193,6 +1454,7 @@ async def process_row(
                             logger.warning("LLM confirm override REJECTED for mismatched product "
                                            "(conf %.2f < %.2f): spec=%s found=%s",
                                            llm_conf, CONF_MIN, spec_text[:50], str(found_name)[:50])
+                            price_candidate_seen = False
                             messages.append({
                                 "role": "tool",
                                 "tool_call_id": tc.get("id", ""),
@@ -1214,6 +1476,7 @@ async def process_row(
                     else:
                         logger.warning("⚠️ Product mismatch — advisory: spec=%s vs found=%s",
                                        spec_text[:50], str(found_name)[:50])
+                        price_candidate_seen = False
                         messages.append({
                             "role": "tool",
                             "tool_call_id": tc.get("id", ""),
@@ -1264,6 +1527,9 @@ async def process_row(
                     yandex_price_saved = True
                     price_confirmed = True
                     empty_probe_streak.clear()
+                    facts.record_confirmed_price(float(validated.get('price', 0) or 0),
+                                                  _extract_domain(current_site or ''),
+                                                  float(validated.get('confidence', 0) or 0))
                     elapsed = (datetime.now() - start_time).total_seconds()
                     logger.info("Row: price=%s validated=%.2f in %.1fs", validated['price'], validated['confidence'], elapsed)
                     if _price_candidate_holder is not None:
@@ -1311,6 +1577,7 @@ async def process_row(
             if tn not in ("get_approaches", "search_sites", "get_confirmed_prices",
                           "get_hints", "save_discovered_site", "save_approach"):
                 rounds_on_site += 1
+                facts.set_current_site(_extract_domain(current_site or ''), rounds_on_site)
                 break
 
         # StuckDetector: при зацикливании — сначала диагностика, уход только после капа
@@ -1559,8 +1826,21 @@ def _build_context(spec_text, product_type, approaches, confirmed_prices, sites,
     else:
         parts.append(f"\n(известных сайтов нет — начни поиск через {SEARCH_ENGINE})")
     if approaches:
+        # Приоритизируем подходы с ПРЯМОЙ ссылкой на карточку товара
+        # (browser_navigate на .../product/... или .../item/...): такой подход
+        # гарантирует нахождение цены, без блуждания через форму/поиск.
+        # Регрессия: релевантные lunda-подходы с прямой карточкой вытеснялись
+        # из top-3 подходами santech/as-tim с бесполезными шагами.
+        def _has_card_url(a):
+            for s in (a.get("concrete") or []):
+                u = s.get("url", "")
+                if s.get("action") == "browser_navigate" and ("/product/" in u or "/item/" in u):
+                    return True
+            return False
+        _sorted_approaches = sorted(approaches,
+                                    key=lambda a: (0 if _has_card_url(a) else 1, -(a.get("success_count") or 0)))
         parts.append("\nУспешные подходы из графа:")
-        for a in approaches[:3]:
+        for a in _sorted_approaches[:3]:
             adapted = _apply_approach(a, spec_text)
             s = adapted.get("site_id", "")
             c = adapted.get("success_count", 0)
@@ -1574,17 +1854,48 @@ def _build_context(spec_text, product_type, approaches, confirmed_prices, sites,
             concrete = adapted.get("concrete", [])
             if concrete:
                 parts.append(f"    шаги: {format_steps(concrete)}")
-                if a in approaches[:2]:
+                if a in _sorted_approaches[:2]:
                     parts.append(format_steps_detailed(concrete))
     if site_guides:
-        parts.append("\nКак работать на сайтах (подходы для других товаров):")
+        # Фильтр по релевантности: чужие подходы (кабели/UPS/электроника для
+        # сантехники) не показываются. Оставляем только сайты, где подходы
+        # обучались на этом же запросе ИЛИ по типу товара. Сортируем по числу
+        # успехов, ограничиваем 3 сайтами и бюджетом 1500 символов (иначе 85%
+        # контекста — мусор, агент не видит релевантное).
+        _relev = {}
         for sid, s_approaches in site_guides.items():
-            method = s_approaches[0].get("method", "browser_search")
-            concrete = s_approaches[0].get("concrete", [])
-            success_total = sum(a.get("success_count", 0) for a in s_approaches)
-            parts.append(f"  {sid} (успехов: {success_total}, метод: {method})")
-            if concrete:
-                parts.append(f"    {format_steps(concrete)}")
+            _rel = [a for a in s_approaches if approach_relevant(a, spec_text,
+                                                                  product_type=product_type)]
+            if _rel:
+                _relev[sid] = sorted(_rel, key=lambda a: a.get("success_count", 0), reverse=True)
+        if _relev:
+            parts.append("\nКак работать на сайтах (подходы для других товаров):")
+            budget = 1500
+            used = 0
+            for sid, s_approaches in sorted(_relev.items(),
+                                            key=lambda kv: sum(a.get("success_count", 0) for a in kv[1]),
+                                            reverse=True)[:3]:
+                method = s_approaches[0].get("method", "browser_search")
+                concrete = s_approaches[0].get("concrete", [])
+                success_total = sum(a.get("success_count", 0) for a in s_approaches)
+                block = f"  {sid} (успехов: {success_total}, метод: {method})"
+                if concrete:
+                    block += f"\n    {format_steps(concrete)}"
+                if used + len(block) > budget:
+                    break
+                used += len(block)
+                parts.append(block)
+    # ПРЯМЫЕ URL ПОИСКА: готовые шаблоны из подходов. Агент видит готовый URL
+    # и открывает его сразу (browser_navigate), вместо 6-раундового метания
+    # «ввёл в форму → Enter не сработал → snapshot → tabs → JS».
+    _direct_urls = []
+    for sid, s_approaches in (site_guides or {}).items():
+        u = _site_search_url(s_approaches, sid)
+        if u:
+            _direct_urls.append(f"  {sid}: {u}encodeURIComponent(\"{spec_text[:100]}\")")
+    if _direct_urls:
+        parts.append("\nПРЯМЫЕ URL ПОИСКА (открывай сразу через browser_navigate, БЕЗ формы и Enter):")
+        parts.extend(_direct_urls[:5])
     if confirmed_prices:
         parts.append("\nПохожие цены:")
         for p in confirmed_prices[:3]:
@@ -1646,9 +1957,13 @@ def _execute_graph_tool(name: str, args: dict, engine, mm, spec_text: str = "",
             # tube_galvanized), получает подходы для чужого типа и идёт
             # на неподходящий сайт.
             if classified_product_type and pt and pt != classified_product_type:
-                logger.info("get_approaches: rejected type %r (classified=%r)", pt, classified_product_type)
-                return f"Подходы для типа «{pt}» не подходят — товар относится к «{classified_product_type}»"
-            if not pt and site:
+                logger.info("get_approaches: rejected type %r (classified=%r), trying classified",
+                            pt, classified_product_type)
+                approaches = mm.get_all_approaches(classified_product_type)
+                if not approaches:
+                    return f"Подходы для типа «{pt}» не подходят — товар относится к «{classified_product_type}»"
+                pt = classified_product_type
+            elif not pt and site:
                 approaches = mm.get_approaches_by_site(site)
             elif pt and site:
                 approaches = mm.get_site_approaches(pt, site)
@@ -1925,6 +2240,13 @@ def _extract_domain(url: str) -> str:
         url = "https://" + url
     try:
         host = urlparse(url).hostname or ""
+        if not host:
+            return ""
+        if host.startswith("xn--"):
+            try:
+                host = host.encode("ascii").decode("idna")
+            except Exception:
+                pass
         return host.removeprefix("www.") if host else ""
     except Exception:
         return url.replace("https://", "").replace("http://", "").replace("www.", "").split("/")[0]
@@ -2454,4 +2776,9 @@ async def _query_llm(llm_client, messages, tools, temperature: float | None = No
         llm_circuit.record_success()
         if monitor_callback:
             monitor_callback("llm_call", elapsed)
+        _dbg_msg = (response.get("choices") or [{}])[0].get("message", {})
+        _dbg_content = _dbg_msg.get("content") or ""
+        _dbg_tc = _dbg_msg.get("tool_calls")
+        if not _dbg_tc and _dbg_content and len(_dbg_content) < 1200:
+            logger.info("DEBUG llm content (no tool_calls): %s", _dbg_content[:600].replace(chr(10), " ")[:600])
     return response
