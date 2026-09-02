@@ -752,7 +752,7 @@ async def process_row(
     price_candidate_seen = False
     _yandex_fallback_sent = False
     _min_rounds_on_site = 3
-    _last_shown_approach_id = None  # B6: трекинг последнего показанного подхода
+    _last_shown_approach_id = [None]  # B6: mutable — _execute_graph_tool обновляет [0]
     recent_errors: list[str] = []
     diagnostic_prompts = 0
     empty_probe_streak: dict[str, int] = {}
@@ -1636,7 +1636,7 @@ async def process_row(
                     else:
                         # B6: штрафуем ТОЛЬКО последний показанный подход (не все для сайта)
                         _penalize_approaches(memory_manager,
-                                             [_last_shown_approach_id] if _last_shown_approach_id else [],
+                                             [_last_shown_approach_id[0]] if _last_shown_approach_id[0] else [],
                                              "📉 Force switch:")
                         _session_no_product(failed_site)
                 except Exception as e:
@@ -2016,7 +2016,7 @@ def _execute_graph_tool(name: str, args: dict, engine, mm, spec_text: str = "",
                 lines.append(line)
             # B6: запомнить ID последнего показанного подхода
             if approaches:
-                _last_shown_approach_id = approaches[-1].get("id")
+                _last_shown_approach_id[0] = approaches[-1].get("id")
             return "\n".join(lines)
 
         elif name == "save_approach":
