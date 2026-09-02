@@ -4,9 +4,9 @@
 
 ## Команды
 
-- **Запуск приложения:** `python main.py`
-- **Тесты:** `python -m pytest -q` (ожидается полный зелёный набор: **1031 passed, 2 skipped**; async-тесты mcp_bridge/pdf_parser могут падать, если в `venv` нет `pytest-asyncio`).
-- **Проверка синтаксиса:** `python -m py_compile <files>` (либо запуск pytest).
+- **Запуск приложения:** `python main.py` (из активированного venv)
+- **Тесты:** `venv\Scripts\python.exe -m pytest -q` (ожидается полный зелёный набор: **1146 passed, 2 skipped**). ВАЖНО: запускать ИНТЕРПРЕТАТОРОМ venv (`venv\Scripts\python.exe`), а НЕ системным `python` — системный Python 3.14 не содержит `pdf-inspector` и `camoufox`, из-за чего pdf-e2e/camoufox-тесты падают с «pdf-inspector не установлен» / preset=False. Оба пакета объявлены в `requirements.txt` и установлены в venv.
+- **Проверка синтаксиса:** `venv\Scripts\python.exe -m py_compile <files>` (либо запуск pytest).
 - Окружение: `venv/` (единый, Python 3.13; MinerU 3.4 установлен в нём же).
 
 ## Рабочий процесс
