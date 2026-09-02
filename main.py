@@ -1310,21 +1310,6 @@ class MainWindow(QMainWindow):
             return
         if hasattr(self, '_runner') and self._runner:
             self._runner.stop()
-            # Merge runner results with restored results so nothing is lost
-            if self._runner.results:
-                _old_by_spec = {r.get("spec_text"): r for r in self._original_restored_results
-                               if r.get("spec_text") and r.get("price") is not None}
-                _merged = []
-                for r in self._runner.results:
-                    st = r.get("spec_text", "")
-                    if r.get("price") is not None:
-                        _merged.append(r)
-                    elif st in _old_by_spec:
-                        _merged.append(_old_by_spec[st])
-                    else:
-                        _merged.append(r)
-                self._restored_results = _merged
-                self._original_restored_results = list(_merged)
         self._spinner_timer.stop()
         self._spinner.setFixedSize(0, 0)
         self.start_btn.setEnabled(True)
@@ -1581,6 +1566,38 @@ class MainWindow(QMainWindow):
         else:
             self.add_log("ERR", "pdf", msg)
 
+    def _merge_session_results(self, runner_results: list) -> list:
+        """Merge runner results with original restored results.
+
+        Core rule: iterate over _original_restored_results (ALL specs from session)
+        and supplement with runner_results (latest data). This ensures no spec is
+        ever lost, even if the runner was stopped or crashed mid-way.
+        """
+        _old_by_spec = {r.get("spec_text"): r for r in self._original_restored_results
+                        if r.get("spec_text")}
+        _runner_by_spec = {r.get("spec_text"): r for r in runner_results
+                           if r.get("spec_text")}
+        _new_results = []
+        # 1. Walk ALL original results — keep or upgrade each
+        for r in self._original_restored_results:
+            st = r.get("spec_text", "")
+            runner_r = _runner_by_spec.get(st)
+            if runner_r:
+                if runner_r.get("price") is not None:
+                    _new_results.append(runner_r)       # new result with price → use it
+                elif r.get("price") is not None:
+                    _new_results.append(r)               # old has price, new doesn't → keep old
+                else:
+                    _new_results.append(runner_r)         # both no price → use new (fresh attempt)
+            else:
+                _new_results.append(r)                    # runner didn't process → keep old
+        # 2. Add any NEW specs from runner not in original list
+        _old_specs = {r.get("spec_text") for r in self._original_restored_results}
+        for r in runner_results:
+            if r.get("spec_text") and r.get("spec_text") not in _old_specs:
+                _new_results.append(r)
+        return _new_results
+
     def _on_all_done(self, success, spec_result):
         self._spinner_timer.stop()
         self._spinner.setFixedSize(0, 0)
@@ -1593,17 +1610,7 @@ class MainWindow(QMainWindow):
         errs = spec_result.get("error_count", 0)
 
         if hasattr(self, '_runner') and self._runner and self._runner.results:
-            _old_by_spec = {r.get("spec_text"): r for r in self._original_restored_results
-                           if r.get("spec_text") and r.get("price") is not None}
-            _new_results = []
-            for r in self._runner.results:
-                st = r.get("spec_text", "")
-                if r.get("price") is not None:
-                    _new_results.append(r)
-                elif st in _old_by_spec:
-                    _new_results.append(_old_by_spec[st])
-                else:
-                    _new_results.append(r)
+            _new_results = self._merge_session_results(self._runner.results)
             self._restored_results = _new_results
             self._original_restored_results = list(_new_results)
 
@@ -1628,6 +1635,11 @@ class MainWindow(QMainWindow):
         self._spinner_timer.stop()
         self._spinner.setFixedSize(0, 0)
         self.add_log("ERR", "runner", msg)
+        # Merge partial runner results so nothing is lost on crash
+        if hasattr(self, '_runner') and self._runner and self._runner.results:
+            _new_results = self._merge_session_results(self._runner.results)
+            self._restored_results = _new_results
+            self._original_restored_results = list(_new_results)
         self.start_btn.setEnabled(True)
         self.stop_btn.setEnabled(False)
         self._processing_active = False

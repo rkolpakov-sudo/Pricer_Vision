@@ -1,5 +1,28 @@
 # State Log
 
+## 2026-09-02 — FIX: результаты сессии уничтожались при запуске/остановке/краше
+
+### Баг
+
+`_on_all_done` итерировал ТОЛЬКО по `_runner.results`. Если раннер был остановлен или крахнул — `_runner.results` содержал неполный набор. `_original_restored_results` перезаписывался неполными данными → результаты предыдущего прогона терялись.
+
+Дополнительно: `_on_runner_error` вообще не делал merge → при краше раннера результаты терялись полностью. `stop_processing` делал duplicate merge и перезаписывал `_original_restored_results`.
+
+### Фикс
+
+| Что | Где | Описание |
+|-----|-----|----------|
+| `_merge_session_results()` | `main.py` | Новый helper: итерирует по `_original_restored_results` (ВСЕ спеки), дополняет из `_runner.results` |
+| `_on_all_done` | `main.py` | Использует `_merge_session_results` вместо ручного merge по `_runner.results` |
+| `_on_runner_error` | `main.py` | Добавлен merge при краше раннера |
+| `stop_processing` | `main.py` | Убран дублирующий merge — `_original_restored_results` НЕ перезаписывается до `_on_all_done` |
+
+### Результат
+
+**1146 passed, 2 skipped** — baseline сохранён.
+
+---
+
 ## 2026-09-02 — FIX: 7 логических багов агента (B1-B7)
 
 ### Анализ
