@@ -752,6 +752,7 @@ async def process_row(
     price_candidate_seen = False
     _yandex_fallback_sent = False
     _min_rounds_on_site = 3
+    _last_shown_approach_id = None  # B6: трекинг последнего показанного подхода
     recent_errors: list[str] = []
     diagnostic_prompts = 0
     empty_probe_streak: dict[str, int] = {}
@@ -1328,9 +1329,16 @@ async def process_row(
                 # price_candidate_seen=True → navigate-block → агент застревает).
                 _content_is_empty_probe = _is_empty_search_result(tool_name, tool_content)
                 price_hint = _extract_price_candidate(tool_content)
+                # B2: current_site может устареть после browser_click (до ближайшего snapshot).
+                # Проверяем URL и из tool_content (JSON-LD @id/url, location.href).
+                _effective_url = current_site
+                if not _is_product_card_url(_effective_url) and tool_name in ("browser_evaluate", "evaluate"):
+                    _url_match = re.search(r'https?://[^\s"\'<>]+/i\d+', tool_content)
+                    if _url_match:
+                        _effective_url = _url_match.group(0)
                 if (price_hint and not _content_is_empty_probe
                         and _price_is_relevant(spec_text, spec_meta, tool_content)
-                        and _is_product_card_url(current_site)):
+                        and _is_product_card_url(_effective_url)):
                     price_candidate_seen = True
                     empty_probe_streak.clear()
                     facts.record_price_candidate(str(price_hint))
@@ -1513,6 +1521,7 @@ async def process_row(
                             "site": validated.get("site") or _extract_domain(save_url),
                             "product_name": found_name,
                         })
+                        price_candidate_seen = False
                         logger.info("Row: brand-mismatch fallback candidate: price=%s (%s)",
                                     validated["price"], str(found_name)[:60])
                         messages.append({
@@ -1582,7 +1591,7 @@ async def process_row(
 
         # StuckDetector: при зацикливании — сначала диагностика, уход только после капа
         stuck_level = stuck_detector.detect()
-        if stuck_level == StuckLevel.CRITICAL and rounds_on_site > 5:
+        if stuck_level == StuckLevel.CRITICAL and rounds_on_site > 2:
             if monitor_callback:
                 monitor_callback("stuck", None)
             if diagnostic_prompts < DIAGNOSTIC_PROMPT_CAP:
@@ -1625,7 +1634,10 @@ async def process_row(
                         # Товар на сайте есть (видели цену) — строка не успела. Подходы НЕ штрафуем.
                         logger.info("Force switch: price candidate seen on %s — approaches preserved", failed_site)
                     else:
-                        _penalize_approaches(memory_manager, _shown_approach_ids(failed_site), "📉 Force switch:")
+                        # B6: штрафуем ТОЛЬКО последний показанный подход (не все для сайта)
+                        _penalize_approaches(memory_manager,
+                                             [_last_shown_approach_id] if _last_shown_approach_id else [],
+                                             "📉 Force switch:")
                         _session_no_product(failed_site)
                 except Exception as e:
                     logger.warning("Force switch deprecation failed: %s", e)
@@ -2002,6 +2014,9 @@ def _execute_graph_tool(name: str, args: dict, engine, mm, spec_text: str = "",
                 if sq:
                     line += f" запрос={sq}"
                 lines.append(line)
+            # B6: запомнить ID последнего показанного подхода
+            if approaches:
+                _last_shown_approach_id = approaches[-1].get("id")
             return "\n".join(lines)
 
         elif name == "save_approach":

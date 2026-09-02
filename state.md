@@ -1,5 +1,32 @@
 # State Log
 
+## 2026-09-02 — FIX: 7 логических багов агента (B1-B7)
+
+### Анализ
+
+По runtime.log (13466 строк, 28-29 авг) выявлены 7 логических багов, вызывающих застревание агента и dupliкацию запросов.
+
+### Исправления
+
+| Баг | Приоритет | Файл | Описание |
+|-----|-----------|------|----------|
+| **B1** | P0 | `agent_loop.py:1508` | `price_candidate_seen = False` после fallback save — navigate-block больше не застревает |
+| **B2** | P0 | `agent_loop.py:1331-1340` | Fallback: проверка URL из JSON-LD/`location.href` в `tool_content` если `current_site` устарел после клика |
+| **B3+B4** | P1 | `session_facts.py:23,34-50,61-80` | `_normalize_query()` (lowercase + спецсимволы), fuzzy dedup в `seen_query()`, окно 3→6 |
+| **B5** | P1 | `browser_server.py:450-478,610,192-193` | `_wrap_js_if_needed()` авто-обёртка裸ный JS; обновлён description; `browser_run_code_unsafe` убран из tool registry |
+| **B6** | P2 | `agent_loop.py:755,2013,1636` | `_last_shown_approach_id` трекинг; force-switch штрафует только последний подход (не все для сайта) |
+| **B7** | P2 | `stuck_detector.py` + `agent_loop.py:1594` | 2-step loop (A-B-A-B), time-based (>5мин), result-hash; guard `rounds_on_site > 5` → `> 2` |
+
+### Тесты
+
+Обновлены 2 теста под новое поведение:
+- `test_query_list_kept_last_three` — окно дедуп увеличено до 6
+- `test_stuck_diagnostic_recovery_on_card` — CRITICAL детектируется раньше (guard >2 вместо >5)
+
+**1146 passed, 2 skipped** — baseline сохранён.
+
+---
+
 ## 2026-09-02 — FIX: загруженная сессия + запуск уничтожала результаты
 
 ### Баг

@@ -459,7 +459,7 @@ class TestAgentFlow:
             llm_tool_call("browser_evaluate", {"function": script}),  # round 3
             llm_tool_call("browser_evaluate", {"function": script}),  # round 4
             llm_tool_call("browser_evaluate", {"function": script}),  # round 5
-            llm_tool_call("browser_evaluate", {"function": script}),  # round 6 → CRITICAL (rounds_on_site=6 > 5)
+            llm_tool_call("browser_evaluate", {"function": script}),  # round 6 → CRITICAL (rounds_on_site=6 > 2)
             llm_final(7201.30, url=card_url, site="site.ru"),
         ]
         llm, bridge, engine, mm, cache = make_env(responses=responses)
@@ -475,11 +475,11 @@ class TestAgentFlow:
             monitor_callback=lambda t, v: events.append((t, v)),
         )
         assert any(t == "stuck" for t, _ in events)
-        diagnostic_call = llm.calls[-1]
-        last_content = diagnostic_call[-1].get("content", "")
-        assert "Карточка товара ОТКРЫТА" in last_content
-        assert "ПРОАНАЛИЗИРУЙ" in last_content
-        assert "Принудительно переключись" not in last_content
+        # Diagnostic message may appear in any LLM call (not necessarily the last)
+        all_messages = [m for call in llm.calls for m in call if isinstance(m, dict)]
+        assert any("Карточка товара ОТКРЫТА" in m.get("content", "") for m in all_messages)
+        assert any("ПРОАНАЛИЗИРУЙ" in m.get("content", "") for m in all_messages)
+        assert not any("Принудительно переключись" in m.get("content", "") for m in all_messages)
         assert result.get("price") == 7201.30
         assert result.get("site") == "site.ru"
 

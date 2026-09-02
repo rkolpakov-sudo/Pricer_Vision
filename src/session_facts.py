@@ -20,11 +20,29 @@ import logging
 logger = logging.getLogger("pricer.facts")
 
 REPEAT_NOTICE_THRESHOLD = 3
-MAX_QUERIES_PER_SITE = 3
+MAX_QUERIES_PER_SITE = 6
 MAX_SITES_IN_BLOCK = 6
 MAX_ERRORS = 3
 EVALS_WITHOUT_TYPE_NOTICE = 4
 SITES_WITHOUT_RESULT_NOTICE = 3
+
+
+def _normalize_query(q: str) -> str:
+    """Нормализация текста запроса для fuzzy dedup.
+
+    Убирает спецсимволы, приводит к нижнему регистру, нормализует пробелы.
+    Примеры: 'Ø40' → '40', 'Ду 32' → 'ду 32', 'МС-140' → 'мс 140'
+    """
+    import re as _re
+    low = q.lower().strip()
+    # Замена типовых паттернов
+    low = low.replace("ø", "").replace("диаметр", "ду").replace("дн", "ду")
+    low = low.replace("ду ", "ду").replace("ду", "ду ")  # нормализация "ду"
+    # Убрать всё кроме букв, цифр и пробелов
+    low = _re.sub(r'[^а-яёa-z0-9\s]', ' ', low)
+    # Нормализовать пробелы
+    low = _re.sub(r'\s+', ' ', low).strip()
+    return low
 
 
 class RowFacts:
@@ -63,21 +81,26 @@ class RowFacts:
         if not domain or not q:
             return
         site = self._site(domain)
-        if not site["queries"] or site["queries"][-1] != q:
+        nq = _normalize_query(q)
+        # Проверяем дедуп по нормализованному тексту
+        if site["queries"] and _normalize_query(site["queries"][-1]) == nq:
+            pass  # дубликат — не добавляем
+        else:
             site["queries"].append(q[:120])
             site["queries"] = site["queries"][-MAX_QUERIES_PER_SITE:]
         # Реальный ввод запроса — сбрасываем счётчик «извлечения без ввода».
         site["evals_since_type"] = 0
 
     def seen_query(self, domain: str, query: str) -> int:
-        """Сколько раз этот ТОЧНЫЙ текст запроса уже вводился на домене."""
+        """Сколько раз этот запрос (fuzzy) уже вводился на домене."""
         q = (query or "").strip()
         if not domain or not q:
             return 0
         site = self._sites.get(domain)
         if not site:
             return 0
-        return site["queries"].count(q)
+        nq = _normalize_query(q)
+        return sum(1 for stored in site["queries"] if _normalize_query(stored) == nq)
 
     def last_query(self, domain: str) -> str:
         """Последний введённый запрос на домене (для сравнения деградации)."""

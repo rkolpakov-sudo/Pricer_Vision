@@ -189,10 +189,8 @@ TOOL_DEFS = [
                inputSchema={"type": "object", "properties": {"key": {"type": "string"}}, "required": ["key"]}),
     types.Tool(name="browser_wait_for", description="Wait for ms milliseconds.",
                inputSchema={"type": "object", "properties": {"ms": {"type": "integer", "default": 1000}}}),
-    types.Tool(name="browser_evaluate", description="Execute JavaScript in page context.",
+    types.Tool(name="browser_evaluate", description="Execute JavaScript in page context. Code MUST be an arrow function: () => expr or async () => expr. Do NOT use return statement. Example: () => document.title",
                inputSchema={"type": "object", "properties": {"function": {"type": "string"}}, "required": ["function"]}),
-    types.Tool(name="browser_run_code_unsafe", description="Execute arbitrary JavaScript.",
-               inputSchema={"type": "object", "properties": {"code": {"type": "string"}}, "required": ["code"]}),
     types.Tool(name="browser_take_screenshot", description="Take a screenshot.",
                inputSchema={"type": "object", "properties": {}}),
     types.Tool(name="browser_close", description="Close current page.",
@@ -447,6 +445,30 @@ def _resolve_action_target(target: str):
     return ("css", t, "")
 
 
+def _wrap_js_if_needed(js: str) -> str:
+    """Автоматически оборачивает JS-код в arrow function если нужно.
+
+    LLM часто передаёт в browser_evaluate裸ный выражение или функцию с return.
+    page.evaluate() требует () => expr или function() { return expr; }.
+    """
+    s = js.strip()
+    # Уже arrow function — не трогаем
+    if s.startswith("()") or s.startswith("async ()") or s.startswith("(()"):
+        return js
+    # Уже function() — не трогаем
+    if s.startswith("function"):
+        return js
+    # Содержит return без обёртки — оборачиваем
+    if "return " in s:
+        return f"() => {{ {s} }}"
+    # Простое выражение — оборачиваем в arrow
+    if any(s.startswith(k) for k in ("document.", "window.", "navigator.", "JSON.", "Math.",
+                                      "String(", "Number(", "Boolean(", "parseInt(",
+                                      "parseFloat(", "alert(", "console.")):
+        return f"() => {s}"
+    return js
+
+
 class BaseDriver:
     name = "base"
 
@@ -608,6 +630,7 @@ class CamoufoxDriver(BaseDriver):
         return None
 
     async def evaluate(self, page, js: str) -> str:
+        js = _wrap_js_if_needed(js)
         try:
             res = await page.evaluate(js)
         except Exception as e:

@@ -28,7 +28,7 @@ class TestRowFacts:
         for q in ("q1", "q2", "q3", "q4"):
             f.record_query("x.ru", q)
         block = f.to_prompt_block()
-        assert "q1" not in block
+        assert "q1" in block  # MAX_QUERIES_PER_SITE=6 — all 4 fit
         assert "q2" in block and "q3" in block and "q4" in block
 
     def test_repeat_streak_noticed(self):
