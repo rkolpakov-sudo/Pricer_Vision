@@ -65,6 +65,65 @@ def _value_absorbed(base: str, value: str) -> bool:
     return bool(vw) and all(w in bw for w in vw)
 
 
+# Токены-характеристики, которые в первую очередь отличают «похожие» строки
+# (Ø20 vs Ø50, 20х2,8 vs 32х3,2). При коллизии spec_text предпочитаем их.
+_DIM_TOKEN_RE = re.compile(
+    r"(?i)(Ø\s*\d+[\w.,/№-]*|Ду\s*\d+|ДУ\s*\d+|DN\s*\d+"
+    r"|\b\d+(?:[.,]\d+)?\s*[хx×*]\s*\d+(?:[.,]\d+)?"
+    r"|\b\d+\s*мм(?![\wа-яё]))"
+)
+
+
+def _raw_words(it: "SpecItem") -> set[str]:
+    """Слова «сырья» строки (name_raw/spec/article/brand) — чем строки реально
+    отличаются, если собранный текст схлопнулся."""
+    base = " ".join([it.name_raw or "", it.spec or "", it.article or "", it.brand or ""])
+    return set(_ident_words(base))
+
+
+def _disambiguating_suffix(prev: "SpecItem", cur: "SpecItem") -> str:
+    """Детерминированный суффикс, отличающий cur от prev при равном spec_text.
+
+    Берём из сырья cur токен-характеристику, которой нет у prev (Ø20, DN15,
+    20х2,8, мм), затем любое слово-отличие, затем — статью; иначе ''.
+    """
+    pw, cw = _raw_words(prev), _raw_words(cur)
+    diff = cw - pw
+    if not diff:
+        return ""
+    raw = " ".join([cur.name_raw or "", cur.spec or "", cur.article or ""])
+    dims = [m.group(0).strip() for m in _DIM_TOKEN_RE.finditer(raw)]
+    for d in dims:
+        if _norm_ident(d) in diff:
+            return d
+    for w in diff:
+        if len(w) >= 3:
+            return w
+    return ""
+
+
+def _disambiguate_spec_texts(items: list["SpecItem"]) -> list["SpecItem"]:
+    """Строки с разным сырьём не должны делить один spec_text.
+
+    Предохранитель: характеристика «уехала» в неожиданную колонку/позицию и текст
+    схлопнулся (напр. размер только в «ГОСТ 3262-75 Ø20» — уже сохранён вариантом B;
+    здесь — любой другой перекос). Различающимся строкам дописываем детерминированный
+    суффикс из отличия сырья. Строки с ИДЕНТИЧНЫМ сырьём (один товар × N кол-во) —
+    легитимно делят текст (одна цена)."""
+    seen: dict[str, "SpecItem"] = {}
+    out = []
+    for it in items:
+        if it.text in seen:
+            suffix = _disambiguating_suffix(seen[it.text], it)
+            if suffix:
+                it.text = f"{it.text} {suffix}".strip()
+                seen[it.text] = it
+        else:
+            seen[it.text] = it
+        out.append(it)
+    return out
+
+
 class SpecItem:
     """Структурированное описание товара из Excel."""
     def __init__(self, text: str, article: str = "", brand: str = "", name_raw: str = "",
@@ -83,7 +142,7 @@ class SpecItem:
 
 from src._labels import _CAT_RU_LABELS, _SUBCAT_RU_LABELS
 from src.column_classifier import classify_columns
-from src.approach_relevance import is_standard_reference
+from src.approach_relevance import is_standard_reference, standard_citation_tail
 
 
 logger = logging.getLogger(__name__)
@@ -118,6 +177,7 @@ class ExcelWriter:
         self._header_map: Optional[dict] = None
         self._headers: list[str] = []
         self._columns_mapping: Optional[dict] = None
+        self._spec_cache: Optional[list[SpecItem]] = None
 
     # --- Loading ------------------------------------------------------------
 
@@ -138,6 +198,7 @@ class ExcelWriter:
         self._header_map = self._find_output_headers()
         mapping = self.detect_columns(raw_headers)
         self._columns_mapping = mapping
+        self._spec_cache = None
         logger.info("Spec loaded: %d rows; columns: name=%s article=%s brand=%s spec=%s uom=%s qty=%s weight=%s position=%s",
                     data_rows, mapping.get("name"), mapping.get("article"),
                     mapping.get("brand"), mapping.get("spec"), mapping.get("uom"),
@@ -255,7 +316,12 @@ class ExcelWriter:
             if not val or val in ("None", ""):
                 continue
             if is_standard_reference(val):
-                continue
+                # Чистую ссылку дропаем, но если внутри сидит характеристика
+                # («ГОСТ 3262-75 Ø20») — сохраняем её: иначе строки, различающиеся
+                # только размером, схлопнутся в один spec_text (одна цена на Ø20..Ø50).
+                val = standard_citation_tail(val) or ""
+                if not val:
+                    continue
             if _value_absorbed(full_name, val):
                 continue
             full_name = f"{full_name} {val}".strip() if full_name else val
@@ -265,7 +331,9 @@ class ExcelWriter:
             if not val or val in ("None", ""):
                 continue
             if is_standard_reference(val):
-                continue
+                val = standard_citation_tail(val) or ""
+                if not val:
+                    continue
             if _value_absorbed(full_name, val):
                 continue
             full_name = f"{full_name} {val}".strip() if full_name else val
@@ -331,8 +399,23 @@ class ExcelWriter:
         """Строит SpecItem для одной строки листа (семантика — как в get_specs).
 
         Используется и предпросмотром (для отметки «пропустить»), и прогоном —
-        чтобы spec_text совпадали 1:1.
+        чтобы spec_text совпадали 1:1. Отдаёт строку из общего кэша (тот же текст,
+        что и в get_specs, включая дедупликацию коллизий).
         """
+        if self._ws is None or self._headers is None:
+            return None
+        for item in self._all_spec_items():
+            if item.row == excel_row:
+                return item
+        return None
+
+    def get_specs(self) -> list[SpecItem]:
+        if self._ws is None or self._headers is None:
+            return []
+        return list(self._all_spec_items())
+
+    def _raw_spec_for_row(self, excel_row: int) -> SpecItem | None:
+        """Собирает SpecItem для одной строки БЕЗ дедупликации (внутренний)."""
         if self._ws is None or self._headers is None:
             return None
         mapping = self._columns_mapping
@@ -365,10 +448,20 @@ class ExcelWriter:
             qty=qty_val,
         )
 
-    def get_specs(self) -> list[SpecItem]:
-        if self._ws is None or self._headers is None:
-            return []
-        return [s for s in (self.spec_for_row(r) for r in range(2, self._ws.max_row + 1)) if s is not None]
+    def _all_spec_items(self) -> list[SpecItem]:
+        """Кэшированный список всех SpecItem с дедупликацией коллизий spec_text.
+
+        Коллизия — когда у РАЗНЫХ строк получился одинаковый текст (характеристика
+        «уехала» из name/spec/article и текст схлопнулся). Строкам с разным сырьём
+        (name_raw/spec/article) добавляется детерминированный суффикс из отличия —
+        иначе они обменяются ценой через rule-8/сессию. Кэш сбрасывается в load_spec.
+        """
+        if self._spec_cache is None:
+            if self._ws is None:
+                return []
+            items = [s for s in (self._raw_spec_for_row(r) for r in range(2, self._ws.max_row + 1)) if s is not None]
+            self._spec_cache = _disambiguate_spec_texts(items)
+        return self._spec_cache
 
     def _concat_cells(self, row: int, indices: list[int]) -> str:
         ws = self._ws

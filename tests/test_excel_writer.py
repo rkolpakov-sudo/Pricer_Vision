@@ -139,6 +139,72 @@ class TestBuildItemName:
         name, _, _ = w.build_item_name(2, mapping)
         assert name == "Трубка ENERGOFLEX Super SK 60/40-2"
 
+    def test_standard_tail_size_kept(self, tmp_path):
+        """Размер внутри ссылки на стандарт («ГОСТ 3262-75 Ø20») НЕ теряется:
+        иначе Ø20..Ø50 схлопнутся в один spec_text и получат одну цену."""
+        path = make_spec_xlsx(
+            tmp_path,
+            ["Наименование", "Тип, марка, обозначение документа", "Кол-во", "Ед."],
+            [
+                ["Трубопроводы из стальных водогазопроводных легких труб", "ГОСТ 3262-75 Ø20", 10, "м"],
+                ["Трубопроводы из стальных водогазопроводных легких труб", "ГОСТ 3262-75 Ø50", 65, "м"],
+            ],
+        )
+        w = ExcelWriter({})
+        w.load_spec(path)
+        mapping = w.detect_columns(w.headers)
+        n20, _, _ = w.build_item_name(2, mapping)
+        n50, _, _ = w.build_item_name(3, mapping)
+        assert n20.endswith("Ø20")
+        assert n50.endswith("Ø50")
+        assert n20 != n50
+
+    def test_standard_xsize_tail_kept(self, tmp_path):
+        """Типоразмер через x/х внутри ГОСТ тоже сохраняется (ГОСТ 3262-75 20х2,8)."""
+        from src.approach_relevance import standard_citation_tail
+        assert standard_citation_tail("ГОСТ 3262-75 20х2,8") == "20х2,8"
+        assert standard_citation_tail("ГОСТ 3262-75 Ø20") == "Ø20"
+        assert standard_citation_tail("ГОСТ Р 56729-2015") == ""
+        assert standard_citation_tail("ГОСТ 3262-75") == ""
+
+    def test_identical_text_rows_disambiguated_when_raw_differs(self, tmp_path):
+        """Предохранитель C: если текст схлопнулся, а сырьё строк различается —
+        тексты расходятся суффиксом (иначе rule-8/сессия обменяют их ценами)."""
+        path = make_spec_xlsx(
+            tmp_path,
+            ["Наименование", "Тип, марка, обозначение документа", "Кол-во", "Ед."],
+            [
+                ["Труба стальная", "ГОСТ 10704-91", 10, "м"],
+                ["Труба стальная", "ГОСТ 10704-91", 50, "м"],
+            ],
+        )
+        w = ExcelWriter({})
+        w.load_spec(path)
+        specs = w.get_specs()
+        texts = [s.text for s in specs]
+        # обе строки — чистый ГОСТ без размера → B их не различает; сырьё одинаково,
+        # кол-во разное → один товар повторён: легитимно делить один текст.
+        assert len(set(texts)) == 1
+
+    def test_collision_with_article_diff_disambiguates(self, tmp_path):
+        """Если размер уехал только в «Код оборудования» (не в имя/тип), а ГОСТ в типе
+        чистый — строки всё равно различимы через артикул-сырьё."""
+        path = make_spec_xlsx(
+            tmp_path,
+            ["Наименование", "Тип, марка", "Код оборудования", "Кол-во", "Ед."],
+            [
+                ["Патрубок стальной", "ГОСТ 10704-91", "Ø20", 10, "шт."],
+                ["Патрубок стальной", "ГОСТ 10704-91", "Ø50", 10, "шт."],
+            ],
+        )
+        w = ExcelWriter({})
+        w.load_spec(path)
+        specs = w.get_specs()
+        texts = [s.text for s in specs]
+        assert len(texts) == 2
+        assert texts[0] != texts[1]
+        assert "Ø20" in texts[0] or "Ø50" in texts[1] or "Ø20" in texts[1] or "Ø50" in texts[0]
+
     def test_duplicate_value_not_appended(self, tmp_path):
         path = make_spec_xlsx(
             tmp_path,
