@@ -320,6 +320,7 @@ class SessionFacts:
     def __init__(self):
         self._status: dict[tuple[str, str], str] = {}
         self._working: dict[str, dict] = {}
+        self._bad_card_urls: set[str] = set()
 
     @staticmethod
     def _key(product_type: str, brand: str) -> str:
@@ -358,6 +359,16 @@ class SessionFacts:
             return
         self._status[key] = "no_product"
 
+    def record_bad_card_url(self, url: str) -> None:
+        """Зафиксировать URL карточки как битый (404, не тот товар и т.п.)."""
+        u = (url or "").strip()
+        if u:
+            self._bad_card_urls.add(u)
+
+    def is_bad_card_url(self, url: str) -> bool:
+        """Проверить, был ли URL ранее помечен как битый."""
+        return (url or "").strip() in self._bad_card_urls
+
     def _relevant(self, product_type: str, brand: str) -> list[tuple[str, str]]:
         key = self._key(product_type, brand)
         key_type = f"{product_type}|" if product_type and product_type != "unknown" else ""
@@ -370,7 +381,8 @@ class SessionFacts:
 
     def to_dict(self) -> dict:
         status = {f"{k[0]}||{k[1]}": v for k, v in self._status.items()}
-        return {"status": status, "working": dict(self._working)}
+        return {"status": status, "working": dict(self._working),
+                "bad_card_urls": list(self._bad_card_urls)}
 
     def from_dict(self, data: dict):
         self._status = {}
@@ -379,6 +391,7 @@ class SessionFacts:
             if len(parts) == 2:
                 self._status[(parts[0], parts[1])] = v
         self._working = dict(data.get("working", {}))
+        self._bad_card_urls = set(data.get("bad_card_urls", []))
 
     def to_context_blocks(self, product_type: str, brand: str,
                           limit: int = 4) -> tuple[str, str]:

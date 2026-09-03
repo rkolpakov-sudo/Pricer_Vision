@@ -508,6 +508,16 @@ class MCPAgentRunner(QThread):
             except Exception as e:
                 logger.warning("Learning loop consolidation failed: %s", e)
 
+            # Сохраняем живые кэши обратно для персистентности сессии.
+            # Без этого session_facts/negative_cache/site_blacklist, накопленные
+            # за прогон, теряются — _build_session_state читает из
+            # _restored_caches (оригинальный dict), который никогда не обновлялся.
+            self._restored_caches = {
+                "negative_cache": negative_cache.to_dict(),
+                "site_blacklist": site_blacklist.to_dict(),
+                "session_facts": session_facts.to_dict(),
+            }
+
             total = len(self.results)
             found = sum(1 for r in self.results if r.get("price") is not None)
             review = sum(1 for r in self.results if r.get("requires_review"))

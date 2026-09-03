@@ -391,7 +391,8 @@ def _site_search_url(approaches: list[dict], site_id: str) -> str:
     return ""
 
 
-def _find_card_url(approaches: list[dict], site_id: str, spec_text: str = "") -> str:
+def _find_card_url(approaches: list[dict], site_id: str, spec_text: str = "",
+                   session_facts: "SessionFacts | None" = None) -> str:
     """Прямая ссылка на карточку товара из подходов для сайта.
 
     Подходы иногда содержат browser_navigate на конкретную карточку
@@ -399,6 +400,7 @@ def _find_card_url(approaches: list[dict], site_id: str, spec_text: str = "") ->
     через поиск, но такая карточка известна — открываем её напрямую.
     Карточка возвращается ТОЛЬКО если подход релевантен текущему товару
     (иначе для конвектора подскажем карточку трубы — ложная наводка).
+    Пропускает URL, ранее помеченные как битые (404, не тот товар).
     """
     if not approaches:
         return ""
@@ -410,6 +412,8 @@ def _find_card_url(approaches: list[dict], site_id: str, spec_text: str = "") ->
         for s in (a.get("concrete") or []):
             u = s.get("url", "")
             if s.get("action") == "browser_navigate" and ("/product/" in u or "/item/" in u):
+                if session_facts and session_facts.is_bad_card_url(u):
+                    continue
                 return u
     return ""
 
@@ -564,9 +568,12 @@ async def process_row(
     if not fresh and confirmed_prices:
         # Исключаем цены с невалидными URL (главная/поиск/семейная страница) —
         # они не могут быть источником для переиспользования.
+        # Также исключаем URL, помеченные как битые (404/не тот товар).
         reusable = [p for p in confirmed_prices
                     if not _is_homepage_or_search_url(p.get("url", ""))
-                    and not _is_family_page(p.get("url", ""))]
+                    and not _is_family_page(p.get("url", ""))
+                    and not (session_facts is not None
+                             and session_facts.is_bad_card_url(p.get("url", "")))]
         if reusable:
             best = max(reusable, key=lambda p: p.get("confidence", 0))
             conf = best.get("confidence", 0)
@@ -736,6 +743,7 @@ async def process_row(
     CONTENT_ONLY_HARD_CAP = 6
     _last_was_null = False
     _hinted_card_urls: set[str] = set()
+    _last_hinted_url: str = ""
 
     def _shown_approach_ids(domain: str) -> list:
         """Подходы, показанные агенту для текущего сайта (для точечного штрафа)."""
@@ -1231,6 +1239,21 @@ async def process_row(
                 if len(recent_errors) > 4:
                     recent_errors.pop(0)
                 facts.record_error(tool_content)
+                # Детект 404 при навигации на подсказанную карточку
+                if (_last_hinted_url and tool_name == "browser_navigate"
+                        and any(kw in tool_content.lower() for kw in
+                                ("404", "not found", "не найдена"))):
+                    logger.warning("🚫 Hinted card URL navigation failed (404): %s",
+                                   _last_hinted_url)
+                    if session_facts is not None:
+                        session_facts.record_bad_card_url(_last_hinted_url)
+                    messages.append({
+                        "role": "user",
+                        "content": ("⚠️ Навигация на подсказанную карточку вернула 404. "
+                                    "URL помечен как битый. Вернись к результатам поиска "
+                                    "через browser_navigate_back и продолжи поиск."),
+                    })
+                    _last_hinted_url = ""
             if tool_name == "browser_evaluate":
                 js_key = str(tool_args.get("function", ""))[:80]
                 result_hash = hashlib.md5(tool_content.encode("utf-8", "ignore")).hexdigest()[:8]
@@ -1246,6 +1269,25 @@ async def process_row(
                     if "Page URL:" in line:
                         url = line.split("Page URL:")[-1].strip().split()[0] if line.split("Page URL:")[-1].strip() else ""
                         if url and url != current_site:
+                            # Детект битой подсказанной карточки: если агенту была
+                            # подсказана прямая карточка (_last_hinted_url), а он
+                            # перешёл на другой URL того же домена — карточка была
+                            # неверной (404/не тот товар). Помечаем URL как битый,
+                            # чтобы не подсказывать повторно для других строк.
+                            if (_last_hinted_url
+                                    and _extract_domain(url) == _extract_domain(_last_hinted_url)
+                                    and url != _last_hinted_url):
+                                logger.warning("🚫 Hinted card URL %s → agent navigated to %s — marking as bad",
+                                               _last_hinted_url, url)
+                                if session_facts is not None:
+                                    session_facts.record_bad_card_url(_last_hinted_url)
+                                messages.append({
+                                    "role": "user",
+                                    "content": ("⚠️ Подсказанная карточка оказалась неверной (другой товар). "
+                                                "URL помечен как битый. Вернись к результатам поиска "
+                                                "через browser_navigate_back и продолжи поиск на той же странице."),
+                                })
+                                _last_hinted_url = ""
                             if _extract_domain(url) != _extract_domain(current_site):
                                 price_candidate_seen = False
                                 recent_errors = []
@@ -1256,22 +1298,43 @@ async def process_row(
                             if _is_product_card_url(current_site):
                                 facts.record_card_open()
                         break
+                # Детект 404 страницы: если агент открыл подсказанную карточку
+                # и страница содержит признаки 404 — помечаем URL как битый.
+                if (_last_hinted_url and current_site == _last_hinted_url
+                        and any(kw in tool_content.lower() for kw in
+                                ("404", "не найдена", "страница не найдена",
+                                 "page not found", "not found", "устарела"))):
+                    logger.warning("🚫 Hinted card URL returned 404-like page: %s",
+                                   _last_hinted_url)
+                    if session_facts is not None:
+                        session_facts.record_bad_card_url(_last_hinted_url)
+                    messages.append({
+                        "role": "user",
+                        "content": ("⚠️ Страница подсказанной карточки вернула 404/ошибку. "
+                                    "URL помечен как битый. Вернись к результатам поиска "
+                                    "через browser_navigate_back и продолжи поиск."),
+                    })
+                    _last_hinted_url = ""
                 # Подсказка: для сайта известна прямая карточка товара — предложить
                 # открыть её напрямую вместо блуждания по форме (регрессия: агент
                 # вводит запрос, получает пусто и не знает, что карточка уже
                 # известна из подхода). Срабатывает на любой странице сайта.
                 if not _is_product_card_url(current_site):
-                    _card_url = _find_card_url(all_flat, _extract_domain(current_site), spec_text)
+                    _card_url = _find_card_url(all_flat, _extract_domain(current_site),
+                                               spec_text, session_facts)
                     if _card_url and _card_url not in _hinted_card_urls:
                         _hinted_card_urls.add(_card_url)
+                        _last_hinted_url = _card_url
                         logger.warning("💡 Known product card for %s — hinting direct URL",
                                        _extract_domain(current_site))
                         messages.append({
                             "role": "user",
                             "content": (f"💡 Для этого товара на сайте {_extract_domain(current_site)} "
-                                        f"уже известна прямая карточка: {_card_url}. "
-                                        "Открой её через browser_navigate и извлеки цену (browser_extract), "
-                                        "НЕ ищи через поиск — товар точно есть на этой карточке."),
+                                        f"известна прямая карточка: {_card_url}. "
+                                        "Открой её через browser_navigate и извлеки цену (browser_extract). "
+                                        "ВАЖНО: если это НЕ тот товар (другое название/тип) — "
+                                        "НЕ сохраняй цену, вернись к результатам поиска через browser_navigate_back "
+                                        "и продолжи поиск на той же странице."),
                         })
 
             # Captcha/block detection — skip site immediately
@@ -1571,6 +1634,7 @@ async def process_row(
                         _store_semantic_cache(semantic_cache, spec_text, final)
                         _session_success(validated.get("site") or _extract_domain(save_url),
                                          url=save_url, query=search_text)
+                        _last_hinted_url = ""
                         return _result_to_schema(final)
                     logger.info("Low confidence (%.2f) — saved, continuing search", validated['confidence'])
                     messages.append({
