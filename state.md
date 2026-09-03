@@ -1,5 +1,41 @@
 # State Log
 
+## 2026-09-03 — FIX: запуск загруженной сессии уничтожал/обрезал результаты (4 бага)
+
+### Баг
+
+При запуске загруженной сессии результаты **перезапускались заново** и **обрезались** на несколько строк. 4 точки отказа:
+
+| # | Где | Проблема |
+|---|-----|----------|
+| A | `mcp_agent_runner.py:307` | `continue` для `price=None` в matcher'е — строки без цены **всегда** перезапускались заново |
+| B | `mcp_agent_runner.py:323` | `_found += 1` без проверки price — неверная статистика |
+| C | `main.py:1614-1615` | `_original_restored_results` перезаписывалась после `_on_all_done` — immutable snapshot уничтожался |
+| D | `main.py:1576-1584` | `_merge_session_results` матчил только по exact `spec_text` — различия форматирования теряли строки |
+
+### Сценарий бага
+
+1. Сессия: 80 строк (30 с ценой, 50 без)
+2. Старт → 30 восстанавливаются, 50 **перезапускаются с нуля**
+3. 10 из 50 не находятся → `_restored_results` = 70 (было 80)
+4. `_original_restored_results = list(_new_results)` → 70
+5. Повторный запуск → matcher ищет в 70 → ещё 10 не матчится → **деградация**
+
+### Фикс
+
+| # | Файл | Что |
+|---|------|-----|
+| A | `mcp_agent_runner.py` | Убран `continue` для `price=None` — восстанавливаются **ВСЕ** строки |
+| B | `mcp_agent_runner.py` | `_found += 1` только при `price is not None` |
+| C | `main.py` | `_original_restored_results` **не перезаписывается** после `_on_all_done`/`_on_runner_error` |
+| D | `main.py` | `_merge_session_results` + normalized fallback (`lowercase + collapse whitespace`) при несовпадении `spec_text` |
+
+### Результат
+
+**1146 passed, 2 skipped** — baseline сохранён.
+
+---
+
 ## 2026-09-02 — FIX: _last_shown_approach_id никогда не обновлялся (approach penalty = no-op)
 
 ### Баг

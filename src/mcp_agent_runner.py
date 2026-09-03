@@ -304,8 +304,6 @@ class MCPAgentRunner(QThread):
                     spec_row = getattr(spec, "row", 0)
                     _match = None
                     for prev in self._restored_results:
-                        if prev.get("price") is None:
-                            continue
                         prev_row = prev.get("excel_row", 0)
                         if spec_row and prev_row and prev_row == spec_row:
                             _match = prev
@@ -320,7 +318,8 @@ class MCPAgentRunner(QThread):
                         self.results.append(result)
                         row_idx = original_index.get(id(spec), i)
                         self._processed += 1
-                        self._found += 1
+                        if result.get("price") is not None:
+                            self._found += 1
                         self.metrics_signal.emit(self._current_metrics())
                         self.monitor_signal.emit({"type": "row_done", "idx": i + 1, "total": total})
                         self.row_done_signal.emit(row_idx, result)

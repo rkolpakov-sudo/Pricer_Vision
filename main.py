@@ -1566,6 +1566,11 @@ class MainWindow(QMainWindow):
         else:
             self.add_log("ERR", "pdf", msg)
 
+    @staticmethod
+    def _norm(text: str) -> str:
+        """Нормализация для сравнения: lowercase + схлопывание пробелов."""
+        return " ".join((text or "").lower().split())
+
     def _merge_session_results(self, runner_results: list) -> list:
         """Merge runner results with original restored results.
 
@@ -1577,11 +1582,25 @@ class MainWindow(QMainWindow):
                         if r.get("spec_text")}
         _runner_by_spec = {r.get("spec_text"): r for r in runner_results
                            if r.get("spec_text")}
+        # Normalized fallback index (lowercase + collapse whitespace)
+        _old_by_norm = {}
+        for r in self._original_restored_results:
+            st = r.get("spec_text", "")
+            if st:
+                _old_by_norm[self._norm(st)] = r
+        _runner_by_norm = {}
+        for r in runner_results:
+            st = r.get("spec_text", "")
+            if st:
+                _runner_by_norm[self._norm(st)] = r
         _new_results = []
         # 1. Walk ALL original results — keep or upgrade each
         for r in self._original_restored_results:
             st = r.get("spec_text", "")
+            # Exact match first, then normalized fallback
             runner_r = _runner_by_spec.get(st)
+            if runner_r is None and st:
+                runner_r = _runner_by_norm.get(self._norm(st))
             if runner_r:
                 if runner_r.get("price") is not None:
                     _new_results.append(runner_r)       # new result with price → use it
@@ -1593,8 +1612,10 @@ class MainWindow(QMainWindow):
                 _new_results.append(r)                    # runner didn't process → keep old
         # 2. Add any NEW specs from runner not in original list
         _old_specs = {r.get("spec_text") for r in self._original_restored_results}
+        _old_norms = {self._norm(s) for s in _old_specs if s}
         for r in runner_results:
-            if r.get("spec_text") and r.get("spec_text") not in _old_specs:
+            st = r.get("spec_text", "")
+            if st and st not in _old_specs and self._norm(st) not in _old_norms:
                 _new_results.append(r)
         return _new_results
 
@@ -1612,7 +1633,6 @@ class MainWindow(QMainWindow):
         if hasattr(self, '_runner') and self._runner and self._runner.results:
             _new_results = self._merge_session_results(self._runner.results)
             self._restored_results = _new_results
-            self._original_restored_results = list(_new_results)
 
         self.add_log("INFO", "complete",
             f"Готово: {found}/{total} найдено, {errs} ошибок")
@@ -1639,7 +1659,6 @@ class MainWindow(QMainWindow):
         if hasattr(self, '_runner') and self._runner and self._runner.results:
             _new_results = self._merge_session_results(self._runner.results)
             self._restored_results = _new_results
-            self._original_restored_results = list(_new_results)
         self.start_btn.setEnabled(True)
         self.stop_btn.setEnabled(False)
         self._processing_active = False
