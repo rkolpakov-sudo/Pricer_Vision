@@ -6,6 +6,18 @@ from src.approach_relevance import approach_relevant
 
 logger = logging.getLogger("pricer.scheduler")
 
+# Маркетплейсы-агрегаторы не выбираются целевым сайтом батча (правило 12):
+# цена не от магазина, карточки нестабильны (404). Магазин — отдельный сайт-продавец.
+_MARKETPLACE_DOMAINS = {"market.yandex.ru", "yandex.market.ru", "market.yandex.com"}
+
+
+def _is_marketplace(site_id: str) -> bool:
+    s = (site_id or "").strip().lower().rstrip("/")
+    for prefix in ("https://", "http://", "www."):
+        if s.startswith(prefix):
+            s = s[len(prefix):]
+    return s.split("/")[0] in _MARKETPLACE_DOMAINS
+
 
 @dataclass
 class ProcessingBatch:
@@ -54,6 +66,7 @@ class TaskScheduler:
             logger.warning("classify_product_type failed: %s", e)
             product_type = "unknown"
         sites = self.mm.get_sites(product_type)
+        sites = [s for s in sites if not _is_marketplace(s.get("id", ""))]
         if not sites:
             return "yandex.ru"
 

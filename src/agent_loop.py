@@ -202,7 +202,7 @@ SYSTEM_PROMPT = """Ты — опытный пользователь с дост�
 9. Если ты сделал >10 шагов на одном сайте без результата — принудительно переключись на другой сайт из списка.
 10. Если не знаешь, как работать на сайте — вызови get_hints. В хинтах может быть написано, где искать цену, какие селекторы использовать.
 11. Если артикул не дал результата на первом сайте — на следующем сайте ищи уже по ПОЛНОМУ названию товара из спецификации, а не по артикулу.
-12. Яндекс — это ТОЛЬКО поисковик для нахождения сайта магазина. Если у тебя нет сайтов для товара — иди на yandex.ru, найди товар, кликни на ссылку магазина из результатов поиска и извлеки цену ИЗ КАРТОЧКИ ТОВАРА НА САЙТЕ МАГАЗИНА. НЕ извлекай цену из сниппета Яндекса — Яндекс не источник цен.
+12. Яндекс — это ТОЛЬКО поисковик для нахождения сайта магазина. Если у тебя нет сайтов для товара — иди на yandex.ru, найди товар, кликни на ссылку магазина из результатов поиска и извлеки цену ИЗ КАРТОЧКИ ТОВАРА НА САЙТЕ МАГАЗИНА. НЕ извлекай цену из сниппета Яндекса — Яндекс не источник цен. Яндекс.Маркет (market.yandex.ru) — это МАРКЕТПЛЕЙС-агрегатор, а НЕ магазин: карточки нестабильны (часто 404), цена не от магазина. НЕ открывай market.yandex.ru как источник цены и НЕ сохраняй цену с него — система отклонит.
 13. После save_confirmed_price можно продолжить поиск на других сайтах для лучшей цены, но базовая цена уже сохранена.
 14. Если сайт явно НЕ ПОДХОДИТ для товара (например, сантехнический сайт для кабеля, или производитель труб для электроники) — НЕМЕДЛЕННО переключайся на следующий сайт. Не трать больше 2 раундов на заведомо неподходящий сайт.
 15. НЕ собирай URL поиска вручную и НЕ делай percent-кодирование кириллицы руками
@@ -404,6 +404,8 @@ def _find_card_url(approaches: list[dict], site_id: str, spec_text: str = "",
     """
     if not approaches:
         return ""
+    if _marketplace_site(site_id):
+        return ""
     for a in approaches:
         if (a.get("site_id") or "") != site_id:
             continue
@@ -454,7 +456,10 @@ def _summarize_tool(name: str, args: dict) -> str:
 
 def _summarize_result(tool_name: str, result: str) -> str:
     if not isinstance(result, str) or result.startswith("error:"):
-        return result[:100] if result else "ERR"
+        # Ошибки показываем до 240 символов: сырой Playwright-текст (Call log)
+        # съедал первые 100 символов и скрывал причину/подсказку в хвосте
+        # (click-fallback force/link), лог выглядел как старый 10с-таймаут.
+        return result[:240] if result else "ERR"
     if result in ("ok", "OK", ""):
         return "ok"
     trimmed = result.strip()
@@ -566,12 +571,10 @@ async def process_row(
 
     # code-enforced rule 8: reuse high-confidence prices without LLM
     if not fresh and confirmed_prices:
-        # Исключаем цены с невалидными URL (главная/поиск/семейная страница) —
-        # они не могут быть источником для переиспользования.
-        # Также исключаем URL, помеченные как битые (404/не тот товар).
+        # Исключаем цены, непригодные как источник: маркетплейсы, невалидные URL
+        # (главная/поиск/семейная страница), stale, битые из сессии, мусорный conf.
         reusable = [p for p in confirmed_prices
-                    if not _is_homepage_or_search_url(p.get("url", ""))
-                    and not _is_family_page(p.get("url", ""))
+                    if _trustable_price(p)
                     and not (session_facts is not None
                              and session_facts.is_bad_card_url(p.get("url", "")))]
         if reusable:
@@ -625,6 +628,8 @@ async def process_row(
             return _result_to_schema(result)
 
     sites = memory_manager.get_sites(product_type)
+    # Маркетплейсы (market.yandex.ru) — не магазины: исключаем из целевых сайтов.
+    sites = [s for s in sites if not _marketplace_site(s.get("id", ""))]
     # Fallback для unknown-типа: сайты, где УЖЕ есть успешные подходы/цены,
     # подтягиваются в список (иначе агент для «Бобышки» не видит santech
     # и блуждает через yandex — потеря раундов).
@@ -634,6 +639,8 @@ async def process_row(
         for a in _flat_sites:
             sid = a.get("site_id", "")
             if sid and (a.get("success_count") or 0) > 0:
+                if _marketplace_site(sid):
+                    continue
                 if not approach_relevant(a, search_text):
                     continue
                 _site_meta.setdefault(sid, {
@@ -665,7 +672,7 @@ async def process_row(
     site_guides = {}
     for a in all_flat:
         sid = a.get("site_id", "")
-        if sid:
+        if sid and not _marketplace_site(sid):
             site_guides.setdefault(sid, []).append(a)
 
     # Load SOLD_AT concepts for this product type
@@ -1497,6 +1504,18 @@ async def process_row(
                     })
                     continue
                 save_url = tool_args.get("url") or current_site or ""
+                if _marketplace_site(save_url) or _marketplace_site(current_site):
+                    logger.warning("🚫 Marketplace save rejected: spec=%s url=%s", spec_text[:50], save_url)
+                    price_candidate_seen = False
+                    messages.append({
+                        "role": "tool",
+                        "tool_call_id": tc.get("id", ""),
+                        "content": ("error: маркетплейс-агрегатор (market.yandex.ru и т.п.) — НЕ источник "
+                                    "цены магазина: карточки нестабильны (404), цена не от магазина "
+                                    "(правило 12). Уйди с маркетплейса и найди товар на сайте магазина "
+                                    "(например через yandex.ru поиск или известный магазин)."),
+                    })
+                    continue
                 if _is_family_page(save_url) or _is_family_page(current_site):
                     logger.warning("⚠️ Family page save rejected: spec=%s url=%s", spec_text[:50], save_url)
                     price_candidate_seen = False
@@ -1972,13 +1991,13 @@ def _build_context(spec_text, product_type, approaches, confirmed_prices, sites,
     if _direct_urls:
         parts.append("\nПРЯМЫЕ URL ПОИСКА (открывай сразу через browser_navigate, БЕЗ формы и Enter):")
         parts.extend(_direct_urls[:5])
-    if confirmed_prices:
-        parts.append("\nПохожие цены:")
-        for p in confirmed_prices[:3]:
+    _trustable = [p for p in confirmed_prices if _trustable_price(p)]
+    if _trustable:
+        parts.append("\nПохожие цены (проверенные, можно использовать):")
+        for p in _trustable[:3]:
             pt = (p.get("spec_text") or "")[:60]
             conf = p.get("confidence", 0)
-            stale = " ⚠️" if p.get("is_stale") else ""
-            parts.append(f"  {pt} -> {p.get('price', '?')} rub на {p.get('site_id', '?')} (conf: {conf:.0%}){stale}")
+            parts.append(f"  {pt} -> {p.get('price', '?')} rub на {p.get('site_id', '?')} (conf: {conf:.0%})")
     if concepts:
         parts.append("\nСвязи (SOLD_AT):")
         for c in concepts[:3]:
@@ -2100,11 +2119,18 @@ def _execute_graph_tool(name: str, args: dict, engine, mm, spec_text: str = "",
             prices = mm.get_relevant_prices(args.get("spec_text", ""))
             if not prices:
                 return "Нет похожих цен"
-            lines = [f"Похожих цен: {len(prices)}"]
-            for p in prices[:5]:
-                pt = (p.get("spec_text") or "")[:60]
-                lines.append(f"  {pt} -> {p.get('price', '?')} rub (conf: {p.get('confidence', 0):.0%})")
-            return "\n".join(lines)
+            usable = [p for p in prices if _trustable_price(p)]
+            junk = [p for p in prices if not _trustable_price(p)]
+            lines = []
+            if usable:
+                lines.append(f"Проверенных цен: {len(usable)}")
+                for p in usable[:5]:
+                    pt = (p.get("spec_text") or "")[:60]
+                    lines.append(f"  {pt} -> {p.get('price', '?')} rub (conf: {p.get('confidence', 0):.0%})")
+            if junk:
+                lines.append("⚠️ Найдены только НЕпроверенные записи (маркетплейс/битый URL/низкий conf) — "
+                             "НЕ используй их как цену. Ищи товар на сайте магазина.")
+            return "\n".join(lines) or "Нет проверенных цен"
 
         elif name == "save_confirmed_price":
             found_name = (args.get("product_name") or "").strip()
@@ -2243,6 +2269,10 @@ def _store_semantic_cache(semantic_cache, spec_text, result):
 
 
 def _save_price_and_approach(memory_manager, spec_text, product_type, price_data, steps, record_soldat=False, search_query=None):
+    if _marketplace_site(price_data.get("site", "") or price_data.get("url", "")):
+        logger.warning("🚫 Skipping marketplace price/approach save: site=%s price=%.2f spec=%s",
+                       price_data.get("site", ""), price_data["price"], spec_text[:50])
+        return
     if _is_family_page(price_data.get("url", "")):
         logger.warning("⚠️ Skipping family-page price save: url=%s price=%.2f spec=%s",
                        price_data.get("url", ""), price_data["price"], spec_text[:50])
@@ -2386,6 +2416,37 @@ def _is_family_page(url: str) -> bool:
         return False
     u = url.strip().rstrip("/")
     return bool(re.search(r"/catalog/\d+/\d+/i\d+$", u, re.IGNORECASE))
+
+
+# Маркетплейсы/агрегаторы — НЕ источник цены магазина: карточка нестабильна,
+# URL с хешем магазина → 404, цена не от магазина. Исключаются из переиспользования
+# цен (rule 8), контекста «Похожие цены», подходов и сохранения (правило 12).
+_MARKETPLACE_DOMAINS = {"market.yandex.ru", "yandex.market.ru", "market.yandex.com"}
+
+
+def _marketplace_site(site_or_url: str) -> bool:
+    """True, если сайт/URL — маркетплейс-агрегатор (не магазин)."""
+    d = _extract_domain(site_or_url or "")
+    return d in _MARKETPLACE_DOMAINS
+
+
+def _trustable_price(p: dict) -> bool:
+    """True, если подтверждённая цена из БД пригодна как источник (rule 8 / контекст):
+    не маркетплейс, URL — карточка товара (не главная/поиск/семейная), не stale,
+    confidence не мусорный. Галлюцинированные цены (conf 0.5, market.yandex, 404)
+    сюда не проходят."""
+    if not p:
+        return False
+    url = p.get("url") or ""
+    if _marketplace_site(p.get("site_id") or url):
+        return False
+    if _is_homepage_or_search_url(url) or _is_family_page(url):
+        return False
+    if p.get("is_stale"):
+        return False
+    if (p.get("confidence") or 0) < 0.5:
+        return False
+    return True
 
 
 def _is_empty_search_result(tool_name: str, content: str) -> bool:

@@ -131,10 +131,30 @@ class TestBuildContext:
         assert "успехов=5" in ctx or "5" in ctx
 
     def test_with_confirmed_prices(self):
-        prices = [{"spec_text": "ВВГ 3x1.5", "price": 1500.5, "site_id": "tinko.ru", "confidence": 0.95}]
+        # «Похожие цены» показывает только проверенные записи: карточка URL + conf >= 0.5.
+        prices = [{"spec_text": "ВВГ 3x1.5", "price": 1500.5, "site_id": "tinko.ru",
+                   "url": "https://tinko.ru/product/vvg-3x1.5.html", "confidence": 0.95}]
         ctx = _build_context("test", "cables", [], prices, [], [],
                              product_data={"name": "cables"})
         assert "1500.5" in ctx or "1500" in ctx
+
+    def test_confirmed_prices_filters_untrusted(self):
+        """Галлюцинированные записи (без URL карточки / маркетплейс / низкий conf)
+        НЕ попадают в «Похожие цены» — иначе агент доверяет мусору (404)."""
+        junk = [
+            {"spec_text": "Трубы ВГП", "price": 299, "site_id": "market.yandex.ru",
+             "url": "https://market.yandex.ru/card/truba/123", "confidence": 0.5},
+            {"spec_text": "Трубы ВГП", "price": 150, "site_id": "santech.ru",
+             "url": "", "confidence": 0.95},
+            {"spec_text": "Трубы ВГП", "price": 200, "site_id": "dn.ru",
+             "url": "https://dn.ru/product/truba.html", "confidence": 0.3},
+        ]
+        ctx = _build_context("test", "cables", [], junk, [], [],
+                             product_data={"name": "cables"})
+        assert "299" not in ctx
+        assert "150" not in ctx
+        assert "200" not in ctx
+        assert "проверенные" in ctx or "Нет проверенных" in ctx or "Похожих" not in ctx
 
     def test_with_sites(self):
         sites = [{"id": "tinko.ru"}, {"id": "keaz.ru"}]
