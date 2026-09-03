@@ -379,6 +379,101 @@ _SEARCH_INPUT_FALLBACK_JS = r"""
 }
 """
 
+# Поиск кликабельного элемента в ЖИВОМ DOM по (роль, имя) или CSS-селектору.
+# Используется двумя путями:
+#   1) Быстрый отказ — до 10с таймаута get_by_role/CSS-клика проверяем, существует
+#      ли элемент вообще (SPA перерисовалась, ref устарел). Нет элемента → мгновенная
+#      ошибка вместо 10с ожидания.
+#   2) Fallback клика — когда честный Playwright-клик не смог (actionability/имя не
+#      сошлось), ищем элемент сами и кликаем через JS без расхода LLM-раунда.
+_CLICK_FINDER_JS = r"""
+const _norm = (s) => (s || '').replace(/\s+/g, ' ').trim();
+const _firstVisible = (list) => {
+  for (const e of list || []) {
+    const r = e.getBoundingClientRect();
+    if (r.width > 1 && r.height > 1) return e;
+  }
+  return (list && list[0]) || null;
+};
+const _roleSel = {
+  link: 'a[href]',
+  button: 'button, [role="button"], input[type="button"], input[type="submit"], input[type="reset"]',
+  textbox: 'input, textarea, [contenteditable="true"]',
+  searchbox: 'input[type="search"], input, textarea',
+  heading: 'h1,h2,h3,h4,h5,h6,[role="heading"]',
+  checkbox: 'input[type="checkbox"], [role="checkbox"]',
+  radio: 'input[type="radio"], [role="radio"]',
+  combobox: 'select, [role="combobox"]',
+  option: 'option, [role="option"]',
+  tab: '[role="tab"]',
+  menu: '[role="menu"]',
+  menuitem: '[role="menuitem"]',
+  listbox: '[role="listbox"]',
+};
+const _TAG_ROLES = new Set(['a','div','span','p','li','td','th','tr','ul','ol','section','article','nav','form','table']);
+const _findEl = (arg) => {
+  let el = null;
+  if (arg.css) {
+    try { el = _firstVisible(Array.from(document.querySelectorAll(arg.css))); }
+    catch (e) { return null; }
+  } else if (arg.role) {
+    const sel = _roleSel[arg.role];
+    let els = [];
+    if (sel) { try { els = Array.from(document.querySelectorAll(sel)); } catch (e) {} }
+    if (!els.length) {
+      try {
+        els = _TAG_ROLES.has(arg.role)
+          ? Array.from(document.querySelectorAll(arg.role))
+          : Array.from(document.querySelectorAll('[role="' + arg.role + '"]'));
+      } catch (e) { els = []; }
+    }
+    const want = _norm(arg.name || '').toLowerCase();
+    if (want) {
+      const exact = els.filter(e => _norm(e.textContent).toLowerCase() === want);
+      if (exact.length) el = _firstVisible(exact);
+      else {
+        const has = els.filter(e => e.textContent && _norm(e.textContent).toLowerCase().includes(want));
+        if (has.length) el = _firstVisible(has);
+      }
+    }
+    if (!el && els.length) el = _firstVisible(els);
+  }
+  return el;
+};
+"""
+
+_CLICK_FIND_JS = "((arg) => {\n" + _CLICK_FINDER_JS + r"""
+  const el = _findEl(arg);
+  if (!el) return { found: false };
+  const anchor = (el.tagName === 'A') ? el : (el.closest ? el.closest('a') : null);
+  return {
+    found: true,
+    tag: el.tagName.toLowerCase(),
+    href: anchor && anchor.href ? anchor.href : '',
+    text: _norm(el.textContent).slice(0, 80),
+  };
+})"""
+
+_CLICK_FORCE_JS = "((arg) => {\n" + _CLICK_FINDER_JS + r"""
+  const el = _findEl(arg);
+  if (!el) return { ok: false, reason: 'not-found' };
+  try {
+    el.scrollIntoView({ block: 'center' });
+    const r = el.getBoundingClientRect();
+    const x = r.left + r.width / 2;
+    const y = r.top + r.height / 2;
+    const base = { bubbles: true, cancelable: true, view: window, clientX: x, clientY: y, button: 0, detail: 1 };
+    el.dispatchEvent(new MouseEvent('pointerdown', Object.assign({}, base, { pointerId: 1, pointerType: 'mouse' })));
+    el.dispatchEvent(new MouseEvent('mousedown', base));
+    el.dispatchEvent(new MouseEvent('pointerup', Object.assign({}, base, { pointerId: 1, pointerType: 'mouse' })));
+    el.dispatchEvent(new MouseEvent('mouseup', base));
+    el.dispatchEvent(new MouseEvent('click', base));
+    return { ok: true };
+  } catch (e) {
+    return { ok: false, reason: String(e).slice(0, 120) };
+  }
+})"""
+
 
 def _is_snapshot_ref(target: str) -> bool:
     """target вида e1234 — ref из accessibility-снапшота (не CSS-селектор)."""
@@ -622,6 +717,10 @@ class CamoufoxDriver(BaseDriver):
         await page.close()
 
     async def goto(self, page, url: str, timeout: int = 30000):
+        # Сброс кэша ref снапшота: после перехода на другую страницу ref со старой
+        # страницы невалидны. Без сброса click по устаревшему ref резолвился в
+        # (роль, имя) со СТАРОЙ страницы → 10с таймаут get_by_role.
+        _element_cache.clear()
         try:
             await page.goto(url, wait_until="domcontentloaded", timeout=timeout)
         except Exception as e:
@@ -657,16 +756,64 @@ class CamoufoxDriver(BaseDriver):
         kind = _resolve_action_target(target)
         if kind[0] == "error":
             return kind[1]
+        # Быстрый отказ: до 10с таймаута проверяем наличие элемента в ЖИВОМ DOM.
+        # SPA перерисовалась / ref устарел (со старой страницы) → мгновенная ошибка
+        # вместо 10с ожидания get_by_role + 2–3 восстановительных LLM-раунда.
+        probe = {"css": None, "role": None, "name": ""}
+        if kind[0] == "css":
+            probe["css"] = kind[1]
+        else:
+            probe["role"] = kind[1]
+            probe["name"] = kind[2]
+        info = None
+        try:
+            info = await page.evaluate(_CLICK_FIND_JS, probe)
+        except Exception:
+            info = None
+        if not info or not info.get("found"):
+            hint = _action_error_hint(TimeoutError("Timeout"))
+            return ("error: click failed: элемент не найден в DOM по target «%s» — "
+                    "страница перерисовалась или ref устарел. Обнови browser_snapshot и "
+                    "используй CSS-селектор.%s" % (str(target)[:80], (" — " + hint) if hint else ""))
+        before_url = await self.url(page)
         try:
             if kind[0] == "role":
                 await page.get_by_role(kind[1], name=kind[2]).click(timeout=10000)
             else:
                 await page.click(kind[1], timeout=10000)
             await asyncio.sleep(0.3)
+            after_url = await self.url(page)
+            if after_url != before_url:
+                _element_cache.clear()
             return "ok"
         except Exception as e:
             hint = _action_error_hint(e)
-            return f"error: click failed: {e}{(' — ' + hint) if hint else ''}"
+            # Fallback 1: элемент — ссылка → честная навигация на href (без синтетики).
+            href = info.get("href") or ""
+            if href.startswith("http"):
+                try:
+                    await page.goto(href, wait_until="domcontentloaded", timeout=20000)
+                    await asyncio.sleep(0.5)
+                    _element_cache.clear()
+                    return "ok (click-fallback: navigated to link href)"
+                except Exception as e2:
+                    return (f"error: click failed: {e}{(' — ' + hint) if hint else ''} "
+                            f"| link-fallback failed: {e2}")
+            # Fallback 2: JS force-click (кнопки/дивы — не ссылки). Без LLM-раунда.
+            try:
+                res = await page.evaluate(_CLICK_FORCE_JS, probe)
+                if res and res.get("ok"):
+                    await asyncio.sleep(0.5)
+                    after_url = await self.url(page)
+                    if after_url != before_url:
+                        _element_cache.clear()
+                    return "ok (click-fallback: force-click)"
+                reason = (res or {}).get("reason", "")
+                return (f"error: click failed: {e}{(' — ' + hint) if hint else ''} "
+                        f"| force-click: {reason}")
+            except Exception as e3:
+                return (f"error: click failed: {e}{(' — ' + hint) if hint else ''} "
+                        f"| force-click error: {e3}")
 
     async def type_text(self, page, target: str, text: str) -> str:
         kind = _resolve_action_target(target)
@@ -823,6 +970,7 @@ class NodriverDriver(BaseDriver):
         await page.close()
 
     async def goto(self, tab, url: str, timeout: int = 30000):
+        _element_cache.clear()
         try:
             await tab.get(url)
         except Exception as e:
@@ -902,9 +1050,13 @@ class NodriverDriver(BaseDriver):
         el = await self._resolve_element(tab, target)
         if el is None:
             return f"error: click failed: element not found: {target[:80]}"
+        before_url = await self.url(tab)
         try:
             await el.click()
             await asyncio.sleep(0.3)
+            after_url = await self.url(tab)
+            if after_url != before_url:
+                _element_cache.clear()
             return "ok"
         except Exception as e:
             return f"error: click failed: {e}"

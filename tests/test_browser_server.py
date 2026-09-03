@@ -115,6 +115,24 @@ class _FakePage:
         self.clicked = []
         self.filled = []
         self.hovered = []
+        self.url_value = "https://example.com/page"
+        self.goto_called = 0
+        self.last_url = None
+
+    @property
+    def url(self):
+        return self.url_value
+
+    async def goto(self, url, wait_until=None, timeout=None):
+        self.goto_called += 1
+        self.last_url = url
+        return None
+
+    async def evaluate(self, js, arg=None):
+        # Эмуляция _CLICK_FIND_JS/_CLICK_FORCE_JS: для CSS/роли считаем элемент найденным.
+        if "_CLICK_FIND_JS" in js or "findEl" in js or "_findEl" in js:
+            return {"found": True, "tag": "a", "href": "https://example.com/target", "text": "target"}
+        return None
 
     def locator(self, sel):
         assert sel, "CSS-селектор не должен быть пустым"
@@ -252,3 +270,138 @@ class TestCamoufoxLaunchKwargs:
     def test_pinned_fingerprint_disabled_uses_bool(self):
         kwargs = _camoufox_launch_kwargs(False, pinned_fingerprint=False)
         assert kwargs.get("fingerprint_preset") is True
+
+
+class _FakeGotoPage:
+    """Fake для CamoufoxDriver.goto: имитирует page.goto и смену url."""
+
+    def __init__(self, goto_fails: bool = False):
+        self.goto_fails = goto_fails
+        self.goto_called = 0
+        self.last_url = None
+
+    async def goto(self, url, wait_until=None, timeout=None):
+        self.goto_called += 1
+        self.last_url = url
+        if self.goto_fails:
+            raise Exception("navigation failed")
+        return None
+
+
+class TestClickFastFailAndFallback:
+    """Новые механики browser_click:
+    - fast-fail: элемент не в DOM → мгновенная ошибка (не 10с таймаут);
+    - link-fallback: честный клик не смог, но элемент — ссылка → навигация на href;
+    - force-click fallback для не-ссылок.
+    """
+
+    def test_element_not_in_dom_returns_fast_error(self):
+        from mcp_servers.browser_server import CamoufoxDriver
+        driver = CamoufoxDriver(headless=True)
+
+        class _GonePage(_FakePage):
+            async def evaluate(self, js, arg=None):
+                return {"found": False}
+
+        res = asyncio.run(driver.click(_GonePage(), "a.button-search"))
+        assert res.startswith("error: click failed")
+        assert "не найден в DOM" in res
+
+    def test_link_fallback_navigates_to_href(self):
+        from mcp_servers.browser_server import CamoufoxDriver
+        driver = CamoufoxDriver(headless=True)
+
+        class _TimeoutLinkPage(_FakePage):
+            async def evaluate(self, js, arg=None):
+                # finder находит ссылку с href
+                return {"found": True, "tag": "a",
+                        "href": "https://valtec.ru/catalog/x.html", "text": "x"}
+
+            async def click(self, sel, timeout=None):
+                raise TimeoutError("Locator.click: Timeout 10000ms exceeded")
+
+        page = _TimeoutLinkPage()
+        res = asyncio.run(driver.click(page, "a:has-text('x')"))
+        assert "click-fallback" in res
+        assert page.goto_called == 1
+        assert page.last_url == "https://valtec.ru/catalog/x.html"
+
+    def test_force_click_fallback_for_non_link(self):
+        from mcp_servers.browser_server import CamoufoxDriver
+        driver = CamoufoxDriver(headless=True)
+
+        class _RaisingLocator:
+            async def click(self, timeout=None):
+                raise TimeoutError("Locator.click: Timeout 10000ms exceeded")
+
+            async def fill(self, text, timeout=None):
+                raise TimeoutError("Locator.fill: Timeout 10000ms exceeded")
+
+        class _TimeoutButtonPage(_FakePage):
+            def __init__(self):
+                super().__init__()
+                self.force_eval_called = False
+
+            async def evaluate(self, js, arg=None):
+                # первый evaluate (finder): кнопка без href; второй (force): ok
+                if not self.force_eval_called:
+                    return {"found": True, "tag": "button", "href": "", "text": "Найти"}
+                self.force_eval_called = True
+                return {"ok": True}
+
+            def get_by_role(self, role, name=None):
+                return _RaisingLocator()
+
+        page = _TimeoutButtonPage()
+        res = asyncio.run(driver.click(page, "button Найти"))
+        assert "force-click" in res
+
+    def test_role_target_goes_through_same_fallback(self):
+        from mcp_servers.browser_server import CamoufoxDriver
+        driver = CamoufoxDriver(headless=True)
+
+        class _RaisingLocator:
+            async def click(self, timeout=None):
+                raise TimeoutError("Locator.click: Timeout 10000ms exceeded")
+
+        class _RoleTimeoutPage(_FakePage):
+            async def evaluate(self, js, arg=None):
+                return {"found": True, "tag": "a",
+                        "href": "https://example.com/product/1", "text": "Тройник"}
+
+            def get_by_role(self, role, name=None):
+                return _RaisingLocator()
+
+        _element_cache["e1234"] = {"role": "link", "name": "Тройник"}
+        try:
+            page = _RoleTimeoutPage()
+            res = asyncio.run(driver.click(page, "e1234"))
+            assert "click-fallback" in res
+            assert page.last_url == "https://example.com/product/1"
+        finally:
+            _element_cache.pop("e1234", None)
+
+
+class TestGotoClearsElementCache:
+    """Переход на другую страницу инвалидирует ref снапшота со старой страницы."""
+
+    def test_goto_clears_cache(self):
+        from mcp_servers.browser_server import CamoufoxDriver
+        _element_cache["e1234"] = {"role": "button", "name": "Старое"}
+        try:
+            driver = CamoufoxDriver(headless=True)
+            asyncio.run(driver.goto(_FakeGotoPage(), "https://example.com/new"))
+            assert "e1234" not in _element_cache
+        finally:
+            _element_cache.pop("e1234", None)
+
+    def test_goto_clears_cache_even_when_nav_fails(self):
+        from mcp_servers.browser_server import CamoufoxDriver
+        _element_cache["e999"] = {"role": "link", "name": "x"}
+        try:
+            driver = CamoufoxDriver(headless=True)
+            res = asyncio.run(driver.goto(_FakeGotoPage(goto_fails=True), "https://example.com/err"))
+            assert res.startswith("error:")
+            assert "e999" not in _element_cache
+        finally:
+            _element_cache.pop("e999", None)
