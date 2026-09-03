@@ -787,9 +787,9 @@ class CamoufoxDriver(BaseDriver):
                 _element_cache.clear()
             return "ok"
         except Exception as e:
-            hint = _action_error_hint(e)
             # Fallback 1: элемент — ссылка → честная навигация на href (без синтетики).
             href = info.get("href") or ""
+            reason = ""
             if href.startswith("http"):
                 try:
                     await page.goto(href, wait_until="domcontentloaded", timeout=20000)
@@ -797,23 +797,26 @@ class CamoufoxDriver(BaseDriver):
                     _element_cache.clear()
                     return "ok (click-fallback: navigated to link href)"
                 except Exception as e2:
-                    return (f"error: click failed: {e}{(' — ' + hint) if hint else ''} "
-                            f"| link-fallback failed: {e2}")
-            # Fallback 2: JS force-click (кнопки/дивы — не ссылки). Без LLM-раунда.
-            try:
-                res = await page.evaluate(_CLICK_FORCE_JS, probe)
-                if res and res.get("ok"):
-                    await asyncio.sleep(0.5)
-                    after_url = await self.url(page)
-                    if after_url != before_url:
-                        _element_cache.clear()
-                    return "ok (click-fallback: force-click)"
-                reason = (res or {}).get("reason", "")
-                return (f"error: click failed: {e}{(' — ' + hint) if hint else ''} "
-                        f"| force-click: {reason}")
-            except Exception as e3:
-                return (f"error: click failed: {e}{(' — ' + hint) if hint else ''} "
-                        f"| force-click error: {e3}")
+                    reason = f"link-fallback goto failed: {e2}"
+            else:
+                # Fallback 2: JS force-click (кнопки/дивы — не ссылки). Без LLM-раунда.
+                try:
+                    res = await page.evaluate(_CLICK_FORCE_JS, probe)
+                    if res and res.get("ok"):
+                        await asyncio.sleep(0.5)
+                        after_url = await self.url(page)
+                        if after_url != before_url:
+                            _element_cache.clear()
+                        return "ok (click-fallback: force-click)"
+                    reason = f"force-click: {(res or {}).get('reason', 'unknown')}"
+                except Exception as e3:
+                    reason = f"force-click error: {e3}"
+            # Причина в НАЧАЛЕ ошибки: agent_loop показывает в логе первые ~100
+            # символов, сырой Playwright-текст (Call log) съедал место и скрывал,
+            # почему fallback не сработал — лог выглядел как старый 10с-таймаут.
+            return (f"error: click failed: «{str(target)[:60]}» — {reason}. "
+                    f"Страница перерисовалась/элемент недоступен. Обнови browser_snapshot "
+                    f"и кликни CSS-селектором или a:has-text. | raw: {e}")
 
     async def type_text(self, page, target: str, text: str) -> str:
         kind = _resolve_action_target(target)

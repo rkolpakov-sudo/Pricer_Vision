@@ -381,6 +381,60 @@ class TestClickFastFailAndFallback:
         finally:
             _element_cache.pop("e1234", None)
 
+    def test_fallback_failure_puts_reason_first(self):
+        """При провале fallback причина — в НАЧАЛЕ ошибки (лог режет до ~100 символов,
+        сырой Playwright-текст не должен скрывать, почему клик не удался)."""
+        from mcp_servers.browser_server import CamoufoxDriver
+        driver = CamoufoxDriver(headless=True)
+
+        class _RaisingLocator:
+            async def click(self, timeout=None):
+                raise TimeoutError("Locator.click: Timeout 10000ms exceeded")
+
+        class _ForceFailPage(_FakePage):
+            def __init__(self):
+                super().__init__()
+                self.force_eval_called = False
+
+            async def evaluate(self, js, arg=None):
+                if not self.force_eval_called:
+                    self.force_eval_called = True
+                    return {"found": True, "tag": "div", "href": "", "text": "Фильтр"}
+                return {"ok": False, "reason": "not-found"}
+
+            async def click(self, sel, timeout=None):
+                raise TimeoutError("Locator.click: Timeout 10000ms exceeded")
+
+            def get_by_role(self, role, name=None):
+                return _RaisingLocator()
+
+        res = asyncio.run(driver.click(_ForceFailPage(), "button Фильтр"))
+        assert res.startswith("error: click failed")
+        assert "not-found" in res[:160]
+
+    def test_link_fallback_goto_failure_reason_first(self):
+        from mcp_servers.browser_server import CamoufoxDriver
+        driver = CamoufoxDriver(headless=True)
+
+        class _RaisingLocator:
+            async def click(self, timeout=None):
+                raise TimeoutError("Locator.click: Timeout 10000ms exceeded")
+
+        class _GotoFailLinkPage(_FakePage):
+            async def evaluate(self, js, arg=None):
+                return {"found": True, "tag": "a",
+                        "href": "https://example.com/target", "text": "x"}
+
+            async def goto(self, url, wait_until=None, timeout=None):
+                raise Exception("nav timeout")
+
+            async def click(self, sel, timeout=None):
+                raise TimeoutError("Locator.click: Timeout 10000ms exceeded")
+
+        res = asyncio.run(driver.click(_GotoFailLinkPage(), "a:has-text('x')"))
+        assert res.startswith("error: click failed")
+        assert "link-fallback goto failed" in res[:200]
+
 
 class TestGotoClearsElementCache:
     """Переход на другую страницу инвалидирует ref снапшота со старой страницы."""
