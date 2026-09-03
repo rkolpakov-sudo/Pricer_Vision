@@ -1,5 +1,94 @@
 # State Log
 
+## 2026-09-03 — FIX: GUI обрезал URL до 80 символов → «404» (корень жалобы про битые URL)
+
+### Диагноз
+Пользователь: «изучил найденные URL и URL в GUI — они обрезаны, поэтому 404».
+**Доказано**: полный URL в БД `…/truba-…-du-15kh28-mm-3-m/103731804` (90 симв.), а в GUI
+показывался ровно `url[:80]` = `…/du-15kh28-mm-3-m` (80) — **терялся числовой суффикс карточки
+`/103731804`**. Клик/копирование из GUI → битая ссылка → 404. Это регрессия живого добавления
+строк: регресс-фикс 08-31 покрыл другой путь, а `_on_row_done` остался с `url[:80]`.
+
+| # | main.py | Баг |
+|---|---------|-----|
+| A | 1393 | `site[:40]`, `url[:80]` в `_on_row_done` — URL в таблице резался до 80 |
+| B | 1017 | `_on_url_double_click` открывал колонку **6 (Сайт)**, а не 7 (URL), без UserRole → открывался site-текст |
+
+### Фикс
+| # | Что |
+|---|-----|
+| A | URL (колонка 7) — ПОЛНЫЙ текст в ячейке + tooltip + `Qt.UserRole`; site без усечения |
+| B | Двойной клик: колонка 7, открывает `item.data(Qt.UserRole) or item.text()` |
+
+Session-restore идёт через тот же `_on_row_done` — один фикс покрывает live-прогон и восстановление.
+
+### Тесты (+2)
+`test_row_done_keeps_full_url_in_gui`, `test_row_done_url_col_doubleclick_uses_full_url`
+(`_FakeExcelWriter` дополнен `ws`/`header_map`). **1259 passed, 10 skipped**.
+
+---
+
+## 2026-09-03 — FIX: маркетплейсы источником цен + галлюцинированные цены (rule 8/контекст)
+
+### Проблема (прогон 16:27, жалоба пользователя)
+Строка «Трубопроводы из стальных водогазопроводных легких труб ГОСТ 3262-75 Ø20» вернула цену
+с URL на 404: `vseinstrumenti.ru/...stalnaya-truba-dtrd-du-20...` и `market.yandex.ru/card/...du-15kh28...`.
+Выборочная проверка URL из БД — МНОГО 404. Следующую строку агент начал сразу на market.yandex.ru.
+
+### Корни
+| # | Где | Причина |
+|---|-----|---------|
+| A | `agent_loop.py` «Похожие цены» / get_confirmed_prices | Показывали LLM любые записи БД (в т.ч. market.yandex conf 0.5, без URL карточки) → агент доверял и возвращал их как цену. В БД: id 2088 «Трубопроводы…» 299₽ market.yandex conf 0.5 (создана 13:24 в тот же день). |
+| B | rule-8 реюз / сайты / подходы | market.yandex.ru был в БД (sites legacy-sид, approaches, SOLD_AT) → агент выбирал его целевым сайтом. |
+| C | save_confirmed_price | Не блокировал сохранение цен с маркетплейсов → загрязнение копилось. |
+
+### Фикс (код)
+| # | Файл | Что |
+|---|------|-----|
+| 1 | `agent_loop.py` | `_MARKETPLACE_DOMAINS` (market.yandex.ru…), `_marketplace_site()`, `_trustable_price()` (не маркетплейс, URL=карточка, не stale, conf≥0.5). |
+| 2 | `agent_loop.py` | rule-8 реюз, «Похожие цены» в контексте, get_confirmed_prices — только `_trustable_price`; маркетплейсы исключены из `sites`, fallback-сайтов и `site_guides`; `_find_card_url` пропускает маркетплейсы. |
+| 3 | `agent_loop.py` save_confirmed_price + `_save_price_and_approach` | Отказ/пропуск сохранения цен и подходов с маркетплейсов. |
+| 4 | `agent_loop.py` SYSTEM_PROMPT правило 12 | Явно: market.yandex.ru — маркетплейс, НЕ магазин, НЕ источник цены (404). |
+| 5 | `task_scheduler.py` | `_is_marketplace()` — маркетплейсы не выбираются целевым сайтом батча. |
+
+### Очистка БД (бэкап `data/pricer_backup_20260903_165000.db`, `_165040.db`)
+Удалено: confirmed_prices 2 (1881, 2088), approaches 3 (375, 1105, 1392), concept_edges SOLD_AT 2,
+sites 1 (market.yandex.ru), semantic_cache.json 1 ключ.
+
+### Тесты (+1) и результат
+**1257 passed, 10 skipped**. Обновлён `test_with_confirmed_prices` (цена с URL карточки), добавлен
+`test_confirmed_prices_filters_untrusted` (мусор не попадает в контекст).
+
+---
+
+## 2026-09-03 — FIX: click-ошибки в логе выглядели как старый 10с-таймаут (обрезание до 100 символов)
+
+### Диагноз
+После внедрения fast-fail + fallback (см. ниже) пользователь сообщил, что клики «по-прежнему»
+дают `error: click failed: Locator.click: Timeout 10000ms exceeded. Call log: - waiting for
+get_by_role(`. Реальный код уже НЕ возвращал такую ошибку (в логе 14:00:41 новый fallback
+работал: `ok (click-fallback: navigated to link href)`).
+
+**Корень видимости**: `_summarize_result()` в `agent_loop.py:457` обрезал ВСЕ error-сообщения
+до **100 символов** для лога/status_callback. Новая ошибка fallback начиналась с длинного сырого
+Playwright-текста (`Locator.click: Timeout...\nCall log:\n  - waiting for get_by_role(...)`),
+и хвост с причиной («force-click: not-found» / «link-fallback goto failed») за 100-символьной
+границей НЕ показывался. Лог выглядел идентично старому коду, хотя LLM получал полный текст.
+
+### Фикс
+| # | Файл | Что |
+|---|------|-----|
+| A | `mcp_servers/browser_server.py` | Ошибка fallback перестроена: **причина в НАЧАЛЕ** (««target» — force-click: not-found. Обнови browser_snapshot и кликни CSS…»), сырой `| raw: {e}` в хвосте. Даже при обрезке лог показывает суть. |
+| B | `src/agent_loop.py` `_summarize_result` | Ошибки показываются до **240 символов** (было 100) — хвост с причиной/подсказкой виден. |
+
+### Тесты (+2)
+`tests/test_browser_server.py`: причина `not-found` в первых 160 символах при провале force-click;
+причина `link-fallback goto failed` в первых 200 символах при сбое навигации.
+
+**1256 passed, 10 skipped** — baseline сохранён.
+
+---
+
 ## 2026-09-03 — FIX: browser_click систематически таймаутил по hash-ref (55–91% фейлов)
 
 ### Диагноз (анализ логов)
