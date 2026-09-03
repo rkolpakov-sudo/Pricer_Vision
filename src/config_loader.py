@@ -109,6 +109,16 @@ def save_llm_settings(provider: str, model: str, temperature: float, timeout: in
     global _SETTINGS_CACHE
     _SETTINGS_CACHE = cfg
 
+def save_pdf_parser_settings(pdf_cfg: dict):
+    """Сохраняет настройки pdf_parser (pipeline, v2 params и т.д.)."""
+    cfg = load_settings()
+    cfg["pdf_parser"] = pdf_cfg
+    path = Path(os.path.dirname(os.path.abspath(__file__))).parent / "config" / "settings.yaml"
+    with open(path, "w", encoding="utf-8") as f:
+        yaml.dump(cfg, f, default_flow_style=False, allow_unicode=True)
+    global _SETTINGS_CACHE
+    _SETTINGS_CACHE = cfg
+
 def get_antidetect_config(key: str, default):
     cfg = load_settings()
     return cfg.get("antidetect", {}).get(key, default)

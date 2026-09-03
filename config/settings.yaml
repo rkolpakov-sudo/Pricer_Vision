@@ -123,9 +123,13 @@ pdf_parser:
   method: auto
   min_chars: 10
   ocr_min_text_length: 100
+  pipeline: v2
   review_threshold: 0.8
   timeout: 900
   use_llm: false
+  v2:
+    llm_review: true
+    max_iterations: 3
 price:
   stale_days: 30
   vat_rate: 1.2

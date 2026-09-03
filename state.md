@@ -5661,3 +5661,111 @@ has_matching_equivalence автоматически принимал ЛЮБОЙ 
 ### Тесты
 - Новые: test_unrelated_products_rejected, test_same_type_products_accepted (test_graph_engine.py).
 - **1132 passed, 2 skipped**.
+
+---
+
+## 2026-09-03 — PDF2SPEC v2: детерминированное ядро (P0-P1)
+
+### Что сделано
+
+Создан модуль `src/pdf2spec/` — детерминированное ядро конвертации PDF→XLSX по методологии Hermes.
+
+### Модули
+
+| Модуль | Роль |
+|--------|------|
+| `clean.py` | Очистка текста: Ø-токен-правило, split-слова, ОВ-фитинги «стальной» |
+| `spec_detect.py` | Детекция спецификации: map_columns, spec_score ≥6/9, FRAME_RE |
+| `extract.py` | Извлечение через PyMuPDF find_tables(), повёрнутые листы |
+| `row_classify.py` | Классификация: item/header/component/continuation/GROUP_INHERIT |
+| `fullname.py` | Mother-child: MOTHER_ABSORBED, FULL_NAME_CHILD, FULL_NAME_INHERIT |
+| `qa.py` | QA-сканер: orphan=0, артефакт-grep, role counts |
+| `export_xlsx.py` | XLSX «как Hermes»: колонки оригинала, форматирование |
+| `orchestrator.py` | LLM-цикл: прогон → верификация → правка правил → повтор |
+| `runner_v2.py` | QThread с теми же сигналами что PdfParserRunner |
+
+### Результат на эталонном PDF (3924-2-МСП-РД-ОВ 1.2.pdf)
+
+| Метрика | extract_spec.py (baseline) | pdf2spec v2 |
+|---------|---------------------------|-------------|
+| Строк | 164 | **161** (совпадает с Hermes XLSX) |
+| Items | 145 | 141 |
+| Components | 18 | 18 |
+| Headers | 1 | 2 |
+| word_splits | 0 | 0 |
+| naked_diam | 0 | 0 |
+| Mother-child | нет (3 матери отдельно) | **да** (3 матери поглощены) |
+
+### Интеграция
+
+- `config/settings.yaml`: `pdf_parser.pipeline: v2` + `v2.max_iterations: 3`
+- `main.py`: `_load_pdf` выбирает Pdf2SpecRunner при `pipeline: v2`
+- Старый код (`src/pdf_parser/`) не удалён, работает при `pipeline: legacy`
+
+### Зависимости
+
+- `pymupdf==1.28.2` установлен в venv
+
+### Тесты
+
+- **194 passed** (test_main + test_graph_engine + test_dependency_manager + test_approach_relevance)
+- Новые тесты не писались (следующая фаза — P2: unit-тесты pdf2spec)
+
+---
+
+## 2026-09-03 — PDF2SPEC P2: unit-тесты + багфиксы
+
+### Что сделано
+
+92 unit-тестов для `src/pdf2spec/`: clean (18), spec_detect (14), row_classify (10), fullname (16), qa (10), export_xlsx (7), integration (6+).
+
+### Багфиксы в коде
+
+| Модуль | Баг | Фикс |
+|--------|-----|------|
+| `clean.py` | `DIAMETERS` — множество int, а `m6.group(1)` — строка → `'150' in {15,...}` = False | `int(m6.group(1)) in DIAMETERS` |
+| `fullname.py` | `_is_short_designation('', '')` → True (пустое имя = короткое) | Добавлен `if not name and not typ: return False` |
+| `fullname.py` | Мать не добавлялась в result при absorption | `result.append(row)` в `has_continuations` ветке |
+| `fullname.py` | Lookahead не различал continuation и child | Уточнение условий: `not _is_continuation(...) and (qty or short)` |
+| `fullname.py` | `_is_short_designation` не распознавал '400 мм' | Добавлен regex `^\d+\s*(мм\|шт\|кг\|м)$` |
+| `qa.py` | `qa_scan_csv` не определял разделитель `;` | Автоопределение по сэмплу |
+
+### Тесты
+
+- **92 passed** (6 test файлов pdf2spec)
+- **194 passed** (существующие тесты не сломаны)
+- Итого: **286 passed**
+
+---
+
+## 2026-09-03 — PDF2SPEC P3+P4: LLM-оркестратор + OCR-маршрут
+
+### P3: LLM-оркестратор
+
+**orchestrator.py** переписан:
+- Промпт по методологии Hermes: классификация ORPHAN/EMPTY_NAME, обнаружение новых split-слов и HEADER_PREFIXES
+- `llm_client.chat()` (совместим с остальным приложением, не `query()`)
+- `force_json=True` для структурированного ответа
+- `_apply_fixes()`: применяет role-изменения, новые splits/headers
+- `runtime_rules` persistence: `data/pdf2spec/rules/runtime_rules.json`
+- `_load_rules()` / `_save_rules()`: персистентные правила между прогонами
+- LLM-итерация: до `max_iterations` (по умолчанию 3), пока QA чист
+
+### P4: OCR-маршрут
+
+**runner_v2.py** добавлен OCR fallback:
+- `_needs_ocr()`: проверяет `find_tables()` на каждой странице; если 0 таблиц → OCR
+- MinerU → текст → SpecStructurer → rows → QA
+- Прогресс: "Анализ PDF → MinerU OCR → Структурирование → XLSX"
+- Fallback: если OCR не дал текст → пустой результат с пометкой
+
+### Интеграция
+
+- `settings.yaml`: `pdf_parser.v2.llm_review: true`, `v2.max_iterations: 3`
+- `main.py`: `pipeline: v2` → `Pdf2SpecRunner`; `pipeline: legacy` → `PdfParserRunner`
+- OCR route: автоматический (без ручного переключения)
+
+### Тесты
+
+- 12 orchestrator тестов (build_prompt, apply_fixes, rules persistence, mock LLM review)
+- Итого: **298 passed** (92 + 12 + 194)

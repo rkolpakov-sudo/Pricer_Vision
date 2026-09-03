@@ -18,6 +18,11 @@ from src import llm_providers
 from src.pdf_parser.runner import PdfParserRunner
 from src.pdf_parser.review_dialog import ReviewDialog
 from src.pdf_parser.feedback import FeedbackCollector
+try:
+    from src.pdf2spec.runner_v2 import Pdf2SpecRunner
+    _HAS_V2 = True
+except ImportError:
+    _HAS_V2 = False
 from src.toast import ToastManager
 from src.widget_base import paint_styled_background, setup_shadow
 from src.excel_writer import ExcelWriter
@@ -196,6 +201,29 @@ class SettingsDialog(QDialog):
         gen_grid.setColumnStretch(1, 1)
         gen_grid.setColumnStretch(3, 1)
         root.addWidget(gen_group)
+
+        pdf_group = QGroupBox("PDF-парсер")
+        pdf_layout = QVBoxLayout(pdf_group)
+        pdf_row = QHBoxLayout()
+        lbl_pipeline = QLabel("Парсер:")
+        lbl_pipeline.setMinimumWidth(90)
+        self.pipeline_combo = QComboBox()
+        self.pipeline_combo.addItem("v2 — методология Hermes (рекомендуется)", "v2")
+        self.pipeline_combo.addItem("legacy — старый парсер", "legacy")
+        saved_pipeline = config.get("pdf_parser", {}).get("pipeline", "v2")
+        idx = self.pipeline_combo.findData(saved_pipeline)
+        self.pipeline_combo.setCurrentIndex(idx if idx >= 0 else 0)
+        pdf_row.addWidget(lbl_pipeline)
+        pdf_row.addWidget(self.pipeline_combo, 1)
+        pdf_layout.addLayout(pdf_row)
+        pipeline_desc = QLabel(
+            "v2: PyMuPDF find_tables + классификация + mother-child + LLM-ревью. "
+            "legacy: pdf-inspector/MinerU + regex."
+        )
+        pipeline_desc.setProperty("muted", True)
+        pipeline_desc.setWordWrap(True)
+        pdf_layout.addWidget(pipeline_desc)
+        root.addWidget(pdf_group)
 
         test_row = QHBoxLayout()
         self.btn_test = QPushButton("🔌 Проверить подключение")
@@ -446,7 +474,15 @@ class SettingsDialog(QDialog):
             timeout=int(self.timeout_spin.value()),
             base_urls={prov.id: base_url},
         )
-        logger.info("LLM settings saved: provider=%s model=%s base=%s", prov.id, model_id, base_url)
+
+        pipeline = self.pipeline_combo.currentData()
+        if pipeline:
+            self.config.setdefault("pdf_parser", {})["pipeline"] = pipeline
+            from src.config_loader import save_pdf_parser_settings
+            save_pdf_parser_settings(self.config.get("pdf_parser", {}))
+
+        logger.info("LLM settings saved: provider=%s model=%s base=%s pipeline=%s",
+                     prov.id, model_id, base_url, pipeline)
         self.accept()
 
     def _wait_workers(self):
@@ -1453,11 +1489,19 @@ class MainWindow(QMainWindow):
 
         llm_client = llm_providers.create_llm_client(self.config, temperature=0.1)
 
-        self._pdf_runner = PdfParserRunner(
-            pdf_path=path,
-            llm_client=llm_client,
-            config=self.config,
-        )
+        pipeline = self.config.get('pdf_parser', {}).get('pipeline', 'legacy')
+        if pipeline == 'v2' and _HAS_V2:
+            self._pdf_runner = Pdf2SpecRunner(
+                pdf_path=path,
+                llm_client=llm_client,
+                config=self.config,
+            )
+        else:
+            self._pdf_runner = PdfParserRunner(
+                pdf_path=path,
+                llm_client=llm_client,
+                config=self.config,
+            )
         self._pdf_runner.progress_signal.connect(self._on_pdf_progress)
         self._pdf_runner.items_ready_signal.connect(self._on_pdf_items_ready)
         self._pdf_runner.done_signal.connect(self._on_pdf_done)
