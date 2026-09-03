@@ -111,7 +111,7 @@ C:\Projects\Pricer_Vision\
 │   ├── browser_server.py          # MCP сервер бэкендов camoufox/nodriver (используется)
 │   └── pricer_server.py           # MCP сервер (DrissionPage, не используется)
 ├── src/
-│   ├── pdf_parser/              # Парсер PDF (MinerU → fallback structurer, LLM-опция)
+│   ├── pdf_parser/              # Парсер PDF v1 (MinerU → fallback structurer, LLM-опция)
 │   │   ├── mineru_backend.py    #   subprocess MinerU 3.4 в изолированном Python 3.11
 │   │   ├── ocr_fallback.py      #   OCR-резерв для сканов (через MinerUBackend, to_thread)
 │   │   ├── structurer.py        #   Fallback-only pipe-парсинг + LLM-ветка (use_llm)
@@ -119,6 +119,15 @@ C:\Projects\Pricer_Vision\
 │   │   ├── feedback.py          #   Таблица pdf_corrections в pricer.db
 │   │   ├── review_dialog.py     #   QTableWidget редактирования (колонка Уверенность)
 │   │   └── runner.py            #   QThread оркестратор (OCR fallback + SmartReview)
+│   ├── pdf2spec/                # Парсер PDF v2 (методология Hermes, LLM-оркестратор)
+│   │   ├── clean.py             #   Ø-токен, split-слова, ОВ-фитинги
+│   │   ├── extract.py           #   PyMuPDF find_tables()
+│   │   ├── row_classify.py      #   item/header/component/continuation
+│   │   ├── fullname.py          #   Mother-child absorption
+│   │   ├── qa.py                #   QA-сканер + CSV scan
+│   │   ├── export_xlsx.py       #   XLSX «как Hermes»
+│   │   ├── orchestrator.py      #   LLM-цикл с промптами + runtime_rules
+│   │   └── runner_v2.py         #   QThread + OCR fallback
 │   ├── agent_loop.py            # Основной цикл (3-веточный routing, format_steps, negative feedback, _query_llm, StuckDetector, температуры фаз, контекстный бюджет, idle-таймаут, флаги режима поиска)
 │   ├── adaptive_limits.py       # AdaptiveRoundManager — динамические лимиты раундов per-site (Фаза 2)
 │   ├── approach_relevance.py    # Матчинг наименований + правила сопоставления (Фаза 8)
@@ -309,6 +318,51 @@ pdf_parser:
   timeout: 900
 ```
 
+## PDF Parser v2 (методология Hermes)
+
+Новый pipeline `src/pdf2spec/`, переключатель в «Настройки → PDF-парсер» или `settings.yaml → pdf_parser.pipeline: v2 | legacy`.
+
+### Pipeline v2
+```
+PDF → PyMuPDF find_tables() (поворот страниц, split-ячейки)
+  → clean (Ø-токен, split-слова, ОВ-фитинги)
+  → extract (таблицы → records)
+  → row_classify (item/header/component/continuation/GROUP_INHERIT)
+  → fullname (mother-child absorption: MOTHER_ABSORBED, FULL_NAME_CHILD, FULL_NAME_INHERIT)
+  → QA (орфаны, пустые имена, дубли, word_splits, naked_diam)
+  → LLM review ( Hermes-промпт: классификация, обнаружение split-слов, HEADER_PREFIXES)
+  → export_xlsx (форматирование как Hermes)
+```
+
+### Ключевые особенности
+- **LLM обязателен** — без оркестратора инструмент бесполезен.
+- **Методология Hermes** — не зависимость, а источник методологии (без импортов/вызовов).
+- **PyMuPDF `find_tables()`** — извлечение таблиц со страниц (без OCR).
+- **OCR fallback** — автоматический: если `find_tables()` не нашёл таблиц → MinerU → текст → structurer.
+- **runtime_rules** — LLM-открытые правила персистятся в `data/pdf2spec/rules/runtime_rules.json`.
+- **92 unit-теста** в 7 файлах.
+
+### Модули (src/pdf2spec/)
+| Модуль | Роль |
+|--------|------|
+| `clean.py` | Ø-токен, split-слова, ОВ-фитинги |
+| `extract.py` | PyMuPDF `find_tables()` |
+| `row_classify.py` | item/header/component/continuation |
+| `fullname.py` | Mother-child absorption |
+| `qa.py` | QA-сканер + CSV scan |
+| `export_xlsx.py` | XLSX «как Hermes» |
+| `orchestrator.py` | LLM-цикл с промптами + runtime_rules |
+| `runner_v2.py` | QThread + OCR fallback |
+
+### Параметры (config/settings.yaml)
+```yaml
+pdf_parser:
+  pipeline: v2          # v2 | legacy
+  v2:
+    max_iterations: 3   # LLM-итерации (пока QA чист)
+    llm_review: true    # включить LLM-ревью
+```
+
 ## Классификация колонок спецификации
 
 `src/column_classifier.py` — системная замена наивного substring-матчинга `detect_columns` (который ломался на реальных спецификациях: терял «Завод-изготовитель», путал «Код … материала» с наименованием, перекрывал «Единицу измерения» колонкой «Масса единицы (кг)»).
@@ -464,9 +518,9 @@ pdf_parser:
 ### SQLite оптимизация (`src/graph_engine.py`)
 - `_apply_pragmas()` в `build()`: `synchronous=NORMAL`, `cache_size=-64000` (64MB), `temp_store=MEMORY`. WAL и foreign_keys уже были включены.
 
-## Тестирование (актуально на 2026-08-28)
+## Тестирование (актуально на 2026-09-03)
 
-- **1031 тест, 2 skipped**, 0 failures. Запуск: `python -m pytest -q`.
+- **1248 тестов, 10 skipped**, 0 failures. Запуск: `python -m pytest -q`.
 - **Интеграционные** (`tests/integration/test_agent_flow.py`): полный цикл `process_row` с моками — извлечение, tool_call цикл, reuse (rule 8, включая exact-spec ≥0.6), semantic cache, ошибки LLM, max rounds, captcha, stuck recovery, флаги режима поиска, защита моделей C10/C20, кап confidence, повторный зонд, межстрочные факты, **модуль воздуховодов** (расчёт без обращения к браузеру/LLM).
 - **Критичные модули >80%**: schemas, stuck_detector, semantic_cache, context_optimizer, rate_limiter, learning_loop, smart_review, config_loader, excel_writer, session_facts, approach_relevance (model_designators/mismatch_kind), ductwork_calculator.
 - Покрытие: `python -m coverage run --source=src -m pytest tests -q && python -m coverage report` (coverage установлен в venv).

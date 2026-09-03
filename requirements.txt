@@ -13,5 +13,6 @@ camoufox>=0.5.5
 nodriver>=0.50.0
 pdf-inspector>=1.17
 mineru[pipeline]==3.4.0
+pymupdf>=1.28.0
 six>=1.16
 reportlab>=4.0

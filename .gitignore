@@ -39,6 +39,7 @@ graph.json
 /santech-variant.png
 /*.png
 /*.pdf
+/*.xlsx
 
 # ── Local tooling / environment-specific ───────────────────────
 .opencode/

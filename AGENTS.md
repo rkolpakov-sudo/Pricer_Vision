@@ -5,7 +5,7 @@
 ## Команды
 
 - **Запуск приложения:** `python main.py` (из активированного venv)
-- **Тесты:** `venv\Scripts\python.exe -m pytest -q` (ожидается полный зелёный набор: **1146 passed, 2 skipped**). ВАЖНО: запускать ИНТЕРПРЕТАТОРОМ venv (`venv\Scripts\python.exe`), а НЕ системным `python` — системный Python 3.14 не содержит `pdf-inspector` и `camoufox`, из-за чего pdf-e2e/camoufox-тесты падают с «pdf-inspector не установлен» / preset=False. Оба пакета объявлены в `requirements.txt` и установлены в venv.
+- **Тесты:** `venv\Scripts\python.exe -m pytest -q` (ожидается полный зелёный набор: **1248 passed, 10 skipped**). ВАЖНО: запускать ИНТЕРПРЕТАТОРОМ venv (`venv\Scripts\python.exe`), а НЕ системным `python` — системный Python 3.14 не содержит `pdf-inspector` и `camoufox`, из-за чего pdf-e2e/camoufox-тесты падают с «pdf-inspector не установлен» / preset=False. Оба пакета объявлены в `requirements.txt` и установлены в venv.
 - **Проверка синтаксиса:** `venv\Scripts\python.exe -m py_compile <files>` (либо запуск pytest).
 - Окружение: `venv/` (единый, Python 3.13; MinerU 3.4 установлен в нём же).
 
@@ -50,7 +50,8 @@
   - `stuck_detector.py` — StuckDetector: зацикливание/блокировки (Фаза 1).
   - `audit_logger.py` — Audit-лог JSONL в `data/audit/` (Фаза 1).
   - `dependency_manager/` — инструмент «Зависимости» (Qt-free логика в `manager.py`/`npm.py`/`pypi.py`, UI в `dialog.py`). Проверка версий pip+npm и ревизии chromium (`BrowserInfo`) для `@playwright/mcp`.
-  - `pdf_parser/` — парсер PDF (MinerU → fallback structurer, LLM отключён).
+  - `pdf_parser/` — парсер PDF v1 (MinerU → fallback structurer, LLM отключён).
+  - `pdf2spec/` — парсер PDF v2 (методология Hermes): PyMuPDF find_tables, классификация строк, mother-child吸收, LLM-ревью, OCR fallback через MinerU. Переключатель `settings.yaml → pdf_parser.pipeline: v2 | legacy` или GUI «Настройки → PDF-парсер».
   - `radiator_section_pricer.py` — расчёт цены радиатора по секциям при ненахождении точного количества (ТОЛЬКО для радиаторов, ТОЛЬКО после полного перебора сайтов, на основе confirmed_prices).
   - `ductwork_calculator.py` — модуль расчёта воздуховодов и фасонных частей (без обращения в сеть): 20 типов элементов, цена за изделие с номенклатурной длиной (круглый 3000 мм / прямоугольный 1250 мм), включается через `ductwork.enabled` + дисклаймер при загрузке спецификации.
 - `gui/` — `graph_assistant.py` (панели: HelpPage, StudyPage, CRUD), `graph_explorer.py` (визуализация графа), `agent_monitor.py` (мониторинг), `metrics_panel.py`, `spinner_widget.py`.
