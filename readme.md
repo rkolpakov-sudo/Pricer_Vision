@@ -34,6 +34,21 @@
 - `ref→target` маппинг: хеш-рефы (`e68`, `f5e17`) не маппятся, роль-локаторы (`textbox "Поиск"`) проходят как target
 - Circuit Breaker (`mcp_circuit`, 5 отказов/60s): при OPEN `call_tool` → `restart()` и возврат `"error: MCP circuit open"`; success/failure фиксируются по результату `session.call_tool`
 
+### browser_click: fast-fail + JS-fallback (browser_server.py)
+Клик — самый дорогой инструмент агента: на SPA 55–91% кликов по hash-ref упирались в
+10с таймаут `get_by_role` + 2–4 LLM-раунда восстановления. Причина — снапшот строится
+кастомным JS-сканером (role = `aria-role || тег`, name = `textContent[:80]`), а клик идёт
+через строгий Playwright `get_by_role(role, name)` (WAI-ARIA accessible-name) — два разных мира.
+Лечение в `mcp_servers/browser_server.py`:
+- **Fast-fail**: перед 10с-кликом элемент проверяется в живом DOM через `_CLICK_FIND_JS`.
+  Нет элемента (SPA перерисовалась / ref устарел) → мгновенная ошибка «не найден в DOM».
+- **Link-fallback**: честный клик не смог, но элемент — `<a href>` → честная навигация на
+  href через `goto` (без синтетики).
+- **Force-click**: для не-ссылок (кнопки/дивы) — JS `dispatchEvent` полной последовательности
+  pointer/mouse событий через `_CLICK_FORCE_JS`.
+- **Очистка `_element_cache`**: в `goto()` обоих драйверов и при смене URL после клика —
+  ref со старой страницы больше не резолвится на новой.
+
 ### Граф знаний
 - `src/graph_engine.py` — SQLite + in-memory dicts
 - `src/memory_manager.py` — CRUD прослойка с дедупликацией и intent-классификацией
