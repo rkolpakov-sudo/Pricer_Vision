@@ -8,6 +8,7 @@ import os
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import pytest
+from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QApplication
 
 
@@ -36,7 +37,8 @@ class _FakeEngine:
 
 class _FakeExcelWriter:
     def __init__(self, cfg):
-        pass
+        self.ws = None
+        self.header_map = None
 
 
 def _monkey_window(monkeypatch, tmp_path, cfg_text):
@@ -116,5 +118,56 @@ def test_ductwork_toggle_writes_config(qapp, monkeypatch, tmp_path):
         assert cl.get_ductwork_enabled() is False
         win.ductwork_cb.setChecked(True)
         assert cl.get_ductwork_enabled() is True
+    finally:
+        win.close()
+
+
+def test_row_done_keeps_full_url_in_gui(qapp, monkeypatch, tmp_path):
+    """URL в таблице результатов НЕ усекается (регрессия url[:80]): усечение давало
+    битую ссылку (404) — терялся числовой суффикс карточки (.../103731804)."""
+    win = _monkey_window(monkeypatch, tmp_path, "run: {}\n")
+    try:
+        full_url = ("https://market.yandex.ru/card/truba-stalnaya-vodogazoprovodnaya-"
+                    "du-15kh28-mm-3-m/103731804")
+        win._on_row_done(0, {
+            "spec_text": "Труба ВГП Ø15",
+            "price": 299.0,
+            "confidence": 0.5,
+            "url": full_url,
+            "site": "market.yandex.ru",
+        })
+        row = win.results_table.rowCount() - 1
+        # колонка 7 — URL
+        cell = win.results_table.item(row, 7)
+        assert cell is not None
+        assert cell.text() == full_url
+        assert cell.data(Qt.UserRole) == full_url
+    finally:
+        win.close()
+
+
+def test_row_done_url_col_doubleclick_uses_full_url(qapp, monkeypatch, tmp_path):
+    """Двойной клик открывает колонку 7 (URL) с ПОЛНЫМ url из UserRole."""
+    import main as main_mod
+    win = _monkey_window(monkeypatch, tmp_path, "run: {}\n")
+    try:
+        full_url = "https://vseinstrumenti.ru/product/stalnaya-truba-dtrd-du-20-mm-l-2000-mm-ots-xyz/12345"
+        win._on_row_done(0, {
+            "spec_text": "Труба",
+            "price": 100.0,
+            "confidence": 0.9,
+            "url": full_url,
+            "site": "vseinstrumenti.ru",
+        })
+        row = win.results_table.rowCount() - 1
+        opened = []
+        orig = main_mod.QDesktopServices.openUrl
+        main_mod.QDesktopServices.openUrl = lambda u: opened.append(u.toString()) or True
+        try:
+            cell = win.results_table.item(row, 7)
+            win._on_url_double_click(cell)
+            assert opened and opened[0] == full_url
+        finally:
+            main_mod.QDesktopServices.openUrl = orig
     finally:
         win.close()

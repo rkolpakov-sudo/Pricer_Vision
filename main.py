@@ -1015,8 +1015,12 @@ class MainWindow(QMainWindow):
         self.preview_table.itemChanged.connect(self._on_preview_item_changed)
 
     def _on_url_double_click(self, item):
-        if item.column() == 6 and item.text().startswith("http"):
-            QDesktopServices.openUrl(QUrl(item.text()))
+        # URL — колонка 7 (не 6 «Сайт»). Открываем ПОЛНЫЙ URL из UserRole
+        # (усечённый text() давал битую ссылку → 404).
+        if item.column() == 7:
+            url = item.data(Qt.UserRole) or item.text()
+            if url and url.startswith("http"):
+                QDesktopServices.openUrl(QUrl(url))
 
     def add_log(self, level, phase, message):
         entry = {
@@ -1390,11 +1394,17 @@ class MainWindow(QMainWindow):
 
         items = [
             str(idx + 1), spec, pt, price_text, conf_text, elapsed_text,
-            site[:40] if site else "", url[:80] if url else ""
+            site if site else "", url if url else ""
         ]
         t = TOKENS.get(self._current_theme, TOKENS[Theme.DARK])
         for c, text in enumerate(items):
             item = QTableWidgetItem(text)
+            # URL (колонка 7) — ПОЛНЫЙ в ячейке + в UserRole для двойного клика:
+            # усечение url[:80] давало битую ссылку (404) — терялся числовой
+            # суффикс маркетплейса/карточки (…/103731804).
+            if c == 7 and url:
+                item.setToolTip(url)
+                item.setData(Qt.UserRole, url)
             if c == 1 and spec:
                 item.setToolTip(spec)
             if error:
