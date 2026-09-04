@@ -1156,7 +1156,7 @@ class MainWindow(QMainWindow):
                 item.setForeground(QColor(t["warning"]))
             self.results_table.setItem(row, c, item)
         # Retry button
-        retry_btn = QPushButton("🔄 Повтор")
+        retry_btn = QPushButton("🔄")
         retry_btn.setObjectName("row-action")
         retry_btn.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         retry_btn.setMinimumHeight(0)
@@ -1607,7 +1607,7 @@ class MainWindow(QMainWindow):
             self.results_table.setItem(row, c, item)
 
         # Study button — constrained to the row height so it can't overflow the cell
-        study_btn = QPushButton("🤖 Обучить")
+        study_btn = QPushButton("🤖")
         study_btn.setObjectName("row-action")
         study_btn.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         study_btn.setMinimumHeight(0)
@@ -1630,7 +1630,7 @@ class MainWindow(QMainWindow):
         btn_layout.addWidget(study_btn)
         # Add retry button for failed rows
         if price is None or error:
-            retry_btn = QPushButton("🔄 Повтор")
+            retry_btn = QPushButton("🔄")
             retry_btn.setObjectName("row-action")
             retry_btn.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
             retry_btn.setMinimumHeight(0)
