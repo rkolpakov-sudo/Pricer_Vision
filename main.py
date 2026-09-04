@@ -962,6 +962,8 @@ class MainWindow(QMainWindow):
         self.results_table.verticalHeader().setDefaultSectionSize(30)
         self.results_table.setAlternatingRowColors(True)
         self.results_table.itemDoubleClicked.connect(self._on_url_double_click)
+        self.results_table.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.results_table.customContextMenuRequested.connect(self._on_results_context_menu)
         center_tabs.addTab(self.results_table, "Результаты")
 
         self.preview_table = QTableWidget(0, 7)
@@ -1031,6 +1033,183 @@ class MainWindow(QMainWindow):
             url = item.data(Qt.UserRole) or item.text()
             if url and url.startswith("http"):
                 QDesktopServices.openUrl(QUrl(url))
+
+    def _on_results_context_menu(self, pos):
+        """Right-click context menu on results table — retry failed rows."""
+        item = self.results_table.itemAt(pos)
+        if not item:
+            return
+        row = item.row()
+        # Get spec_text from column 1
+        spec_item = self.results_table.item(row, 1)
+        if not spec_item:
+            return
+        spec_text = spec_item.text()
+        # Find the result in _restored_results
+        result = None
+        for r in self._restored_results:
+            if r.get("spec_text") == spec_text:
+                result = r
+                break
+        if not result:
+            return
+        price = result.get("price")
+        error = result.get("error", "")
+        # Only show retry for failed/not-found rows
+        if price is not None and not error:
+            return
+        menu = QMenu(self)
+        retry_action = menu.addAction("🔄 Повторить поиск")
+        retry_action.triggered.connect(lambda checked, r=row: self._retry_single_row(r))
+        menu.exec(self.results_table.viewport().mapToGlobal(pos))
+
+    def _retry_single_row(self, table_row: int):
+        """Retry a single failed row — create a minimal runner for one spec."""
+        if self._processing_active:
+            return
+        # Get spec_text from the table
+        spec_item = self.results_table.item(table_row, 1)
+        if not spec_item:
+            return
+        spec_text = spec_item.text()
+        # Find the original SpecItem
+        original_spec = None
+        for spec in self.excel_writer.get_specs():
+            if spec.text == spec_text:
+                original_spec = spec
+                break
+        if not original_spec:
+            self.add_log("WARN", "retry", f"Не найден SpecItem для: {spec_text[:60]}")
+            return
+        # Remove old row from results table
+        self.results_table.removeRow(table_row)
+        self._restored_results = [
+            r for r in self._restored_results
+            if r.get("spec_text") != spec_text
+        ]
+        # Update row numbers in first column
+        for r in range(self.results_table.rowCount()):
+            num_item = QTableWidgetItem(str(r + 1))
+            num_item.setTextAlignment(Qt.AlignCenter)
+            self.results_table.setItem(r, 0, num_item)
+        self.config = self._load_config()
+        self._processing_active = True
+        self._spinner.setFixedSize(20, 20)
+        self._spinner.tick()
+        self._spinner_timer.start()
+        llm_client = llm_providers.create_llm_client(self.config)
+        self._retry_runner = MCPAgentRunner(
+            specs=[original_spec],
+            llm_client=llm_client,
+            fresh=True,
+            use_approaches=self.use_approaches_cb.isChecked(),
+            use_site_ranking=self.use_site_ranking_cb.isChecked(),
+            ductwork_enabled=self.ductwork_cb.isChecked(),
+            skip_registry=self._skip_registry,
+            restored_caches=self._restored_caches,
+            restored_results=[],
+        )
+        self._retry_runner.row_done_signal.connect(
+            lambda idx, result: self._on_retry_row_done(table_row, result)
+        )
+        self._retry_runner.done_signal.connect(self._on_retry_done)
+        self._retry_runner.error_signal.connect(self._on_runner_error)
+        self._retry_runner.start()
+        self.add_log("INFO", "retry", f"Повтор поиска: {spec_text[:60]}")
+
+    def _on_retry_row_done(self, insert_at, result):
+        """Handle retry result — insert at original position."""
+        row = insert_at
+        self.results_table.insertRow(row)
+        self._restored_results.append(result)
+        price = result.get("price")
+        conf = result.get("confidence", 0)
+        price_text = f"₽{price:,.2f}" if price is not None else "—"
+        conf_text = f"{conf:.0%}" if conf else "—"
+        elapsed = result.get("elapsed")
+        elapsed_text = f"{elapsed:.0f}с" if elapsed is not None else "—"
+        site = result.get("site", "")
+        url = result.get("url", "")
+        spec = result.get("spec_text", "")
+        pt = result.get("product_type", "")
+        error = result.get("error", "")
+        brand_mismatch = result.get("brand_mismatch", False)
+        items = [
+            str(row + 1), spec, pt, price_text, conf_text, elapsed_text,
+            site if site else "", url if url else ""
+        ]
+        t = TOKENS.get(self._current_theme, TOKENS[Theme.DARK])
+        for c, text in enumerate(items):
+            item = QTableWidgetItem(text)
+            if c == 7 and url:
+                item.setToolTip(url)
+                item.setData(Qt.UserRole, url)
+            if c == 1 and spec:
+                item.setToolTip(spec)
+            if error:
+                item.setForeground(QColor(t["danger"]))
+            elif brand_mismatch:
+                item.setForeground(QColor(t["warning"]))
+            elif price is not None:
+                item.setForeground(QColor(t["success"]))
+            else:
+                item.setForeground(QColor(t["warning"]))
+            self.results_table.setItem(row, c, item)
+        # Retry button
+        retry_btn = QPushButton("🔄 Повтор")
+        retry_btn.setObjectName("row-action")
+        retry_btn.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        retry_btn.setMinimumHeight(0)
+        retry_btn.setMaximumHeight(self.results_table.verticalHeader().defaultSectionSize())
+        retry_btn.setToolTip("Повторить поиск для этого товара")
+        spec_full = result.get("spec_text", "")
+        retry_btn.clicked.connect(
+            lambda checked, s=spec_full: self._retry_by_spec(s)
+        )
+        btn_wrap = QWidget()
+        btn_wrap.setMinimumSize(0, 0)
+        btn_layout = QHBoxLayout(btn_wrap)
+        btn_layout.setContentsMargins(0, 0, 0, 0)
+        btn_layout.setSpacing(0)
+        btn_layout.setSizeConstraint(QLayout.SetNoConstraint)
+        btn_layout.setAlignment(Qt.AlignCenter)
+        btn_layout.addWidget(retry_btn)
+        self.results_table.setCellWidget(row, 8, btn_wrap)
+        # Update row numbers after insert
+        for r in range(self.results_table.rowCount()):
+            num_item = QTableWidgetItem(str(r + 1))
+            num_item.setTextAlignment(Qt.AlignCenter)
+            self.results_table.setItem(r, 0, num_item)
+        self.results_table.scrollToBottom()
+        # Write to Excel
+        ws = self.excel_writer.ws
+        hm = self.excel_writer.header_map
+        if ws and hm:
+            excel_row = result.get("excel_row") or (row + 2)
+            ws.cell(excel_row, hm["price"], price)
+            ws.cell(excel_row, hm["url"], url or "")
+            ws.cell(excel_row, hm["category"], pt or "")
+        if error:
+            self.add_log("WARN", "retry", f"Row {row+1}: {error}")
+        elif price:
+            self.add_log("INFO", "retry", f"Row {row+1}: {price_text} ({conf_text}) on {site}")
+
+    def _retry_by_spec(self, spec_text: str):
+        """Find table row by spec_text and trigger retry."""
+        if self._processing_active:
+            return
+        for r in range(self.results_table.rowCount()):
+            item = self.results_table.item(r, 1)
+            if item and item.text() == spec_text:
+                self._retry_single_row(r)
+                return
+
+    def _on_retry_done(self, ok, results):
+        """Retry runner finished."""
+        self._processing_active = False
+        self._spinner_timer.stop()
+        self._spinner.setFixedSize(0, 0)
+        self.add_log("INFO", "retry", "Повтор завершён")
 
     def add_log(self, level, phase, message):
         entry = {
@@ -1449,6 +1628,18 @@ class MainWindow(QMainWindow):
         btn_layout.setSizeConstraint(QLayout.SetNoConstraint)
         btn_layout.setAlignment(Qt.AlignCenter)
         btn_layout.addWidget(study_btn)
+        # Add retry button for failed rows
+        if price is None or error:
+            retry_btn = QPushButton("🔄 Повтор")
+            retry_btn.setObjectName("row-action")
+            retry_btn.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+            retry_btn.setMinimumHeight(0)
+            retry_btn.setMaximumHeight(self.results_table.verticalHeader().defaultSectionSize())
+            retry_btn.setToolTip("Повторить поиск для этого товара")
+            retry_btn.clicked.connect(
+                lambda checked, s=spec_full: self._retry_by_spec(s)
+            )
+            btn_layout.addWidget(retry_btn)
         self.results_table.setCellWidget(row, 8, btn_wrap)
 
         self.results_table.scrollToBottom()
