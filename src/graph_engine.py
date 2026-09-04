@@ -16,6 +16,30 @@ STALE_DAYS = get_price_config("stale_days", 30)
 _IS_FAMILY_PAGE_RE = re.compile(r"/catalog/\d+/\d+/i\d+$", re.IGNORECASE)
 
 
+def _split_keywords(keywords) -> list[str]:
+    """Список ключевых слов в нижнем регистре (разделители , ; / пробел)."""
+    out = []
+    for raw in re.split(r"[,;/]", keywords or ""):
+        kw = raw.strip().lower()
+        if kw:
+            out.append(kw)
+    return out
+
+
+def _tokenize(text: str) -> set[str]:
+    """Разбивает текст на токены в нижнем регистре (по разделителям)."""
+    return set(re.split(r"[,;/\s\-_.:!?()«»\"'«»]+", (text or "").lower())) - {""}
+
+
+def _kw_hits(text: str, keywords: list[str]) -> bool:
+    """True, если text содержит хотя бы одно ключевое слово ЦЕЛИКОМ (токен-уровень).
+
+    'fan' НЕ совпадёт с 'fantastic', 'пласт' НЕ совпадёт с 'пластик'.
+    """
+    tokens = _tokenize(text)
+    return any(kw in tokens for kw in keywords)
+
+
 def _is_invalid_price_url(url: str) -> bool:
     """True, если URL — не карточка товара (главная/поисковая/семейная страница).
     Такие цены не должны переиспользоваться как источник."""
@@ -34,11 +58,21 @@ def _is_invalid_price_url(url: str) -> bool:
     return False
 
 SCHEMA_SQL = """
+CREATE TABLE IF NOT EXISTS categories (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    priority INTEGER DEFAULT 0,
+    focus TEXT,
+    source TEXT DEFAULT 'yaml',
+    created_at TEXT DEFAULT (datetime('now'))
+);
+
 CREATE TABLE IF NOT EXISTS product_types (
     id TEXT PRIMARY KEY,
     name TEXT NOT NULL,
     category TEXT,
     keywords TEXT,
+    source TEXT DEFAULT 'yaml',
     created_at TEXT DEFAULT (datetime('now'))
 );
 
@@ -150,6 +184,7 @@ class GraphEngine:
         self._hints_by_product: dict[str, list[dict]] = {}
         self._all_sites: dict[str, dict] = {}
         self._all_products: dict[str, dict] = {}
+        self._all_categories: dict[str, dict] = {}
         self._equivalences: set[tuple[str, str]] = set()
         self._built = False
 
@@ -189,6 +224,14 @@ class GraphEngine:
         # Migration: add expires_at to hints if missing (Phase 4, TTL)
         try:
             self._conn.execute("ALTER TABLE hints ADD COLUMN expires_at TEXT")
+        except Exception:
+            pass  # column already exists
+        # Migration: пометка источника типа ('yaml'/'user') — защита пользовательских
+        # правок от перезаписи YAML-сидом при перезагрузке (Этап 5 плана групп).
+        try:
+            self._conn.execute(
+                "ALTER TABLE product_types ADD COLUMN source TEXT DEFAULT 'yaml'"
+            )
         except Exception:
             pass  # column already exists
         self._conn.commit()
@@ -244,6 +287,10 @@ class GraphEngine:
         self._all_products.clear()
         for row in self._conn.execute("SELECT * FROM product_types WHERE id != 'unknown'"):
             self._all_products[row["id"]] = dict(row)
+
+        self._all_categories.clear()
+        for row in self._conn.execute("SELECT * FROM categories ORDER BY priority ASC, id ASC"):
+            self._all_categories[row["id"]] = dict(row)
 
         self._equivalences.clear()
         for row in self._conn.execute("SELECT spec_text, found_name FROM matching_equivalences"):
@@ -639,18 +686,23 @@ class GraphEngine:
     # ── Product type management ──
 
     def save_product_type(self, product_id: str, name: str, category: str = "",
-                          keywords: str = "") -> str:
+                          keywords: str = "", source: str = "user") -> str:
         self.build()
         with self._lock:
+            if category:
+                self._conn.execute(
+                    "INSERT OR IGNORE INTO categories (id, name, source) VALUES (?, ?, 'user')",
+                    (category, category)
+                )
             self._conn.execute(
-                "INSERT OR REPLACE INTO product_types (id, name, category, keywords) "
-                "VALUES (?, ?, ?, ?)",
-                (product_id, name, category, keywords)
+                "INSERT OR REPLACE INTO product_types (id, name, category, keywords, source) "
+                "VALUES (?, ?, ?, ?, ?)",
+                (product_id, name, category, keywords, source)
             )
             self._conn.commit()
             self._all_products[product_id] = {
                 "id": product_id, "name": name,
-                "category": category, "keywords": keywords,
+                "category": category, "keywords": keywords, "source": source,
             }
         return product_id
 
@@ -665,6 +717,258 @@ class GraphEngine:
             self._conn.commit()
         self._built = False
         return True
+
+    # ── Categories (группы товаров) — Этап 1 плана групп ──
+
+    def list_categories(self) -> list[dict]:
+        self.build()
+        cats = [dict(r) for r in self._conn.execute(
+            "SELECT * FROM categories ORDER BY priority ASC, id ASC"
+        )]
+        # количество типов в категории
+        for c in cats:
+            try:
+                n = self._conn.execute(
+                    "SELECT COUNT(*) FROM product_types WHERE category = ? AND id != 'unknown'",
+                    (c["id"],)
+                ).fetchone()[0]
+            except Exception:
+                n = 0
+            c["type_count"] = n
+        return cats
+
+    def save_category(self, category_id: str, name: str, priority: int = 0,
+                      focus: str = "", source: str = "user") -> str:
+        self.build()
+        with self._lock:
+            self._conn.execute(
+                "INSERT OR REPLACE INTO categories (id, name, priority, focus, source) "
+                "VALUES (?, ?, ?, ?, ?)",
+                (category_id, name, priority, focus, source)
+            )
+            self._conn.commit()
+        self._built = False
+        return category_id
+
+    def rename_category(self, category_id: str, name: str) -> bool:
+        self.build()
+        with self._lock:
+            self._conn.execute(
+                "UPDATE categories SET name = ? WHERE id = ?", (name, category_id)
+            )
+            self._conn.commit()
+        self._built = False
+        return True
+
+    def delete_category(self, category_id: str) -> tuple[bool, str]:
+        """Удалить категорию. Только пустую (без типов) — иначе типы осиротеют."""
+        self.build()
+        with self._lock:
+            cnt = self._conn.execute(
+                "SELECT COUNT(*) FROM product_types WHERE category = ? AND id != 'unknown'",
+                (category_id,)
+            ).fetchone()[0]
+            if cnt:
+                return False, f"в категории {cnt} тип(ов) — сначала перенеси или удали их"
+            self._conn.execute("DELETE FROM categories WHERE id = ?", (category_id,))
+            self._conn.commit()
+        self._built = False
+        return True, ""
+
+    def save_categories_snapshot(self) -> dict:
+        """Снимок категорий + category-колонки product_types для rollback."""
+        self.build()
+        cats = [dict(r) for r in self._conn.execute("SELECT * FROM categories")]
+        types_cat = {}
+        for r in self._conn.execute(
+            "SELECT id, category FROM product_types WHERE id != 'unknown'"
+        ):
+            types_cat[r["id"]] = r["category"]
+        return {"categories": cats, "product_type_categories": types_cat}
+
+    def restore_categories_snapshot(self, snapshot: dict) -> None:
+        """Откат категорий к снимку."""
+        if not snapshot:
+            return
+        with self._lock:
+            self._conn.execute("DELETE FROM categories")
+            for c in snapshot.get("categories", []):
+                self._conn.execute(
+                    "INSERT INTO categories (id, name, priority, focus, source, created_at) "
+                    "VALUES (?, ?, ?, ?, ?, ?)",
+                    (c["id"], c["name"], c.get("priority", 0), c.get("focus", ""),
+                     c.get("source", "yaml"), c.get("created_at", ""))
+                )
+            for pid, cat in snapshot.get("product_type_categories", {}).items():
+                self._conn.execute(
+                    "UPDATE product_types SET category = ? WHERE id = ?", (cat, pid)
+                )
+            self._conn.commit()
+        self._built = False
+
+    def set_product_type_category(self, product_id: str, category_id: str) -> bool:
+        """Перенести тип в другую категорию.
+
+        Меняет ТОЛЬКО product_types.category. Рантайм (classify/сайты/память)
+        категорию не читает → перенос безопасен для пайплайна.
+        """
+        self.build()
+        with self._lock:
+            if category_id:
+                self._conn.execute(
+                    "INSERT OR IGNORE INTO categories (id, name, source) VALUES (?, ?, 'user')",
+                    (category_id, category_id)
+                )
+            self._conn.execute(
+                "UPDATE product_types SET category = ? WHERE id = ?",
+                (category_id, product_id)
+            )
+            self._conn.commit()
+        self._built = False
+        return True
+
+    # ── Split типа (Этап 3 плана групп) ──
+
+    def split_product_type(self, source_id: str, new_id: str, name: str, category: str,
+                           keywords: str, copy_sites: bool = True) -> dict:
+        """Вынести часть товаров из source_id в новый тип new_id.
+
+        - Создаёт тип new_id (source='user') под категорией category.
+        - Убирает переданные keywords из source (иначе classify продолжит
+          возвращать source для отделяемых товаров).
+        - Переносит в new_id confirmed_prices/approaches/hints, чьи spec/search_query/
+          hint_text содержат хотя бы один из новых keywords.
+        - Копирует стартовый список сайтов source → new_id (SitePage правит дальше).
+        """
+        self.build()
+        new_kws = _split_keywords(keywords)
+        if not source_id or source_id == "unknown":
+            return {"ok": False, "reason": "укажи исходный тип"}
+        if not new_id or not new_kws:
+            return {"ok": False, "reason": "укажи id нового типа и хотя бы одно ключевое слово"}
+        with self._lock:
+            src = self._conn.execute(
+                "SELECT * FROM product_types WHERE id = ?", (source_id,)
+            ).fetchone()
+            if src is None:
+                return {"ok": False, "reason": f"исходный тип «{source_id}» не найден"}
+            if self._conn.execute(
+                "SELECT 1 FROM product_types WHERE id = ?", (new_id,)
+            ).fetchone():
+                return {"ok": False, "reason": f"тип «{new_id}» уже существует"}
+
+            self._conn.execute(
+                "INSERT INTO product_types (id, name, category, keywords, source) "
+                "VALUES (?, ?, ?, ?, 'user')",
+                (new_id, name, category, keywords)
+            )
+            # 1) убрать отделяемые keywords из источника
+            src_kws = _split_keywords(src["keywords"])
+            keep = [k for k in src_kws if k not in new_kws]
+            if set(keep) != set(src_kws):
+                self._conn.execute(
+                    "UPDATE product_types SET keywords = ? WHERE id = ?",
+                    (", ".join(keep) if keep else "", source_id)
+                )
+            # 2) миграция цен/подходов/хинтов по keyword-релевантности
+            cp = app = hn = 0
+            for row in self._conn.execute(
+                "SELECT id, spec_text FROM confirmed_prices WHERE product_type_id = ?",
+                (source_id,)
+            ):
+                if _kw_hits(row["spec_text"], new_kws):
+                    self._conn.execute(
+                        "UPDATE confirmed_prices SET product_type_id = ? WHERE id = ?",
+                        (new_id, row["id"])
+                    )
+                    cp += 1
+            for row in self._conn.execute(
+                "SELECT id, search_query FROM approaches WHERE product_type_id = ?",
+                (source_id,)
+            ):
+                if _kw_hits(row["search_query"] or "", new_kws):
+                    self._conn.execute(
+                        "UPDATE approaches SET product_type_id = ? WHERE id = ?",
+                        (new_id, row["id"])
+                    )
+                    app += 1
+            for row in self._conn.execute(
+                "SELECT id, hint_text FROM hints WHERE product_type_id = ?",
+                (source_id,)
+            ):
+                if _kw_hits(row["hint_text"] or "", new_kws):
+                    self._conn.execute(
+                        "UPDATE hints SET product_type_id = ? WHERE id = ?",
+                        (new_id, row["id"])
+                    )
+                    hn += 1
+            # 3) стартовый список сайтов
+            copied_sites = 0
+            if copy_sites:
+                for row in self._conn.execute(
+                    "SELECT site_id, priority FROM product_sites WHERE product_type_id = ?",
+                    (source_id,)
+                ):
+                    self._conn.execute(
+                        "INSERT OR IGNORE INTO product_sites "
+                        "(product_type_id, site_id, priority, consecutive_failures) "
+                        "VALUES (?, ?, ?, 0)",
+                        (new_id, row["site_id"], row["priority"])
+                    )
+                    copied_sites += 1
+            self._conn.commit()
+        self._built = False
+        self.build()
+        warnings = []
+        src_kws_after = _split_keywords(
+            self._all_products.get(source_id, {}).get("keywords", ""))
+        if not src_kws_after:
+            warnings.append("исходный тип остался БЕЗ ключевых слов — classify не будет работать")
+        if cp == 0 and app == 0 and hn == 0:
+            warnings.append("ни одна запись не перемещена — проверь ключевые слова")
+        return {
+            "ok": True, "new_id": new_id,
+            "confirmed_moved": cp, "approaches_moved": app,
+            "hints_moved": hn, "sites_copied": copied_sites,
+            "warnings": warnings,
+        }
+
+    def preview_split(self, source_id: str, keywords: str) -> dict:
+        """Dry-run: показывает сколько записей БУДЕТ перемещено при сплите."""
+        self.build()
+        new_kws = _split_keywords(keywords)
+        if not source_id or not new_kws:
+            return {"ok": False, "reason": "укажи исходный тип и ключевые слова"}
+        with self._lock:
+            src = self._conn.execute(
+                "SELECT * FROM product_types WHERE id = ?", (source_id,)
+            ).fetchone()
+            if src is None:
+                return {"ok": False, "reason": f"тип «{source_id}» не найден"}
+            src_kws = _split_keywords(src["keywords"])
+            keep = [k for k in src_kws if k not in new_kws]
+            cp = sum(1 for r in self._conn.execute(
+                "SELECT spec_text FROM confirmed_prices WHERE product_type_id = ?",
+                (source_id,)) if _kw_hits(r["spec_text"], new_kws))
+            app = sum(1 for r in self._conn.execute(
+                "SELECT search_query FROM approaches WHERE product_type_id = ?",
+                (source_id,)) if _kw_hits(r["search_query"] or "", new_kws))
+            hn = sum(1 for r in self._conn.execute(
+                "SELECT hint_text FROM hints WHERE product_type_id = ?",
+                (source_id,)) if _kw_hits(r["hint_text"] or "", new_kws))
+            warnings = []
+            if not keep:
+                warnings.append("ВНИМАНИЕ: все keywords уйдут из источника — classify сломается")
+            if cp == 0 and app == 0 and hn == 0:
+                warnings.append("ни одна запись не будет перемещена — проверь ключевые слова")
+            return {
+                "ok": True,
+                "confirmed_moved": cp, "approaches_moved": app,
+                "hints_moved": hn,
+                "src_keywords_remaining": keep,
+                "src_keywords_removed": [k for k in src_kws if k not in keep],
+                "warnings": warnings,
+            }
 
     def classify_product_type(self, spec_text: str) -> str:
         self.build()
@@ -692,6 +996,16 @@ class GraphEngine:
         category_map = config.get("category_map", {})
 
         with self._lock:
+            # Категории (группы) из category_map; user-категории не трогаем (OR IGNORE).
+            priority_order = config.get("priority_order", []) or list(category_map.keys())
+            rank = {cid: i for i, cid in enumerate(priority_order)}
+            for cid, cdata in category_map.items():
+                cname = cdata.get("focus") or cdata.get("name") or cid
+                self._conn.execute(
+                    "INSERT OR IGNORE INTO categories (id, name, priority, focus, source) "
+                    "VALUES (?, ?, ?, ?, 'yaml')",
+                    (cid, cname, rank.get(cid, 0), cdata.get("focus", ""))
+                )
             for cat_name, cat_data in category_map.items():
                 subs = cat_data.get("subcategories", {})
                 if not subs:
@@ -699,11 +1013,7 @@ class GraphEngine:
                     product_name = cat_data.get("focus", cat_name)
                     keywords_list = cat_data.get("keywords", [])
                     keywords_str = ", ".join(keywords_list) if keywords_list else product_name
-                    self._conn.execute(
-                        "INSERT OR REPLACE INTO product_types (id, name, category, keywords) "
-                        "VALUES (?, ?, ?, ?)",
-                        (product_id, product_name, cat_name, keywords_str)
-                    )
+                    self._upsert_seeded_type(product_id, product_name, cat_name, keywords_str)
                     self._register_sites(product_id, cat_data.get("sites", []), excluded)
                     continue
                 for subcat_key, subcat_data in subs.items():
@@ -712,11 +1022,7 @@ class GraphEngine:
                     keywords_list = subcat_data.get("keywords", [])
                     keywords_str = ", ".join(keywords_list) if keywords_list else product_name
 
-                    self._conn.execute(
-                        "INSERT OR REPLACE INTO product_types (id, name, category, keywords) "
-                        "VALUES (?, ?, ?, ?)",
-                        (product_id, product_name, cat_name, keywords_str)
-                    )
+                    self._upsert_seeded_type(product_id, product_name, cat_name, keywords_str)
                     self._register_sites(product_id, subcat_data.get("sites", []), excluded)
 
             hints = config.get("hints", [])
@@ -764,6 +1070,24 @@ class GraphEngine:
                 "VALUES (?, ?, ?)",
                 (product_id, site_id, priority)
             )
+
+    def _upsert_seeded_type(self, product_id: str, name: str, category: str, keywords: str):
+        """Вставка типа из YAML-сида.
+
+        Пользовательский тип (source='user') НЕ перезаписывается: если пользователь
+        правил name/category/keywords через UI, YAML-перезагрузка их не откатывает
+        (Этап 5 плана групп). Регистрация сайтов идёт отдельно (_register_sites).
+        """
+        existing = self._conn.execute(
+            "SELECT source FROM product_types WHERE id = ?", (product_id,)
+        ).fetchone()
+        if existing and existing["source"] == "user":
+            return
+        self._conn.execute(
+            "INSERT OR REPLACE INTO product_types (id, name, category, keywords, source) "
+            "VALUES (?, ?, ?, ?, 'yaml')",
+            (product_id, name, category, keywords)
+        )
 
     # ── Stats ──
 

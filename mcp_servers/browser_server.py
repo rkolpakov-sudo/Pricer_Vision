@@ -293,6 +293,7 @@ def _camoufox_launch_kwargs(headless: bool, *, locale: str = "ru-RU",
         "os": "windows",
         "fingerprint_preset": True,
         "humanize": humanize,
+        "disable_coop": True,  # Allow clicking Cloudflare Turnstile checkboxes
     }
     if pinned_fingerprint:
         preset = _pinned_windows_preset()

@@ -48,7 +48,8 @@ def _normalize_query(q: str) -> str:
 class RowFacts:
     """Факты, накопленные за время обработки одной строки спецификации."""
 
-    def __init__(self):
+    def __init__(self, spec_text: str = ""):
+        self._spec_text = spec_text
         self._sites: dict[str, dict] = {}
         self._price_candidate_seen = False
         self._price_candidate_hint: str = ""
@@ -237,6 +238,9 @@ class RowFacts:
 
     def to_prompt_block(self) -> str:
         parts = []
+        # Идентификатор товара — переживает trim контекста.
+        if self._spec_text:
+            parts.append(f"  ТОВАР: {self._spec_text}")
         # Прогресс
         if self._rounds_total is not None and self._rounds_used is not None:
             pct = int(self._rounds_used / self._rounds_total * 100) if self._rounds_total else 0

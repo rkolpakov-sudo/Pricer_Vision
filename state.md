@@ -1,5 +1,74 @@
 # State Log
 
+## 2026-09-03 — FEATURE: редактируемые категории (группы) товаров + сплит типов (UI)
+
+### Проблема
+Пользователь не мог вынести часть товаров (напр. «Изоляция для труб») из общей группы
+«Инструменты, крепёж, изоляция…»: групп как сущностей не было (только `product_types.category` +
+структура YAML), UI позволял CRUD только типов. Непонятно было влияние на пайплайн/БД.
+
+### Ключевые факты исследования (docs/PLAN_GROUPS_UI.md)
+- Всё ключуется по **тип-иду строкой**; `product_types.category` в рантайме не читается
+  (classify — по keywords, сайты — по product_sites типа) → перенос типа в группу безопасен.
+- Опасны: смена тип-ида (осиротение дочерних таблиц), сплит без переноса памяти/сайтов/keywords-хирургии.
+
+### Реализовано (весь план)
+| # | Файл | Что |
+|---|------|-----|
+| 1 | `graph_engine.py` | Таблица `categories`; CRUD (`list/save/rename/delete_category`, `delete` только пустой), `set_product_type_category` (UPDATE category без трогания name/keywords), `split_product_type` (новый тип, удаление ключевых слов из источника, перенос confirmed/approaches/hints по keywords, копия сайтов). Колонка `product_types.source` ('yaml'/'user'). |
+| 2 | `graph_engine.py` `load_yaml_seed` | Импорт категорий (INSERT OR IGNORE); `_upsert_seeded_type` не перезаписывает типы `source='user'`; типы из YAML помечаются 'yaml'. |
+| 3 | `memory_manager.py` | Делегаты категорий и сплита. |
+| 4 | `gui/graph_assistant.py` | Страница «Категории» (CRUD групп, перенос типа между группами) + `SplitTypeDialog` (мастер сплита). Зарегистрирована в TOOLS. |
+| 5 | `config_loader.py` + `settings.yaml` | `special_types.{radiators,ductwork}`; `ductwork_calculator.py`/`agent_loop.py` union ворот — сплит не отключает калькуляторы. |
+
+### Проверка
+- Реальная БД: 7 категорий; `classify('Изоляция 13 мм …ENERGOFLEX')` → tools_general (до сплита).
+- Тесты: 7 model-тестов (категории CRUD, delete-непустой, yaml-защита user-правок,
+  split-миграция+очистка keywords+classify, источник не найден) + 3 UI-смока + special_types.
+**1274 passed, 10 skipped**.
+
+## 2026-09-03 — FIX: связанные комбобоксы категорий между страницами
+
+### Проблема
+CategoriesPage показывала 7 категорий из YAML, но SitePage показывала все 30+ типов товаров
+без фильтра — пользователь не понимал связь. ProductTypePage имел `cat_input` как `QLineEdit`
+(ввод вручную), а не выпадающий список из таблицы `categories`.
+
+### Исправления
+| Файл | Что |
+|------|-----|
+| `gui/graph_assistant.py` ProductTypePage | `cat_input` (QLineEdit) → `cat_combo` (QComboBox), заполняется из `categories` таблицы. `refresh_categories()` обновляет список при изменениях. |
+| `gui/graph_assistant.py` SitePage | Добавлен `category_filter` QComboBox — фильтрует `product_combo` по выбранной категории. |
+| `gui/graph_assistant.py` AssistantToolPanel | `_refresh_combos()` теперь вызывает `refresh_categories(categories)` на всех страницах. |
+| `gui/graph_assistant.py` CategoriesPage | Добавлен `refresh_categories()` — перезагружает таблицу при изменениях извне. |
+
+### Результат
+- Страница «Типы товаров»: категория — выпадающий список из БД (не ручной ввод)
+- Страница «Сайты»: фильтр по категории сужает список типов
+- Все страницы синхронизированы через `refresh_categories(categories)`
+**1274 passed, 10 skipped**.
+
+---
+
+## 2026-09-03 — FIX: «Выбор сессии» показывал два одинаковых пункта
+
+### Причина
+`list_sessions()` (session_manager) показывал любой `*.json` в `data/sessions/`, кроме `_current.json`.
+Бэкап-файл `_current_backup_20260903_171811.json` (создан при очистке схлопнутых записей) лежал
+в каталоге → в диалоге появлялся дубль текущей сессии.
+
+### Фикс
+| # | Что |
+|---|-----|
+| 1 | Удалён артефакт `data/sessions/_current_backup_20260903_171811.json` (в каталоге остался только `_current.json`). |
+| 2 | `session_manager.list_sessions()`: игнорирует файлы, начинающиеся с `_` (служебные/бэкапы) — не только `_current.json`. |
+
+### Тесты (+1)
+`test_list_sessions_skips_private_and_backup` — `_current_backup_*.json` не попадает в список.
+**1264 passed, 10 skipped**.
+
+---
+
 ## 2026-09-03 — CLEANUP: удалены схлопнутые записи «Трубопроводы…» (прогон + БД)
 
 После фикса B/C (размер из ГОСТ сохраняется) почищены записи, созданные под СТАРЫМ
@@ -5995,3 +6064,38 @@ has_matching_equivalence автоматически принимал ЛЮБОЙ 
 
 - 12 orchestrator тестов (build_prompt, apply_fixes, rules persistence, mock LLM review)
 - Итого: **298 passed** (92 + 12 + 194)
+
+## 2026-09-04 — FIX: Деградация агента + Anti-bot усиление
+
+### Проблема
+Позиция «Воздухоотводчик автоматический НР 1/2" 8931» — 639 секунд на 2 домена, товар НЕ найден.
+Корневые причины: реюз цены не сработал (порог 0.9), потеря контекста после MCP restart, captcha на vseinstrumenti.ru без retry.
+
+### Исправления агента (F1-F6)
+
+| # | Файл | Что |
+|---|------|-----|
+| F1 | `agent_loop.py:589-597` | Реюз цены: `mismatch_kind()` + порог 0.7 для `descriptive_only` (было 0.9) |
+| F2 | `agent_loop.py:792,821-835` | Cooldown retry queue — агент возвращается на сайт после cooldown |
+| F3 | `session_facts.py:51,240-241` + `agent_loop.py:742` | `spec_text` в RowFacts — переживает trim контекста |
+| F4 | `agent_loop.py:41-44` | Единые captcha keywords (объединены списки) |
+| F5 | `settings.yaml:140-141` | `max_rounds: 25`, `max_rounds_per_site: 10` (было 40/15) |
+| F6 | `agent_loop.py:1421-1422` | `site_blacklist.strike()` при captcha — блокирует сайт на сессию |
+
+### Anti-bot усиления (R1-R6)
+
+| # | Файл | Что |
+|---|------|-----|
+| R1 | `settings.yaml:24-25` | `persistent_profile: true` + `pinned_fingerprint: true` — куки cf_clearance сохраняются |
+| R2 | `mcp_bridge.py:237,300-301` | Убрана инъекция stealth.js (Camoufox делает всё на C++ уровне) |
+| R3 | `browser_server.py:295` | `disable_coop: True` — позволяет кликать Cloudflare Turnstile |
+| R4 | (уже было) | `enable_cache: True` автоматически при persistent_profile |
+| R5 | `agent_loop.py` | Убран Python HumanBehavior (Camoufox humanize=True использует C++ cursor movement) |
+| R6 | `requirements.txt:12` | `camoufox>=0.5.6` (было >=0.5.5) |
+
+### Подготовка
+- Удалён профиль `data/camoufox_profile` (старый, без pinned fingerprint)
+- Создана чистая директория для нового профиля
+
+### Тесты
+**1274 passed, 10 skipped** — нулевые регрессии.

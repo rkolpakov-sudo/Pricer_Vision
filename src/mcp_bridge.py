@@ -234,7 +234,6 @@ def _click_timeout_hint(result_text: str) -> str:
             "или кликни по тексту: a:has-text(\"...\"), или открой URL карточки "
             "через browser_navigate.")
 
-_STEALTH_JS = str(Path(__file__).resolve().parent.parent / "config" / "stealth.js")
 _MCP_CONFIG = str(Path(__file__).resolve().parent.parent / "config" / "playwright-mcp.json")
 
 
@@ -297,8 +296,6 @@ class MCPBridge:
             pw_args = [pw_pkg, "--browser", "chrome"]
             if self._headless:
                 pw_args.append("--headless")
-            if os.path.exists(_STEALTH_JS):
-                pw_args.extend(["--init-script", _STEALTH_JS])
             if os.path.exists(_MCP_CONFIG):
                 pw_args.extend(["--config", _MCP_CONFIG])
             pw_args.extend(["--viewport-size", "1920x1080"])

@@ -6,6 +6,7 @@ from PySide6.QtWidgets import (
     QListWidget, QSplitter, QFrame, QFormLayout,
     QDoubleSpinBox, QComboBox, QMessageBox,
     QCheckBox, QAbstractItemView, QProgressBar, QApplication,
+    QDialog, QPlainTextEdit,
 )
 from PySide6.QtGui import QTextCursor
 from PySide6.QtCore import Qt, QTimer
@@ -630,9 +631,10 @@ class ProductTypePage(QWidget):
         self.name_input = QLineEdit()
         self.name_input.setPlaceholderText("Название (рус, напр. Новый кабель)")
         form.addWidget(self.name_input, 1)
-        self.cat_input = QLineEdit()
-        self.cat_input.setPlaceholderText("Категория (опц.)")
-        form.addWidget(self.cat_input, 1)
+        self.cat_combo = QComboBox()
+        self.cat_combo.setEditable(True)
+        self.cat_combo.setPlaceholderText("Категория")
+        form.addWidget(self.cat_combo, 1)
         save_btn = QPushButton("Сохранить")
         save_btn.setObjectName("primary")
         save_btn.clicked.connect(self._save)
@@ -673,6 +675,21 @@ class ProductTypePage(QWidget):
     def refresh(self):
         self._load()
 
+    def refresh_categories(self, categories: list):
+        cur = self.cat_combo.currentData() or self.cat_combo.currentText()
+        self.cat_combo.blockSignals(True)
+        self.cat_combo.clear()
+        self.cat_combo.addItem("(без категории)", "")
+        for c in categories:
+            cid = c.get("id", "")
+            cname = c.get("name", "")
+            self.cat_combo.addItem(f"{cid} — {cname}" if cname else cid, cid)
+        if cur:
+            idx = self.cat_combo.findData(cur)
+            if idx >= 0:
+                self.cat_combo.setCurrentIndex(idx)
+        self.cat_combo.blockSignals(False)
+
     def _load(self):
         if self._panel.engine is None:
             return
@@ -686,7 +703,7 @@ class ProductTypePage(QWidget):
             self.table.setItem(row, 0, QTableWidgetItem(pdata.get("name", "")))
             self.table.setItem(row, 1, QTableWidgetItem(pid))
             self.table.setItem(row, 2, QTableWidgetItem(pdata.get("category", "")))
-            self.table.setItem(row, 3, QTableWidgetItem((pdata.get("keywords", "") or "")[:80]))
+            self.table.setItem(row, 3, QTableWidgetItem(pdata.get("keywords", "") or ""))
             self.id_combo.addItem(pid)
 
     def _on_id_selected(self, pid):
@@ -696,22 +713,27 @@ class ProductTypePage(QWidget):
         pdata = products.get(pid)
         if pdata:
             self.name_input.setText(pdata.get("name", ""))
-            self.cat_input.setText(pdata.get("category", ""))
+            cat = pdata.get("category", "")
+            idx = self.cat_combo.findData(cat)
+            if idx >= 0:
+                self.cat_combo.setCurrentIndex(idx)
+            else:
+                self.cat_combo.setCurrentText(cat)
         else:
             self.name_input.clear()
-            self.cat_input.clear()
+            self.cat_combo.setCurrentIndex(0)
 
     def _save(self):
         pid = self.id_combo.currentText().strip()
         name = self.name_input.text().strip()
-        cat = self.cat_input.text().strip()
+        cat = self.cat_combo.currentData() or self.cat_combo.currentText().strip()
         if not pid or not name:
             self.status_label.setText("Заполните ID и название")
             return
         self._panel.mm.save_product_type(pid, name, cat)
         self.id_combo.setCurrentText("")
         self.name_input.clear()
-        self.cat_input.clear()
+        self.cat_combo.setCurrentIndex(0)
         self._load()
         self._panel.refresh_all_combos()
         self.status_label.setText(f"Тип «{pid}» сохранён")
@@ -764,6 +786,384 @@ class ProductTypePage(QWidget):
             self.yaml_progress.hide()
 
 
+class SplitTypeDialog(QDialog):
+    """Мастер «вынести товары в отдельную группу/тип» (Этап 3 плана групп)."""
+
+    def __init__(self, parent, mm, source_id: str):
+        super().__init__(parent)
+        self._mm = mm
+        self._source_id = source_id
+        self.setWindowTitle("Сплит типа: вынести товары в отдельный тип")
+        self.resize(560, 480)
+
+        form = QFormLayout(self)
+        form.addRow("Исходный тип", QLabel(source_id))
+        self.new_id = QLineEdit()
+        self.new_id.setPlaceholderText("напр. tools_general_pipe_insulation")
+        form.addRow("ID нового типа (англ)", self.new_id)
+        self.name = QLineEdit()
+        self.name.setPlaceholderText("напр. Изоляция для труб")
+        form.addRow("Название", self.name)
+        self.category = QComboBox()
+        self.category.setEditable(True)
+        form.addRow("Категория", self.category)
+        self.keywords = QPlainTextEdit()
+        self.keywords.setPlaceholderText(
+            "Ключевые слова отделяемых товаров, через запятую:\n"
+            "изоляц, теплоизоляция, Energoflex, K-Flex, XOTPIPE, цилиндр")
+        self.keywords.setFixedHeight(80)
+        self.keywords.textChanged.connect(self._on_keywords_changed)
+        form.addRow("Ключевые слова", self.keywords)
+        self.copy_sites = QCheckBox("Скопировать стартовый список сайтов из исходного типа")
+        self.copy_sites.setChecked(True)
+        form.addRow("", self.copy_sites)
+
+        self.preview_label = QLabel("")
+        self.preview_label.setWordWrap(True)
+        self.preview_label.setStyleSheet("color:#666; font-style:italic;")
+        form.addRow("Превью:", self.preview_label)
+
+        self.info = QLabel("")
+        self.info.setWordWrap(True)
+        form.addRow("", self.info)
+
+        btns = QHBoxLayout()
+        ok = QPushButton("Выполнить")
+        ok.setObjectName("primary")
+        ok.clicked.connect(self._run)
+        cancel = QPushButton("Отмена")
+        cancel.clicked.connect(self.reject)
+        btns.addStretch()
+        btns.addWidget(ok)
+        btns.addWidget(cancel)
+        form.addRow(btns)
+
+        self._fill_categories(source_id)
+
+    def _fill_categories(self, source_id: str):
+        products = self._mm.get_all_products()
+        src = products.get(source_id, {})
+        cats = self._mm.list_categories()
+        self.category.clear()
+        for c in cats:
+            self.category.addItem(f"{c.get('id')} — {c.get('name', '')}", c.get("id"))
+        cur_cat = src.get("category", "")
+        if cur_cat:
+            idx = self.category.findData(cur_cat)
+            if idx >= 0:
+                self.category.setCurrentIndex(idx)
+
+    def _on_keywords_changed(self):
+        kw = self.keywords.toPlainText().strip()
+        if not kw:
+            self.preview_label.setText("")
+            return
+        res = self._mm.preview_split(self._source_id, kw)
+        if not res.get("ok"):
+            self.preview_label.setText(res.get("reason", ""))
+            return
+        parts = []
+        if res.get("confirmed_moved"):
+            parts.append(f"цен: {res['confirmed_moved']}")
+        if res.get("approaches_moved"):
+            parts.append(f"подходов: {res['approaches_moved']}")
+        if res.get("hints_moved"):
+            parts.append(f"хинтов: {res['hints_moved']}")
+        if not parts:
+            self.preview_label.setText("⚠ Ни одна запись не будет перемещена — проверь ключевые слова")
+            return
+        txt = "Будет перемещено: " + ", ".join(parts)
+        removed = res.get("src_keywords_removed", [])
+        kept = res.get("src_keywords_remaining", [])
+        if removed:
+            txt += f"\nУйдут из источника: {', '.join(removed)}"
+        if not kept:
+            txt += "\n⚠ Источник останется БЕЗ ключевых слов!"
+        for w in res.get("warnings", []):
+            txt += f"\n⚠ {w}"
+        self.preview_label.setText(txt)
+
+    def _run(self):
+        new_id = self.new_id.text().strip()
+        name = self.name.text().strip()
+        cat = self.category.currentData() or self.category.currentText().strip()
+        keywords = self.keywords.toPlainText().strip()
+        if not new_id:
+            self.info.setText("Укажи ID нового типа")
+            return
+        if not keywords:
+            self.info.setText("Укажи хотя бы одно ключевое слово отделяемых товаров")
+            return
+        res = self._mm.split_product_type(self._source_id, new_id, name or new_id, cat,
+                                          keywords, copy_sites=self.copy_sites.isChecked())
+        if not res.get("ok"):
+            self.info.setText(res.get("reason", "ошибка"))
+            return
+        warnings = res.get("warnings", [])
+        info = (f"Готово. Цен: {res.get('confirmed_moved', 0)}, подходов: "
+                f"{res.get('approaches_moved', 0)}, хинтов: {res.get('hints_moved', 0)}, "
+                f"сайтов: {res.get('sites_copied', 0)}")
+        if warnings:
+            info += "\n⚠ " + "\n⚠ ".join(warnings)
+        self.info.setText(info)
+        self.accept()
+
+
+# ═══════════════════════════════════════════════
+# CategoriesPage — группы/категории товаров (Этап 2 плана групп)
+# ═══════════════════════════════════════════════
+
+class CategoriesPage(QWidget):
+    def __init__(self, panel):
+        super().__init__()
+        self._panel = panel
+        self._dirty = False
+        self._saved_snapshot: dict = {}  # snapshot для отката
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(16, 12, 16, 12)
+        layout.setSpacing(12)
+
+        title = QLabel("Категории (группы товаров)")
+        title.setObjectName("section")
+        layout.addWidget(title)
+        hint = QLabel("Группа — это контейнер типов. Перенос типа в другую группу безопасен "
+                      "(не меняет ни поиск, ни сайты, ни память). Сплит «вынести товары» создаёт "
+                      "новый тип и переносит в него цены/подходы по ключевым словам.")
+        hint.setWordWrap(True)
+        hint.setStyleSheet("color:#888;")
+        layout.addWidget(hint)
+
+        form = QHBoxLayout()
+        self.cat_id = QLineEdit()
+        self.cat_id.setPlaceholderText("ID группы (англ, напр. insulation)")
+        self.cat_id.setMaxLength(64)
+        form.addWidget(self.cat_id, 1)
+        self.cat_name = QLineEdit()
+        self.cat_name.setPlaceholderText("Название (рус, напр. Изоляция для труб)")
+        form.addWidget(self.cat_name, 2)
+        self.cat_prio = QLineEdit()
+        self.cat_prio.setPlaceholderText("Приоритет")
+        self.cat_prio.setFixedWidth(70)
+        form.addWidget(self.cat_prio)
+        save_btn = QPushButton("Создать/Обновить")
+        save_btn.setObjectName("primary")
+        save_btn.clicked.connect(self._save_cat)
+        form.addWidget(save_btn)
+        del_btn = QPushButton("Удалить")
+        del_btn.setObjectName("danger")
+        del_btn.clicked.connect(self._delete_cat)
+        form.addWidget(del_btn)
+        layout.addLayout(form)
+
+        self.cat_table = QTableWidget(0, 4)
+        self.cat_table.setHorizontalHeaderLabels(["ID", "Название", "Приоритет", "Типов"])
+        self.cat_table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self.cat_table.itemSelectionChanged.connect(self._cat_selected)
+        layout.addWidget(self.cat_table)
+
+        types_title = QLabel("Типы выбранной категории")
+        types_title.setObjectName("subsection")
+        layout.addWidget(types_title)
+        self.type_table = QTableWidget(0, 4)
+        self.type_table.setHorizontalHeaderLabels(["ID", "Название", "Источник", "Keywords"])
+        self.type_table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        layout.addWidget(self.type_table, 1)
+
+        ops = QHBoxLayout()
+        ops.addWidget(QLabel("Перенести выбранный тип в:"))
+        self.target_combo = QComboBox()
+        self.target_combo.setMinimumWidth(240)
+        ops.addWidget(self.target_combo, 1)
+        move_btn = QPushButton("Перенести")
+        move_btn.setObjectName("warning")
+        move_btn.clicked.connect(self._move_type)
+        ops.addWidget(move_btn)
+        split_btn = QPushButton("✂️ Сплит: вынести товары…")
+        split_btn.setObjectName("primary")
+        split_btn.clicked.connect(self._split_type)
+        ops.addWidget(split_btn)
+        layout.addLayout(ops)
+
+        self.status_label = QLabel("")
+        self.status_label.setWordWrap(True)
+        layout.addWidget(self.status_label)
+
+        self._current_cat = ""
+        self._refresh_targets("")
+
+    def is_dirty(self) -> bool:
+        return self._dirty
+
+    def mark_dirty(self):
+        self._dirty = True
+
+    def _take_snapshot(self):
+        """Снимок состояния для отката."""
+        if self._panel.engine is None:
+            return
+        self._saved_snapshot = {
+            "categories": self._panel.mm.list_categories(),
+            "products": self._panel.mm.get_all_products(),
+        }
+
+    def rollback(self):
+        """Откат к последнему снятому снимку."""
+        if self._saved_snapshot:
+            self._panel.mm.restore_categories_snapshot(self._saved_snapshot)
+            self._panel.refresh_all_combos()
+        self._dirty = False
+        self._load()
+
+    def refresh(self):
+        self._load()
+        self._dirty = False
+        self._take_snapshot()
+
+    def refresh_categories(self, categories: list):
+        self._load()
+
+    def _refresh_targets(self, exclude: str):
+        if self._panel.engine is None:
+            return
+        cats = self._panel.mm.list_categories()
+        self.target_combo.blockSignals(True)
+        self.target_combo.clear()
+        for c in cats:
+            cid = c.get("id", "")
+            if cid == exclude:
+                continue
+            self.target_combo.addItem(f"{cid} — {c.get('name', '')}", cid)
+        self.target_combo.blockSignals(False)
+
+    @staticmethod
+    def _validate_id(cid: str) -> str:
+        """Валидация ID категории. Возвращает ошибку или пустую строку."""
+        if not cid:
+            return "ID не может быть пустым"
+        if len(cid) > 64:
+            return "ID не может быть длиннее 64 символов"
+        import re as _re
+        if not _re.match(r'^[a-zA-Z0-9_\-]+$', cid):
+            return "ID может содержать только латиницу, цифры, _ и -"
+        return ""
+
+    def _load(self):
+        if self._panel.engine is None:
+            return
+        cats = self._panel.mm.list_categories()
+        self.cat_table.setRowCount(0)
+        for c in cats:
+            row = self.cat_table.rowCount()
+            self.cat_table.insertRow(row)
+            self.cat_table.setItem(row, 0, QTableWidgetItem(c.get("id", "")))
+            self.cat_table.setItem(row, 1, QTableWidgetItem(c.get("name", "")))
+            self.cat_table.setItem(row, 2, QTableWidgetItem(str(c.get("priority", 0))))
+            self.cat_table.setItem(row, 3, QTableWidgetItem(str(c.get("type_count", 0))))
+        self._load_types()
+
+    def _load_types(self):
+        if self._panel.engine is None:
+            return
+        cat = self._current_cat
+        products = self._panel.mm.get_all_products()
+        self.type_table.setRowCount(0)
+        for pid, pdata in sorted(products.items()):
+            if (pdata.get("category") or "") != cat:
+                continue
+            row = self.type_table.rowCount()
+            self.type_table.insertRow(row)
+            self.type_table.setItem(row, 0, QTableWidgetItem(pid))
+            self.type_table.setItem(row, 1, QTableWidgetItem(pdata.get("name", "")))
+            src = pdata.get("source", "yaml")
+            src_label = "user" if src == "user" else "yaml"
+            self.type_table.setItem(row, 2, QTableWidgetItem(src_label))
+            self.type_table.setItem(row, 3, QTableWidgetItem(pdata.get("keywords", "") or ""))
+
+    def _cat_selected(self):
+        row = self.cat_table.currentRow()
+        if row < 0:
+            return
+        cid = self.cat_table.item(row, 0).text()
+        self.cat_id.setText(cid)
+        self.cat_name.setText(self.cat_table.item(row, 1).text())
+        self.cat_prio.setText(self.cat_table.item(row, 2).text())
+        self._current_cat = cid
+        self._refresh_targets(cid)
+        self._load_types()
+
+    def _save_cat(self):
+        cid = self.cat_id.text().strip()
+        name = self.cat_name.text().strip()
+        if not cid or not name:
+            self.status_label.setText("Заполни ID и название группы")
+            return
+        err = self._validate_id(cid)
+        if err:
+            self.status_label.setText(err)
+            return
+        try:
+            prio = int(self.cat_prio.text().strip() or "0")
+        except ValueError:
+            prio = 0
+        self._panel.mm.save_category(cid, name, prio)
+        self.mark_dirty()
+        self._load()
+        self._panel.refresh_all_combos()
+        self.status_label.setText(f"Категория «{cid}» сохранена")
+
+    def _delete_cat(self):
+        row = self.cat_table.currentRow()
+        if row < 0:
+            self.status_label.setText("Выбери категорию")
+            return
+        cid = self.cat_table.item(row, 0).text()
+        if not _confirm(self, "Удаление",
+                        f"Удалить категорию «{cid}»?\nТипы внутри НЕ удаляются — "
+                        "станут «без категории»"):
+            return
+        ok, msg = self._panel.mm.delete_category(cid)
+        if not ok:
+            self.status_label.setText(msg)
+            return
+        self.mark_dirty()
+        self._current_cat = ""
+        self._load()
+        self._panel.refresh_all_combos()
+        self.status_label.setText(f"Категория «{cid}» удалена")
+
+    def _move_type(self):
+        row = self.type_table.currentRow()
+        if row < 0:
+            self.status_label.setText("Выбери тип в таблице")
+            return
+        pid = self.type_table.item(row, 0).text()
+        target = self.target_combo.currentData()
+        if not target:
+            self.status_label.setText("Выбери целевую категорию")
+            return
+        if not _confirm(self, "Перенос типа",
+                        f"Перенести тип «{pid}» в категорию «{target}»?"):
+            return
+        self._panel.mm.set_product_type_category(pid, target)
+        self.mark_dirty()
+        self._load()
+        self._panel.refresh_all_combos()
+        self.status_label.setText(f"Тип «{pid}» перенесён в «{target}»")
+
+    def _split_type(self):
+        row = self.type_table.currentRow()
+        if row < 0:
+            self.status_label.setText("Выбери тип, из которого выносишь товары")
+            return
+        source = self.type_table.item(row, 0).text()
+        dlg = SplitTypeDialog(self, self._panel.mm, source)
+        if dlg.exec() == QDialog.Accepted:
+            self.mark_dirty()
+            self._load()
+            self._panel.refresh_all_combos()
+            self.status_label.setText("Сплит выполнен. Проверь/добавь сайты нового типа на странице «Сайты»")
+
+
 # ═══════════════════════════════════════════════
 # SitePage — управление сайтами
 # ═══════════════════════════════════════════════
@@ -781,6 +1181,11 @@ class SitePage(QWidget):
         layout.addWidget(title)
 
         top = QHBoxLayout()
+        top.addWidget(QLabel("Категория:"))
+        self.category_filter = QComboBox()
+        self.category_filter.setMinimumWidth(180)
+        self.category_filter.currentIndexChanged.connect(self._on_category_filter)
+        top.addWidget(self.category_filter)
         top.addWidget(QLabel("Тип товара:"))
         self.product_combo = QComboBox()
         self.product_combo.setMinimumWidth(200)
@@ -826,18 +1231,63 @@ class SitePage(QWidget):
         self.status_label = QLabel("")
         layout.addWidget(self.status_label)
 
-    def refresh_combo(self, products: dict):
+    def refresh_combo(self, products: dict, categories: list | None = None):
         current = self.product_combo.currentData()
         self.product_combo.blockSignals(True)
         self.product_combo.clear()
+        cat_filter = self.category_filter.currentData() or ""
+        # Group products by category
+        by_cat: dict[str, list] = {}
         for pid, pdata in sorted(products.items()):
-            name = pdata.get("name", pid)
-            self.product_combo.addItem(name, pid)
+            cat = pdata.get("category", "") or ""
+            by_cat.setdefault(cat, []).append((pid, pdata))
+        # Determine display order: filtered cat first, then others
+        cat_order = []
+        if cat_filter:
+            cat_order.append(cat_filter)
+        for c in sorted(by_cat.keys()):
+            if c not in cat_order:
+                cat_order.append(c)
+        # Build combo items grouped by category
+        for cat in cat_order:
+            items = by_cat.get(cat, [])
+            if not items:
+                continue
+            # Category separator label
+            cat_label = cat if cat else "(без категории)"
+            if len(items) > 1:
+                cat_label += f"  [{len(items)}]"
+            self.product_combo.addItem(f"── {cat_label} ──", None)
+            for pid, pdata in items:
+                name = pdata.get("name", pid)
+                self.product_combo.addItem(f"    {name}", pid)
         if current:
             idx = self.product_combo.findData(current)
             if idx >= 0:
                 self.product_combo.setCurrentIndex(idx)
         self.product_combo.blockSignals(False)
+
+    def refresh_categories(self, categories: list):
+        cur = self.category_filter.currentData() or ""
+        self.category_filter.blockSignals(True)
+        self.category_filter.clear()
+        self.category_filter.addItem("(все категории)", "")
+        for c in categories:
+            cid = c.get("id", "")
+            cname = c.get("name", "")
+            self.category_filter.addItem(f"{cid} — {cname}" if cname else cid, cid)
+        if cur:
+            idx = self.category_filter.findData(cur)
+            if idx >= 0:
+                self.category_filter.setCurrentIndex(idx)
+        self.category_filter.blockSignals(False)
+
+    def _on_category_filter(self):
+        if self._panel.engine is None:
+            return
+        products = self._panel.mm.get_all_products()
+        categories = self._panel.mm.list_categories()
+        self.refresh_combo(products, categories)
 
     def refresh_sites(self):
         all_sites = self._panel.mm.get_all_sites()
@@ -1888,6 +2338,7 @@ class AssistantToolPanel(QWidget):
         ("Подходы", ApproachPage),
         ("Цены", PricePage),
         ("Типы товаров", ProductTypePage),
+        ("Категории", CategoriesPage),
         ("Подсказки", HintPage),
         ("Коррекция цен", CorrectionPage),
         ("Обучение", StudyPage),
@@ -1988,13 +2439,39 @@ class AssistantToolPanel(QWidget):
         return val
 
     def _switch(self, row):
-        if 0 <= row < len(self._pages):
-            self._stack.setCurrentIndex(row)
+        if not (0 <= row < len(self._pages)):
+            return
+        # Проверка dirty state уходящей страницы (Категории)
+        cur = self._stack.currentIndex()
+        if 0 <= cur < len(self._pages):
+            old_page = self._pages[cur]
+            if hasattr(old_page, "is_dirty") and old_page.is_dirty():
+                answer = QMessageBox.question(
+                    self, "Несохранённые изменения",
+                    "В разделе «Категории» есть несохранённые изменения.\n"
+                    "Сохранить перед переходом?",
+                    QMessageBox.Save | QMessageBox.Discard | QMessageBox.Cancel,
+                    QMessageBox.Save,
+                )
+                if answer == QMessageBox.Cancel:
+                    self._list.blockSignals(True)
+                    self._list.setCurrentRow(cur)
+                    self._list.blockSignals(False)
+                    return
+                if answer == QMessageBox.Save:
+                    # Оставляем как есть — изменения уже в БД
+                    old_page._dirty = False
+                    old_page._take_snapshot()
+                else:
+                    # Discard — откат к снимку
+                    old_page.rollback()
+        self._stack.setCurrentIndex(row)
 
     def _refresh_combos(self):
         if not self._engine:
             return
         products = self._engine.get_all_products()
+        categories = self._engine.list_categories()
         self.global_combo.blockSignals(True)
         self.global_combo.clear()
         self.global_combo.addItem("(нет фильтра)", "")
@@ -2005,9 +2482,14 @@ class AssistantToolPanel(QWidget):
 
         for page in self._pages:
             if hasattr(page, "refresh_combo"):
-                page.refresh_combo(products)
+                if hasattr(page, "category_filter"):
+                    page.refresh_combo(products, categories)
+                else:
+                    page.refresh_combo(products)
             if hasattr(page, "refresh_sites"):
                 page.refresh_sites()
+            if hasattr(page, "refresh_categories"):
+                page.refresh_categories(categories)
 
     def _refresh_pages(self):
         for page in self._pages:

@@ -15,7 +15,7 @@ from src.mcp_bridge import MCPBridge, _is_hash_ref
 from src.graph_engine import GraphEngine
 from src.memory_manager import MemoryManager
 from src.validator import validate_result
-from src.config_loader import get_run_config, get_antidetect_config, get_antidetect_site_overrides
+from src.config_loader import get_run_config, get_antidetect_config, get_antidetect_site_overrides, get_special_types
 from src.models.schemas import ExtractionResult
 from src.stuck_detector import StuckDetector, StuckLevel
 from src.resilience import llm_circuit
@@ -37,10 +37,18 @@ DIAGNOSTIC_PROMPT_CAP = get_run_config("diagnostic_prompt_cap", 2)
 EMPTY_PROBE_LIMIT = get_run_config("empty_probe_limit", 3)
 SUMMARIZE_MAX_CHARS = get_run_config("summarize_max_chars", 8000)
 SUMMARIZE_MAX_LINES = get_run_config("summarize_max_lines", 200)
-CAPTCHA_KEYWORDS = get_run_config("captcha_keywords", ["ddos-guard", "hcheck", "js-check"])
+CAPTCHA_KEYWORDS = get_run_config("captcha_keywords", None) or [
+    "captcha", "verify you are human", "i'm not a robot",
+    "подтвердите", "are you human", "turnstile", "js-check",
+    "ddos-guard", "hcheck", "cf-turnstile", "challenge-form",
+]
 SEARCH_ENGINE = get_run_config("search_engine", "Яндекс")
 UNKNOWN_PT = "unknown"
-_RADIATOR_PRODUCT_TYPES = {"plumbing_heating_radiators"}
+# Радиаторные типы: дефолт + settings.yaml → special_types.radiators (сплит не отключает расчёт).
+try:
+    _RADIATOR_PRODUCT_TYPES = {"plumbing_heating_radiators"} | set(get_special_types().get("radiators", []))
+except Exception:
+    _RADIATOR_PRODUCT_TYPES = {"plumbing_heating_radiators"}
 CONF_TRUSTED = 0.9
 CONF_GOOD = 0.8
 CONF_MIN = 0.6
@@ -583,7 +591,15 @@ async def process_row(
             # Точное совпадение spec_text (нормализованно) — строка та же: модель и
             # размер гарантированно совпадают (защита П3). Реюз при >= 0.6 вместо 0.9.
             exact_match = _normalized_equal(best.get("spec_text", ""), spec_text)
-            reuse_threshold = 0.6 if (exact_match and not best.get("is_stale")) else CONF_TRUSTED
+            # Fuzzy match: descriptive_only/none mismatch — тот же товар, другое описание.
+            # Порог 0.7 вместо 0.9 — allows reuse of moderate-confidence prices.
+            _mk = mismatch_kind(best.get("spec_text", ""), spec_text) if not exact_match else "none"
+            if exact_match and not best.get("is_stale"):
+                reuse_threshold = 0.6
+            elif _mk in ("none", "descriptive_only"):
+                reuse_threshold = 0.7
+            else:
+                reuse_threshold = CONF_TRUSTED
             if conf >= reuse_threshold and (not fresh or conf >= 0.95):
                 elapsed = (datetime.now() - start_time).total_seconds()
                 result = {
@@ -718,7 +734,7 @@ async def process_row(
         {"role": "user", "content": context},
     ]
 
-    facts = RowFacts()
+    facts = RowFacts(spec_text=spec_text)
     rounds = 0
     facts.set_progress(0, MAX_ROUNDS)
 
@@ -773,6 +789,10 @@ async def process_row(
     empty_probe_streak: dict[str, int] = {}
     empty_probe_guidance_sent: set[str] = set()
     search_page_retry_guided: set[str] = set()
+    # Cooldown retry queue: domain -> expiry timestamp. After cooldown expires,
+    # the agent is reminded to retry the site (captcha/blocked sites).
+    _cooldown_retry_queue: dict[str, float] = {}
+    _cooldown_retried: set[str] = set()  # domains already retried once
     # P2: глобальные пустые зонды (跨-сайтовые)
     _global_empty_probes: int = 0
     _global_empty_sites: set[str] = set()
@@ -796,6 +816,24 @@ async def process_row(
             logger.info("🔴 All sites exhausted for %s|%s — fast finish at round %d",
                         product_type, spec_brand, rounds)
             break
+
+        # Cooldown retry: after a blocked site's cooldown expires, remind agent to retry.
+        _now = time.time()
+        for _dom, _expiry in list(_cooldown_retry_queue.items()):
+            if _now >= _expiry and _dom not in _cooldown_retried:
+                _cooldown_retried.add(_dom)
+                _cooldown_retry_queue.pop(_dom, None)
+                if not price_confirmed and rounds > 3:
+                    messages.append({
+                        "role": "user",
+                        "content": (
+                            f"🔄 Cooldown для {_dom} истёк — можно вернуться. "
+                            f"Открой {_dom} через browser_navigate и попробуй поискать "
+                            f"«{spec_text[:60]}» снова. Ранее этот сайт был заблокирован "
+                            "captcha, но cooldown прошёл — попытайся ещё раз."
+                        ),
+                    })
+                    logger.info("🔄 Cooldown expired for %s — retry reminder sent", _dom)
 
         tool_calls = parse_tool_calls(response)
         content = (response.get("choices") or [{}])[0].get("message", {}).get("content", "")
@@ -1359,6 +1397,14 @@ async def process_row(
                         rate_limiter.record_block(failed_domain)
                         logger.warning("🚫 Cooldown set for %s (%.0fs) after block",
                                        failed_domain, rate_limiter.cooldown_seconds)
+                        # Add to retry queue: after cooldown, remind agent to retry
+                        if failed_domain not in _cooldown_retried:
+                            _cooldown_retry_queue[failed_domain] = (
+                                time.time() + rate_limiter.cooldown_seconds
+                            )
+                    # Blacklist site for this session to prevent retrying same blocked site
+                    if site_blacklist is not None:
+                        site_blacklist.strike(failed_domain, "captcha")
                     _deprecate_site_approaches(memory_manager, product_type, failed_domain, "🚫 Captcha:")
                 except Exception as e:
                     logger.warning("Captcha deprecation failed: %s", e)

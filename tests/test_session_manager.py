@@ -64,6 +64,18 @@ class TestSessionManager:
         assert len(sessions) == 1
         assert sessions[0]["spec_name"] == "y"
 
+    def test_list_sessions_skips_private_and_backup(self, tmp_path):
+        """Служебные/бэкап-файлы (_current_backup_*.json) не должны светиться
+        в «Выборе сессии» как дубль текущей сессии."""
+        save_session(str(tmp_path / "_current.json"), {"spec_path": "x.xlsx", "results": []})
+        save_session(str(tmp_path / "_current_backup_20260903_171811.json"),
+                     {"spec_path": "x.xlsx", "results": []})
+        save_session(str(tmp_path / "real.json"), {"spec_path": "y.xlsx", "results": []})
+        sessions = list_sessions(str(tmp_path))
+        names = [s["spec_name"] for s in sessions]
+        assert names == ["y"]
+        assert len(sessions) == 1
+
     def test_delete_session(self, tmp_path):
         path = str(tmp_path / "del.json")
         save_session(path, {"spec_path": "x.xlsx", "results": []})

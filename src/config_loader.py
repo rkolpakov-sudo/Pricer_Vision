@@ -26,6 +26,22 @@ def get_run_config(key: str, default):
     return cfg.get("run", {}).get(key, default)
 
 
+def get_special_types() -> dict:
+    """Дополнительные типы для спец-калькуляторов (радиаторы/воздуховоды).
+
+    Читаются из settings.yaml → special_types:
+      radiators: [plumbing_heating_radiators, ...]
+      ductwork:  [ventilation_climate_ventilation, ...]
+    Позволяет при сплите типа в UI не отключать молча расчёт радиатора/воздуховода.
+    """
+    cfg = load_settings()
+    st = cfg.get("special_types", {}) or {}
+    return {
+        "radiators": list(st.get("radiators", []) or []),
+        "ductwork": list(st.get("ductwork", []) or []),
+    }
+
+
 def get_run_flags() -> dict:
     """Режим поиска (память агента): reuse_price / use_approaches / use_site_ranking.
 

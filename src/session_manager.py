@@ -32,6 +32,17 @@ def auto_save_path() -> str:
     return str(_sessions_dir() / AUTO_SAVE_NAME)
 
 
+def _make_json_safe(obj):
+    """Рекурсивно конвертирует set → list для JSON-сериализации."""
+    if isinstance(obj, set):
+        return sorted(obj)
+    if isinstance(obj, dict):
+        return {k: _make_json_safe(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return [_make_json_safe(v) for v in obj]
+    return obj
+
+
 def save_session(path: str, state: dict) -> None:
     """Сериализует состояние сессии в JSON.
 
@@ -52,10 +63,10 @@ def save_session(path: str, state: dict) -> None:
         ),
         "results": state.get("results", []),
         "run_flags": state.get("run_flags", {}),
-        "negative_cache": state.get("negative_cache", {}),
-        "site_blacklist": state.get("site_blacklist", {}),
-        "session_facts": state.get("session_facts", {}),
-        "skip_registry": state.get("skip_registry", {}),
+        "negative_cache": _make_json_safe(state.get("negative_cache", {})),
+        "site_blacklist": _make_json_safe(state.get("site_blacklist", {})),
+        "session_facts": _make_json_safe(state.get("session_facts", {})),
+        "skip_registry": _make_json_safe(state.get("skip_registry", {})),
         "metrics": state.get("metrics", {}),
         "log_entries": state.get("log_entries", []),
     }
@@ -73,7 +84,18 @@ def load_session(path: str) -> dict:
             data = json.load(f)
     except Exception as e:
         logger.error("Failed to load session from %s: %s", path, e)
-        return {}
+        # Попытка восстановления из backup-файла
+        backup = Path(path).with_name(Path(path).stem + "_backup.json")
+        if backup.exists():
+            try:
+                with open(backup, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                logger.info("Recovered session from backup %s", backup)
+            except Exception:
+                logger.error("Backup also corrupt: %s", backup)
+                return {}
+        else:
+            return {}
     if data.get("version") != SESSION_VERSION:
         logger.warning("Session version mismatch: %s (expected %s)",
                        data.get("version"), SESSION_VERSION)
@@ -100,6 +122,10 @@ def list_sessions(sessions_dir: str | None = None) -> list[dict]:
     for fp in d.glob("*.json"):
         if fp.name == AUTO_SAVE_NAME:
             continue
+        # Служебные/бэкап-файлы (_current_backup_*.json и т.п.) — НЕ сессии:
+        # иначе диалог «Выбор сессии» показывал дубль текущей сессии.
+        if fp.name.startswith("_"):
+            continue
         try:
             with open(fp, "r", encoding="utf-8") as f:
                 data = json.load(f)
@@ -118,9 +144,17 @@ def list_sessions(sessions_dir: str | None = None) -> list[dict]:
 
 
 def has_current_session() -> bool:
-    """True, если есть автосохранённая сессия (_current.json)."""
+    """True, если есть автосохранённая сессия (_current.json) и она валидна."""
     p = Path(auto_save_path())
-    return p.exists() and p.stat().st_size > 10
+    if not p.exists() or p.stat().st_size <= 10:
+        return False
+    try:
+        with open(p, "r", encoding="utf-8") as f:
+            json.load(f)
+        return True
+    except Exception:
+        logger.warning("Current session file is corrupt: %s", p)
+        return False
 
 
 def load_current_session() -> dict:

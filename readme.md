@@ -417,7 +417,25 @@ pdf_parser:
 ### Прогон на реальной спецификации (1489 позиций)
 `name=[1]; article=[3]; brand=[4]; spec=[2]; uom=5; qty=6; weight=7; position=0; note=8` — идеальный маппинг. 780 позиций с производителем, 1404 с типом/обозначением, 115 с артикулом доходят до агента.
 
-## Помощник ассистента (HelpPage)
+## Категории (группы товаров) и сплит типов — план реализован
+Документ: `docs/PLAN_GROUPS_UI.md`. Итог внедрения:
+- **Категории — сущность**: таблица `categories(id,name,priority,focus,source)`; импорт из
+  `category_map` YAML при `load_yaml_seed`; CRUD в `GraphEngine`/`MemoryManager`
+  (`list_categories`, `save_category`, `rename_category`, `delete_category` — только пустые,
+  `set_product_type_category` — перенос типа БЕЗ смены name/keywords, безопасен для рантайма).
+- **Сплит «вынести товары»**: `split_product_type(source, new_id, name, category, keywords)`
+  создаёт новый тип, убирает ключевые слова из источника (чтобы `classify` отдавал новый тип),
+  переносит цены/подходы/хинты по keyword-релевантности и копирует стартовый список сайтов.
+- **UI**: новая страница «Категории» в Ассистенте (CRUD групп, перенос типа, мастер сплита
+  `SplitTypeDialog`). ProductTypePage создаёт тип с автокатегорией.
+- **Защита от YAML**: тип, помеченный `source='user'` (создан/отредактирован в UI), НЕ
+  перезаписывается `load_yaml_seed` (`_upsert_seeded_type`); пользовательские категории
+  сохраняются (`INSERT OR IGNORE`).
+- **Спец-калькуляторы**: тип-ворота радиаторов/воздуховодов вынесены в
+  `settings.yaml → special_types.{radiators,ductwork}` (union с дефолтами) — сплит типа не
+  отключает расчёт молча (`config_loader.get_special_types`).
+
+### Помощник ассистента (HelpPage)
 
 Первая вкладка в `AssistantToolPanel` (индекс 0). Содержит полное руководство по всем 11 страницам:
 - Назначение, когда использовать, примеры

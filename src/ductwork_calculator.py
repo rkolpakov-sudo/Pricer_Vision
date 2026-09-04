@@ -144,6 +144,13 @@ def detect_element_type(name: str) -> str:
 # Типы, однозначно принадлежащие вентиляции (без сантехнического омонима).
 _DUCTWORK_UNIQUE_TYPES = {"hood_island", "hood_wall", "deflector", "flex_insert"}
 _VENTILATION_PRODUCT_TYPE = "ventilation_climate_ventilation"
+# Дополнительные типы вентиляции из settings.yaml → special_types.ductwork
+# (при сплите типа в UI расчёт не отключается молча).
+try:
+    from src.config_loader import get_special_types
+    _VENTILATION_TYPES = {_VENTILATION_PRODUCT_TYPE} | set(get_special_types().get("ductwork", []))
+except Exception:
+    _VENTILATION_TYPES = {_VENTILATION_PRODUCT_TYPE}
 # Маркеры воздуховодного контекста в наименовании.
 _DUCT_CONTEXT_RE = re.compile(r'воздуховод|вентиляц|приточн|вытяжн|круглого|прямоугольн',
                               re.IGNORECASE)
@@ -165,7 +172,7 @@ def is_ductwork_row(spec_text: str, product_type: Optional[str] = None) -> bool:
     low = name.lower()
     if _DUCT_CONTEXT_RE.search(low):
         return True
-    if product_type == _VENTILATION_PRODUCT_TYPE:
+    if product_type in _VENTILATION_TYPES:
         return True
     if elem in _DUCTWORK_UNIQUE_TYPES:
         return True

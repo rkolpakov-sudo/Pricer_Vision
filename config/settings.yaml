@@ -21,8 +21,8 @@ browser:
   hide_setters: true
   locale: ru-RU
   no_sandbox: true
-  persistent_profile: false
-  pinned_fingerprint: false
+  persistent_profile: true
+  pinned_fingerprint: true
   profile_dir: data/camoufox_profile
   timezone: Europe/Moscow
 deps:
@@ -137,8 +137,8 @@ run:
   fresh: false
   group_by_site: false
   main_temperature: 0.3
-  max_rounds: 40
-  max_rounds_per_site: 15
+  max_rounds: 25
+  max_rounds_per_site: 10
   max_study_rounds: 50
   reuse_price: true
   row_idle_timeout_seconds: 180
@@ -147,6 +147,11 @@ run:
   summarize_max_chars: 8000
   use_approaches: true
   use_site_ranking: true
+special_types:
+  ductwork:
+  - ventilation_climate_ventilation
+  radiators:
+  - plumbing_heating_radiators
 ui:
   log_rotation_mb: 10
   telemetry_update_ms: 1000

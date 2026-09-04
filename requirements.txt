@@ -9,7 +9,7 @@ coverage>=7.0.0
 networkx>=3.0
 numpy>=2.0
 pydantic>=2.0.0
-camoufox>=0.5.5
+camoufox>=0.5.6
 nodriver>=0.50.0
 pdf-inspector>=1.17
 mineru[pipeline]==3.4.0

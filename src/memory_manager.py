@@ -320,11 +320,43 @@ class MemoryManager:
         return self._engine.delete_product_type(product_id)
 
     def save_product_type(self, product_id: str, name: str, category: str = "",
-                          keywords: str = "") -> str:
-        return self._engine.save_product_type(product_id, name, category, keywords)
+                          keywords: str = "", source: str = "user") -> str:
+        return self._engine.save_product_type(product_id, name, category, keywords, source=source)
 
     def update_product_type_name(self, product_id: str, name: str) -> bool:
         return self._engine.update_product_type_name(product_id, name)
+
+    # ── Categories (группы товаров) ──
+
+    def list_categories(self) -> list[dict]:
+        return self._engine.list_categories()
+
+    def save_category(self, category_id: str, name: str, priority: int = 0,
+                      focus: str = "", source: str = "user") -> str:
+        return self._engine.save_category(category_id, name, priority, focus, source=source)
+
+    def rename_category(self, category_id: str, name: str) -> bool:
+        return self._engine.rename_category(category_id, name)
+
+    def delete_category(self, category_id: str) -> tuple[bool, str]:
+        return self._engine.delete_category(category_id)
+
+    def set_product_type_category(self, product_id: str, category_id: str) -> bool:
+        return self._engine.set_product_type_category(product_id, category_id)
+
+    def split_product_type(self, source_id: str, new_id: str, name: str, category: str,
+                           keywords: str, copy_sites: bool = True) -> dict:
+        return self._engine.split_product_type(source_id, new_id, name, category,
+                                               keywords, copy_sites=copy_sites)
+
+    def preview_split(self, source_id: str, keywords: str) -> dict:
+        return self._engine.preview_split(source_id, keywords)
+
+    def save_categories_snapshot(self) -> dict:
+        return self._engine.save_categories_snapshot()
+
+    def restore_categories_snapshot(self, snapshot: dict) -> None:
+        self._engine.restore_categories_snapshot(snapshot)
 
     def get_product_sites(self, product_type_id: str) -> list[dict]:
         return self._engine.get_sites_for_product(product_type_id)

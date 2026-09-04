@@ -381,3 +381,82 @@ class TestMatchingEquivalences:
         mm.record_matching_equivalence("А", "Б")
         assert mm.has_matching_equivalence("А", "Б") is True
         assert mm.has_matching_equivalence("А", "В") is False
+
+
+class TestCategories:
+    def test_yaml_seed_creates_categories(self, graph_engine, sample_yaml):
+        graph_engine.load_yaml_seed(sample_yaml)
+        cats = graph_engine.list_categories()
+        ids = [c["id"] for c in cats]
+        assert "cables" in ids
+        c = next(x for x in cats if x["id"] == "cables")
+        assert c["type_count"] == 1
+
+    def test_crud_category(self, graph_engine):
+        graph_engine.save_category("insulation", "Изоляция", priority=3)
+        assert any(c["id"] == "insulation" for c in graph_engine.list_categories())
+        graph_engine.rename_category("insulation", "Изоляция для труб")
+        cats = graph_engine.list_categories()
+        c = next(x for x in cats if x["id"] == "insulation")
+        assert c["name"] == "Изоляция для труб"
+
+    def test_delete_category_only_when_empty(self, graph_engine):
+        graph_engine.save_category("empty", "Пустая")
+        ok, msg = graph_engine.delete_category("empty")
+        assert ok
+        # непустая — нельзя удалить (иначе типы осиротеют)
+        graph_engine.save_category("full", "Полная")
+        graph_engine.save_product_type("full_a", "A", category="full")
+        ok, msg = graph_engine.delete_category("full")
+        assert not ok and "тип" in msg
+
+    def test_set_product_type_category_keeps_metadata(self, graph_engine):
+        graph_engine.save_product_type("t1", "Т1", category="c1", keywords="кабель")
+        graph_engine.save_category("c2", "Кат2")
+        graph_engine.set_product_type_category("t1", "c2")
+        prod = graph_engine.get_all_products()["t1"]
+        assert prod["category"] == "c2"
+        assert prod["keywords"] == "кабель"   # перенос не трогает keywords/name
+        assert prod["name"] == "Т1"
+
+    def test_yaml_reload_keeps_user_type_edits(self, graph_engine, sample_yaml):
+        graph_engine.load_yaml_seed(sample_yaml)          # cables/power_cables из YAML
+        graph_engine.save_product_type("cables_power_cables", "ИМЯ ПОЛЬЗОВАТЕЛЯ",
+                                       category="cables", keywords="пользовательские")
+        graph_engine.load_yaml_seed(sample_yaml)          # повторный сид
+        prod = graph_engine.get_all_products()["cables_power_cables"]
+        assert prod["name"] == "ИМЯ ПОЛЬЗОВАТЕЛЯ"          # не перезаписан
+        assert prod["keywords"] == "пользовательские"
+
+    def test_split_product_type_migrates_and_cleans_source(self, graph_engine):
+        graph_engine.save_product_type("tools", "Инструменты", category="tools_general",
+                                       keywords="рулетка, изоляция, energoflex")
+        graph_engine.save_confirmed_price({
+            "spec_text": "Изоляция 13 мм для труб Ø25 ENERGOFLEX",
+            "product_type_id": "tools", "site_id": "vseinstrumenti.ru",
+            "price": 200.0, "url": "https://vseinstrumenti.ru/product/x",
+        })
+        graph_engine.save_confirmed_price({
+            "spec_text": "Рулетка 5м",
+            "product_type_id": "tools", "site_id": "tinko.ru",
+            "price": 150.0, "url": "https://tinko.ru/product/y",
+        })
+        res = graph_engine.split_product_type(
+            "tools", "tools_general_pipe_insulation", "Изоляция для труб",
+            "insulation", "изоляция, energoflex, теплоизоляция")
+        assert res["ok"] is True
+        assert res["confirmed_moved"] == 1
+        # спецификация «Изоляция …» теперь классифицируется в новый тип
+        pt = graph_engine.classify_product_type("Изоляция 13 мм для труб Ø40 ENERGOFLEX")
+        assert pt == "tools_general_pipe_insulation"
+        # «Рулетка» осталась в tools
+        pt2 = graph_engine.classify_product_type("Рулетка 5м")
+        assert pt2 == "tools"
+        # новые keywords убраны из источника
+        prod = graph_engine.get_all_products()["tools"]
+        assert "изоляция" not in (prod["keywords"] or "")
+        assert "energoflex" not in (prod["keywords"] or "")
+
+    def test_split_source_not_found(self, graph_engine):
+        res = graph_engine.split_product_type("nope", "x", "X", "c", "kw")
+        assert res["ok"] is False

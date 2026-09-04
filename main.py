@@ -637,6 +637,16 @@ class MainWindow(QMainWindow):
                     "processed_count": cur.get("processed_count", 0),
                     "found_count": cur.get("found_count", 0),
                 })
+            elif current_has and not cur:
+                # _current.json повреждён — сообщаем пользователю
+                from PySide6.QtWidgets import QMessageBox
+                QMessageBox.warning(
+                    self, "Сессия повреждена",
+                    "Файл автосохранения (_current.json) повреждён.\n"
+                    "Предыдущая сессия не может быть восстановлена.\n\n"
+                    "Начните новую сессию или загрузите сохранённую из меню «Сессия».")
+        if not sessions:
+            return
         from gui.session_dialog import SessionDialog
         dlg = SessionDialog(sessions, self)
         if dlg.exec():
