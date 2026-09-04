@@ -130,6 +130,20 @@ class TestBuildContext:
         assert "tinko.ru" in ctx
         assert "успехов=5" in ctx or "5" in ctx
 
+    def test_zero_success_approach_not_shown_as_successful(self):
+        """Fix 3: «заглушка» агента (save_approach без цены, success_count=0) не должна
+        попадать в блок «Успешные подходы» и влиять на порядок сайтов."""
+        sites = [{"id": "succ.ru", "priority": 2}, {"id": "stub.ru", "priority": 0}]
+        approaches = [
+            {"site_id": "stub.ru", "success_count": 0, "search_query": "K-FLEX"},
+            {"site_id": "succ.ru", "success_count": 3, "search_query": "K-FLEX 13х110-2"},
+        ]
+        ctx = _build_context("K-FLEX 13х110-2", "insulation", approaches, [], sites, [],
+                             use_site_ranking=True)
+        # stub.ru (успехов 0) НЕ поднимается выше succ.ru (успехов 3)
+        assert ctx.find("succ.ru") < ctx.find("stub.ru")
+
+
     def test_with_confirmed_prices(self):
         # «Похожие цены» показывает только проверенные записи: карточка URL + conf >= 0.5.
         prices = [{"spec_text": "ВВГ 3x1.5", "price": 1500.5, "site_id": "tinko.ru",

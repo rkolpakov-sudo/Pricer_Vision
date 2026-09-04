@@ -684,11 +684,13 @@ async def process_row(
     product_data = graph_engine._all_products.get(product_type)
 
     # Подходы-подсказки «как работать на сайтах» — скрыты при use_approaches=False.
+    # Fix 3: только подходы с подтверждённым успехом (иначе «заглушка» без цены
+    # учит агента идти на неподходящий сайт).
     all_flat = [] if not use_approaches else memory_manager.get_all_approaches_flat()
     site_guides = {}
     for a in all_flat:
         sid = a.get("site_id", "")
-        if sid and not _marketplace_site(sid):
+        if sid and int(a.get("success_count", 0) or 0) > 0 and not _marketplace_site(sid):
             site_guides.setdefault(sid, []).append(a)
 
     # Load SOLD_AT concepts for this product type
@@ -1054,6 +1056,12 @@ async def process_row(
                             site_visit_callback(_extract_domain(new_site))
                     current_site = new_site
                     rounds_on_site = 0
+                    # Fix 4: шаги сегментируются по сайту. Список шагов накапливался
+                    # на всю строку, поэтому подход «победившего» сайта начинался с
+                    # шагов чужих сайтов (navigate tinko в подходе vseinstrumenti) и
+                    # реюз снова уводил агента на чужой сайт.
+                    if moved_to_new_domain:
+                        steps = []
                 if rate_limiter is not None:
                     await rate_limiter.wait_if_needed(current_site or "")
                 result = await mcp_bridge.call_tool(tool_name, tool_args)
@@ -1869,6 +1877,10 @@ def _build_context(spec_text, product_type, approaches, confirmed_prices, sites,
     extra = (spec_meta or {}).get("article", "")
     approaches = [a for a in (approaches or []) if approach_relevant(a, spec_text, extra,
                                                                      product_type=product_type)]
+    # Fix 3: подходы без подтверждённого успеха (success_count=0) НЕ показываются
+    # как «успешные» и не влияют на порядок сайтов. Сохранённый агентом подход
+    # без цены (намеренный «не ходить сюда») не должен вести обратно на сайт.
+    approaches = [a for a in approaches if int(a.get("success_count", 0) or 0) > 0]
     parts = [f"ТОВАР ДЛЯ ПОИСКА: {spec_text}"]
     # Ключевые токены (ОТОБРАЖЕНИЕ, не скриптовый запрос): бренд/тип/размер/Ду —
     # дифференциаторы, которые LLM не должен терять при составлении запроса.
@@ -2158,6 +2170,13 @@ def _execute_graph_tool(name: str, args: dict, engine, mm, spec_text: str = "",
                 method=args.get("method", ""),
                 search_query=args.get("search_query", ""),
                 notes=args.get("notes", ""),
+                # Fix 3: подход, сохранённый напрямую агентом (без подтверждённой
+                # цены/успеха в этой строке), НЕ должен ранжироваться как успешный.
+                # Это были «заглушки-негативы» («не ходить на этот сайт»), которые
+                # из-за дефолта success_count=1 становились ложными подсказками.
+                # Системное сохранение после цены (успех) идёт через
+                # _save_price_and_approach + record_success.
+                success_count=0,
             )
             return f"Подход сохранён (ID: {aid})"
 

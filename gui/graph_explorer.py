@@ -1,8 +1,10 @@
 import math
 import time
 import threading
+import html as _html
 import networkx as nx
 import numpy as np
+from src import icons as ui_icons
 from PySide6.QtCore import Qt, QObject, Signal, QTimer, QEvent
 from PySide6.QtGui import (
     QColor, QPen, QBrush, QFont, QPainter, QRadialGradient, QPalette,
@@ -1010,4 +1012,5 @@ class GraphExplorerWidget(QWidget):
         if not details:
             details.append("")
 
-        self._info_panel.show_info(node.id, node.type, node.label, "<br>".join(details))
+        body = "<br>".join(_html.escape(d, quote=False) for d in details)
+        self._info_panel.show_info(node.id, node.type, node.label, ui_icons.replace_emojis(body, px=12))

@@ -15,6 +15,7 @@ from PySide6.QtGui import QDesktopServices, QColor, QPainter
 
 from src.theme import Theme, TOKENS, apply_theme, detect_system_theme
 from src import llm_providers
+from src import icons as ui_icons
 from src.pdf_parser.runner import PdfParserRunner
 from src.pdf_parser.review_dialog import ReviewDialog
 from src.pdf_parser.feedback import FeedbackCollector
@@ -152,8 +153,9 @@ class SettingsDialog(QDialog):
         self.api_key_edit = QLineEdit()
         self.api_key_edit.setEchoMode(QLineEdit.Password)
         self.api_key_edit.setPlaceholderText("пусто → парсится из системы при каждом запуске")
-        self.btn_key_system = QPushButton("🔑 Из системы")
+        self.btn_key_system = QPushButton("Из системы")
         self.btn_key_system.setToolTip("Подставить ключ из env / opencode auth.json / hermes .env")
+        ui_icons.attach(self.btn_key_system, "key", self._tokens["text-primary"], 16)
         grid.addWidget(lbl_key, 1, 0)
         grid.addWidget(self.api_key_edit, 1, 1)
         grid.addWidget(self.btn_key_system, 1, 2)
@@ -171,8 +173,9 @@ class SettingsDialog(QDialog):
         self.model_combo.setMaxVisibleItems(20)
         self.model_combo.lineEdit().installEventFilter(self)
         self.model_combo.view().installEventFilter(self)
-        self.btn_refresh_models = QPushButton("🔄 Обновить")
+        self.btn_refresh_models = QPushButton("Обновить")
         self.btn_refresh_models.setToolTip("Получить актуальный список моделей с сервера")
+        ui_icons.attach(self.btn_refresh_models, "refresh", self._tokens["text-primary"], 16)
         grid.addWidget(lbl_model, 3, 0)
         grid.addWidget(self.model_combo, 3, 1)
         grid.addWidget(self.btn_refresh_models, 3, 2)
@@ -226,7 +229,8 @@ class SettingsDialog(QDialog):
         root.addWidget(pdf_group)
 
         test_row = QHBoxLayout()
-        self.btn_test = QPushButton("🔌 Проверить подключение")
+        self.btn_test = QPushButton("Проверить подключение")
+        ui_icons.attach(self.btn_test, "cable", self._tokens["text-primary"], 16)
         self.status_label = QLabel("")
         self.status_label.setWordWrap(True)
         test_row.addWidget(self.btn_test)
@@ -505,6 +509,7 @@ class MainWindow(QMainWindow):
         super().__init__()
         self.setWindowTitle("Pricer Vision v31.0")
         self.resize(1600, 950)
+        ui_icons.register()
         self.config = self._load_config()
         self.excel_writer = ExcelWriter(self.config)
         self._engine = GraphEngine("data/pricer.db")
@@ -791,17 +796,25 @@ class MainWindow(QMainWindow):
         main_layout.setContentsMargins(10, 2, 10, 10)
         main_layout.setSpacing(4)
 
+        self._icon_specs: list = []
+
+        def _icon(widget, key, px=18):
+            _tt = TOKENS.get(self._current_theme, TOKENS[Theme.DARK])
+            ui_icons.attach(widget, key, _tt["text-primary"], px)
+            self._icon_specs.append((widget, key, px))
+            return widget
+
         btn_frame = QFrame()
         btn_frame.setFrameShape(QFrame.NoFrame)
         btn_frame.setLayout(QHBoxLayout()); btn_frame.layout().setContentsMargins(6, 3, 6, 3); btn_frame.layout().setSpacing(10)
         btn_frame.setFixedHeight(38)
         top_bar = btn_frame.layout()
 
-        self.load_btn = QPushButton("📊 Загрузить Excel")
+        self.load_btn = _icon(QPushButton("Загрузить Excel"), "bar_chart", 18)
         self.load_btn.clicked.connect(self.load_spec)
         top_bar.addWidget(self.load_btn)
 
-        self.pdf_btn = QPushButton("📄 Загрузить PDF")
+        self.pdf_btn = _icon(QPushButton("Загрузить PDF"), "description", 18)
         self.pdf_btn.clicked.connect(self._load_pdf)
         top_bar.addWidget(self.pdf_btn)
 
@@ -817,7 +830,7 @@ class MainWindow(QMainWindow):
         self.stop_btn.setEnabled(False)
         top_bar.addWidget(self.stop_btn)
 
-        self.study_btn = QPushButton("📖 Обучение")
+        self.study_btn = _icon(QPushButton("Обучение"), "menu_book", 18)
         self.study_btn.clicked.connect(self._open_study_tool)
         top_bar.addWidget(self.study_btn)
 
@@ -827,13 +840,13 @@ class MainWindow(QMainWindow):
         self.clear_skip_btn.clicked.connect(self._clear_skip_marks)
         top_bar.addWidget(self.clear_skip_btn)
 
-        self.session_btn = QPushButton("💾 Сессия")
+        self.session_btn = _icon(QPushButton("Сессия"), "save", 18)
         self.session_btn.setToolTip("Сохранить/загрузить сессию обработки")
         self.session_btn.clicked.connect(self._open_session_dialog)
         top_bar.addWidget(self.session_btn)
 
         from src.config_loader import load_settings
-        self.headless_cb = QCheckBox("🕶️ Headless")
+        self.headless_cb = _icon(QCheckBox("Headless"), "visibility_off", 15)
         self.headless_cb.setChecked(load_settings().get("browser", {}).get("headless", True))
         self.headless_cb.toggled.connect(self._on_headless_toggle)
         top_bar.addWidget(self.headless_cb)
@@ -855,12 +868,12 @@ class MainWindow(QMainWindow):
         self.settings_btn.clicked.connect(self.open_settings)
         top_bar.addWidget(self.settings_btn)
 
-        self.deps_btn = QPushButton("🧩 Зависимости")
+        self.deps_btn = _icon(QPushButton("Зависимости"), "extension", 18)
         self.deps_btn.setToolTip("Обновить и изменить версии зависимостей (pip, @playwright/mcp)")
         self.deps_btn.clicked.connect(self.open_dependency_manager)
         top_bar.addWidget(self.deps_btn)
 
-        self.rules_btn = QPushButton("🧠 Правила сопоставления")
+        self.rules_btn = _icon(QPushButton("Правила сопоставления"), "rule", 18)
         self.rules_btn.setToolTip("Настроить правила сопоставления наименований товаров (без правки кода)")
         self.rules_btn.clicked.connect(self.open_rules_editor)
         top_bar.addWidget(self.rules_btn)
@@ -1009,7 +1022,8 @@ class MainWindow(QMainWindow):
         self.monitor_panel = AgentMonitorPanel()
         monitor_layout.addWidget(self.monitor_panel, 2)
         self.metrics_panel = MetricsPanel()
-        monitor_layout.addWidget(self.metrics_panel, 1)
+        # Плитки метрик фиксированной высоты — не растягиваются, растёт монитор.
+        monitor_layout.addWidget(self.metrics_panel, 0, Qt.AlignTop)
         right_tabs.addTab(monitor_widget, "Мониторинг")
         # По умолчанию правая панель открывается на «Мониторинге»
         right_tabs.setCurrentIndex(right_tabs.count() - 1)
@@ -1059,7 +1073,9 @@ class MainWindow(QMainWindow):
         if price is not None and not error:
             return
         menu = QMenu(self)
-        retry_action = menu.addAction("🔄 Повторить поиск")
+        retry_action = menu.addAction("Повторить поиск")
+        _rt = TOKENS.get(self._current_theme, TOKENS[Theme.DARK])
+        retry_action.setIcon(ui_icons.icon("refresh", _rt["text-primary"], 16))
         retry_action.triggered.connect(lambda checked, r=row: self._retry_single_row(r))
         menu.exec(self.results_table.viewport().mapToGlobal(pos))
 
@@ -1156,8 +1172,9 @@ class MainWindow(QMainWindow):
                 item.setForeground(QColor(t["warning"]))
             self.results_table.setItem(row, c, item)
         # Retry button
-        retry_btn = QPushButton("🔄")
+        retry_btn = QPushButton()
         retry_btn.setObjectName("row-action")
+        ui_icons.attach(retry_btn, "refresh", t["text-primary"], 16)
         retry_btn.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         retry_btn.setMinimumHeight(0)
         retry_btn.setMaximumHeight(self.results_table.verticalHeader().defaultSectionSize())
@@ -1231,6 +1248,7 @@ class MainWindow(QMainWindow):
         lc = level_colors.get(level, t["text-primary"])
         ts = entry["timestamp"][11:19]
         safe_msg = str(message).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+        safe_msg = ui_icons.replace_emojis(safe_msg, px=12)
         border = f'border-left:3px solid {t["danger"]};' if level == "ERR" else \
                  f'border-left:3px solid {t["warning"]};' if level == "WARN" else ''
         self.log_browser.append(
@@ -1249,6 +1267,12 @@ class MainWindow(QMainWindow):
         apply_theme(QApplication.instance(), self._current_theme)
         from src.config_loader import save_theme
         save_theme(self._current_theme)
+        for widget, key, px in getattr(self, "_icon_specs", []):
+            _tt = TOKENS.get(self._current_theme, TOKENS[Theme.DARK])
+            try:
+                ui_icons.attach(widget, key, _tt["text-primary"], px)
+            except Exception:
+                pass
 
     def open_settings(self):
         self.config = self._load_config()
@@ -1607,8 +1631,9 @@ class MainWindow(QMainWindow):
             self.results_table.setItem(row, c, item)
 
         # Study button — constrained to the row height so it can't overflow the cell
-        study_btn = QPushButton("🤖")
+        study_btn = QPushButton()
         study_btn.setObjectName("row-action")
+        ui_icons.attach(study_btn, "smart_toy", t["text-primary"], 16)
         study_btn.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         study_btn.setMinimumHeight(0)
         study_btn.setMaximumHeight(self.results_table.verticalHeader().defaultSectionSize())
@@ -1630,8 +1655,9 @@ class MainWindow(QMainWindow):
         btn_layout.addWidget(study_btn)
         # Add retry button for failed rows
         if price is None or error:
-            retry_btn = QPushButton("🔄")
+            retry_btn = QPushButton()
             retry_btn.setObjectName("row-action")
+            ui_icons.attach(retry_btn, "refresh", t["text-primary"], 16)
             retry_btn.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
             retry_btn.setMinimumHeight(0)
             retry_btn.setMaximumHeight(self.results_table.verticalHeader().defaultSectionSize())

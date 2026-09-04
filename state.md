@@ -6099,3 +6099,139 @@ has_matching_equivalence автоматически принимал ЛЮБОЙ 
 
 ### Тесты
 **1274 passed, 10 skipped** — нулевые регрессии.
+
+## 2026-09-04 — FEAT: Повтор отдельных строк (retry single row)
+
+### Проблема
+Пользователь не мог повторить поиск для конкретной позиции (напр. Воздухоотводчик 8931),
+которую агент не нашёл. После исправления конфигурации/кэша приходилось перезапускать весь прогон.
+
+### Решение
+- Контекстное меню (right-click) на таблице результатов → «🔄 Повторить поиск»
+- Кнопка «🔄 Повтор» рядом с «🤖 Обучить» для не найденных рядов
+- `_retry_single_row()`: создаёт минимальный `MCPAgentRunner` на один товар с `fresh=True`
+- `_on_retry_row_done()`: вставляет результат на исходную позицию
+- Старый результат удаляется, новый вставляется на место
+
+### Файлы
+| Файл | Что |
+|------|-----|
+| `main.py:966-968` | Контекстное меню на results_table |
+| `main.py:1036-1140` | Контекстное меню + `_retry_single_row()` + `_on_retry_row_done()` + `_retry_by_spec()` |
+| `main.py:1633-1642` | Кнопка «🔄 Повтор» для failed rows в `_on_row_done()` |
+
+### Тесты
+**1274 passed, 10 skipped**
+
+
+---
+
+## 2026-09-04 — FEAT: профессиональные иконки Material Symbols вместо эмодзи
+
+### Что сделано
+Единый источник иконок src/icons.py + встроенный шрифт ssets/fonts/MaterialSymbols_ui.ttf
+(38 KB, Material Symbols Outlined, subset 120 глифов, opsz=24 — собрано из google/material-design-icons,
+Apache 2.0). Рендер без обрезки: QPainterPath-границы + паддинг 10% + суперсэмплинг x4.
+
+### Ключевые решения
+- **Кнопки/чекбоксы** — QIcon из глифа шрифта (ui_icons.attach), цвет = токен text-primary темы;
+  перекрашиваются при _toggle_theme (main.py _icon_specs).
+- **Логи QTextBrowser (main.py add_log)** — ui_icons.replace_emojis() превращает эмодзи в HTML-спаны
+  глифов (px=12), цвет наследуется.
+- **Чат/логи graph_assistant (StudyPage)** — _rich()/_rich_block(): эскейп + эмодзи→глифы.
+- **agent_monitor история** — QListWidgetItem с rich HTML.
+- PUA-символы НЕ вставляются в plain-текст напрямую (конфликт с Segoe MDL2 в том же диапазоне E8xx)
+  — только через явный font-family span или QIcon.
+
+### Заменено (файлы)
+| Файл | Что |
+|------|-----|
+| main.py | верхние кнопки (Excel/PDF/Обучение/Сессия/Зависимости/Правила), Headless cb, кнопки таблицы (🔄/🤖→refresh/smart_toy), контекст-меню, SettingsDialog (key/refresh/cable), add_log |
+| gui/graph_assistant.py | StudyPage (start/stop/headless/fresh/save/split), чат-лог через _rich, HELP_TEXT |
+| gui/agent_monitor.py | история действий (глифы) |
+| gui/graph_explorer.py | инфо-панель узлов |
+| gui/rules_editor.py | статус проверки (check_circle/cancel), сообщения |
+| src/pdf_parser/review_dialog.py | кнопки Экспорт/Подтвердить |
+| src/icons.py (new) | реестр глифов, register(), text_color(), make_pixmap/icon/attach/span/replace_emojis |
+
+### Ограничения
+- Эмодзи в строках логов src/* и study_runner остаются в коде (рендер заменяется на границе UI:
+  add_log / _rich_block). runtime.log по-прежнему пишет эмодзи — это осознанно (файл-артефакт).
+- LLM-промпты (agent_loop) НЕ тронуты — там эмодзи читаются моделью.
+
+### Тесты
+**1274 passed, 10 skipped** — GUI-набор (main/agent_monitor/graph_assistant/categories/rules/lod) зелёный.
+
+
+---
+
+## 2026-09-04 — FIX: агент уходил на нерелевантные сайты для insulation (tinko/keaz/satro-paladin)
+
+### Симптом
+Повторный поиск «Трубная тепловая изоляция … K-FLEX PE 13х110-2» начинался с tinko.ru
+(и keaz.ru/satro-paladin.com) — магазинов охранной сигнализации/электро, где изоляции нет.
+Причина: при сплите tools_general → insulation был скопирован ВЕСЬ список сайтов источника.
+
+### Корневые причины (4)
+| # | Где | Причина |
+|---|-----|---------|
+| C1 | product_sites insulation | сплит скопировал все сайты tools_general (вкл. tinko/keaz/satro) — whitelist «грязный» |
+| C2 | pproaches (1400) | агент сохранил «подход-заглушку» на tinko БЕЗ цены; дефолт success_count=1 сделал её «успешной» |
+| C3 | model-фильтр _build_context | подходы vseinstrumenti других типоразмеров (13х035/13х060) скрыты для 13х110, а подход tinko без модели проходит → tinko выше vseinstrumenti |
+| C4 | steps в agent_loop | список шагов не сегментировался по сайту → подход «победившего» сайта начинался с шагов чужого (navigate tinko в подходе vseinstrumenti) |
+
+### Фиксы
+| Fix | Файл | Что |
+|-----|------|-----|
+| 1 (данные) | data/pricer.db | удалены tinko.ru/satro-paladin.com/keaz.ru из whitelist insulation; добавлен stroy-mart.ru; deprecated подходы 1400/1403/419 (заглушка/обрезанные чужими шагами). Бэкап: data/pricer_backup_20260904_pre_fixes.db |
+| 2 | src/graph_engine.py split_product_type | при сплите в новый тип копируются ТОЛЬКО сайты, где были реальные записи (цены/подходы/хинты) — не весь список источника |
+| 3 | src/agent_loop.py, src/graph_engine.py, src/memory_manager.py | агентский save_approach (без цены) сохраняет подход с success_count=0; в контекст/подходы-подсказки идут только успешные (success>0) |
+| 4 | src/agent_loop.py | steps сбрасываются при переходе на другой домен — подходы не содержат шагов чужих сайтов |
+
+### Тесты
+- новые: 	est_graph_engine (+3: default success=1, explicit 0, split копирует только реальные сайты),
+  	est_agent_loop (+1: нулевой подход не поднимает сайт)
+- **1278 passed, 10 skipped**
+
+
+---
+
+## 2026-09-04 — FIX: история «Монитора агента» показывала сырой HTML вместо иконок
+
+### Симптом
+QListWidget показывает текст пунктов как ПЛОСКИЙ текст: в истории были видны
+<div ...>, <span ...>&#xE8B8;</span>, </div> — иконки Material Symbols не рендерились.
+
+### Причина
+QListWidget (в отличие от QTextBrowser/QTextEdit) не рендерит rich text по умолчанию —
+HTML-разметка пункта рисуется как обычный текст.
+
+### Фикс (gui/agent_monitor.py)
+- Добавлен _RichTextDelegate (QStyledItemDelegate): каждый пункт отрисовывается через
+  QTextDocument (как QTextBrowser), сохраняя API QListWidget (count/takeItem/clear).
+- Делегат назначен: self.history_list.setItemDelegate(_RichTextDelegate(...)).
+- Цвет текста пункта берётся из темы (ui_icons.text_color()), т.к. QSS не влияет
+  на QTextDocument (палитра остаётся чёрной даже в тёмной теме).
+
+### Тесты
+**1278 passed, 10 skipped**
+
+
+---
+
+## 2026-09-04 — UI: фиксированные компактные плитки дашборда (MetricsPanel)
+
+### Проблема
+Плитки метрик в панели «Мониторинг» (MetricsPanel, 12 карточек-групп)
+растягивались по вертикали и выглядели громоздко: QGroupBox с дефолтными
+отступами темы (margin-top 20px, padding 16px) давали высокие «пустые» плитки.
+
+### Решение
+| Файл | Что |
+|------|-----|
+| gui/metrics_panel.py | плитки переписаны на QFrame#metric-tile фиксированной высоты TILE_HEIGHT=56; подпись (label) сверху, значение крупно; сетка 3 колонки; вертикальное растяжение запрещено (QSizePolicy.Fixed, sizeHint по числу рядов) |
+| src/theme.py | добавлены QSS-роли QFrame#metric-tile, QLabel#metric-tile-label (10px muted), QLabel#metric-tile-value (16px bold text-primary) — корректно перекрашиваются в обеих темах |
+| main.py | monitor_layout.addWidget(metrics_panel, 0, Qt.AlignTop) — метрики не растягиваются, свободное место уходит монитору агента |
+
+### Тесты
+**1278 passed, 10 skipped**

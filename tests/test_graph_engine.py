@@ -272,6 +272,23 @@ class TestGraphEngine:
         a = graph_engine.get_approaches("cables", "tinko.ru")[0]
         assert a["success_count"] >= 2
 
+    def test_new_approach_default_success_one(self, graph_engine, sample_approach):
+        """Новая запись подхода по умолчанию успешна (дефолт сохранён) — системный
+        путь после найденной цены полагается на это."""
+        aid = graph_engine.save_approach(sample_approach)
+        a = graph_engine.get_approaches("cables", "tinko.ru")[0]
+        assert a["success_count"] >= 1
+
+    def test_approach_explicit_zero_success_not_boosted(self, graph_engine, sample_approach):
+        """Агентская «заглушка» (save_approach без цены, success_count=0) не должна
+        ранжироваться как успешный подход."""
+        data = dict(sample_approach)
+        data["success_count"] = 0
+        aid = graph_engine.save_approach(data)
+        a = graph_engine.get_approaches("cables", "tinko.ru")[0]
+        assert a["success_count"] == 0
+
+
     def test_update_approach_failure(self, graph_engine, sample_approach):
         aid = graph_engine.save_approach(sample_approach)
         graph_engine.update_approach_failure(aid)
@@ -460,3 +477,38 @@ class TestCategories:
     def test_split_source_not_found(self, graph_engine):
         res = graph_engine.split_product_type("nope", "x", "X", "c", "kw")
         assert res["ok"] is False
+
+    def test_split_copies_only_moved_site_records(self, graph_engine):
+        """Fix 2: при сплите в новый тип НЕ копируется весь список сайтов источника —
+        только сайты, где у перенесённых записей были реальные цены/подходы."""
+        graph_engine.save_product_type("tools", "Инструменты", category="tools_general",
+                                       keywords="рулетка, изоляция, energoflex")
+        # Белый список источника: vseinstrumenti (есть переносимая цена) и tinko (мусор для изоляции)
+        for sid in ("vseinstrumenti.ru", "tinko.ru", "satro-paladin.com"):
+            graph_engine._conn.execute(
+                "INSERT OR IGNORE INTO sites (id, name, base_url) VALUES (?, ?, ?)",
+                (sid, sid, f"https://{sid}"))
+            graph_engine._conn.execute(
+                "INSERT OR IGNORE INTO product_sites (product_type_id, site_id, priority, consecutive_failures) "
+                "VALUES ('tools', ?, 1, 0)", (sid,))
+        graph_engine.save_confirmed_price({
+            "spec_text": "Изоляция 13 мм для труб Ø25 ENERGOFLEX",
+            "product_type_id": "tools", "site_id": "vseinstrumenti.ru",
+            "price": 200.0, "url": "https://vseinstrumenti.ru/product/x",
+        })
+        graph_engine._conn.commit()
+        graph_engine._built = False
+        graph_engine.build()
+
+        res = graph_engine.split_product_type(
+            "tools", "insulation", "Изоляция для труб",
+            "insulation", "изоляция, energoflex, теплоизоляция")
+        assert res["ok"] is True
+        assert res["confirmed_moved"] == 1
+        new_sites = {s["id"] for s in graph_engine.get_sites_for_product("insulation")}
+        # Переносимая цена была на vseinstrumenti — сайт скопирован.
+        assert "vseinstrumenti.ru" in new_sites
+        # Мусорные сайты источника (tinko, satro-paladin) НЕ копируются.
+        assert "tinko.ru" not in new_sites
+        assert "satro-paladin.com" not in new_sites
+

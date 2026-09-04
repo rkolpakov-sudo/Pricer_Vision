@@ -12,6 +12,7 @@ from PySide6.QtGui import QTextCursor
 from PySide6.QtCore import Qt, QTimer
 from PySide6.QtGui import QTextCursor
 from gui.spinner_widget import SpinnerWidget
+from src import icons as ui_icons
 from src.memory_manager import MemoryManager
 from src.study_runner import StudyRunner
 
@@ -38,6 +39,17 @@ def _fmt_date(iso: str | None) -> str:
 def _confirm(parent, title: str, text: str) -> bool:
     return QMessageBox.question(parent, title, text,
                                 QMessageBox.Yes | QMessageBox.No) == QMessageBox.Yes
+
+
+def _rich(text: str, px: int = 13) -> str:
+    """Экранирует HTML и заменяет эмодзи на глифы Material Symbols (rich text)."""
+    esc = str(text).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+    return ui_icons.replace_emojis(esc, px=px)
+
+
+def _rich_block(text: str, px: int = 13) -> str:
+    """Готовый HTML-блок (с переносами) для QTextEdit/QTextBrowser.append()."""
+    return f'<div style="line-height:1.4;">{_rich(text, px).replace(chr(10), "<br>")}</div>'
 
 
 def _msg(parent, text: str):
@@ -978,8 +990,9 @@ class CategoriesPage(QWidget):
         move_btn.setObjectName("warning")
         move_btn.clicked.connect(self._move_type)
         ops.addWidget(move_btn)
-        split_btn = QPushButton("✂️ Сплит: вынести товары…")
+        split_btn = QPushButton("Сплит: вынести товары…")
         split_btn.setObjectName("primary")
+        ui_icons.attach(split_btn, "content_cut", px=16)
         split_btn.clicked.connect(self._split_type)
         ops.addWidget(split_btn)
         layout.addLayout(ops)
@@ -1721,21 +1734,25 @@ class StudyPage(QWidget):
         layout.addLayout(form)
 
         btn_row = QHBoxLayout()
-        self.start_btn = QPushButton("🚀 Запустить обучение")
+        self.start_btn = QPushButton("Запустить обучение")
         self.start_btn.setObjectName("primary")
+        ui_icons.attach(self.start_btn, "rocket_launch", px=17)
         self.start_btn.clicked.connect(self._start)
         btn_row.addWidget(self.start_btn)
-        self.stop_btn = QPushButton("⏹ Остановить")
+        self.stop_btn = QPushButton("Остановить")
         self.stop_btn.setObjectName("danger")
+        ui_icons.attach(self.stop_btn, "stop", px=17)
         self.stop_btn.setEnabled(False)
         self.stop_btn.clicked.connect(self._stop)
         btn_row.addWidget(self.stop_btn)
-        self.headless_cb = QCheckBox("🕶️ Headless")
+        self.headless_cb = QCheckBox("Headless")
+        ui_icons.attach(self.headless_cb, "visibility_off", px=15)
         from src.config_loader import load_settings
         self.headless_cb.setChecked(load_settings().get("browser", {}).get("headless", True))
         self.headless_cb.toggled.connect(self._on_headless_toggle)
         btn_row.addWidget(self.headless_cb)
-        self.fresh_cb = QCheckBox("🔄 Fresh")
+        self.fresh_cb = QCheckBox("Fresh")
+        ui_icons.attach(self.fresh_cb, "refresh", px=15)
         self.fresh_cb.setToolTip("Не использовать ранее сохранённые цены")
         btn_row.addWidget(self.fresh_cb)
         btn_row.addStretch()
@@ -1778,8 +1795,9 @@ class StudyPage(QWidget):
         self.approaches_container = QVBoxLayout()
         appr_layout.addLayout(self.approaches_container)
         save_appr_row = QHBoxLayout()
-        self.save_selected_btn = QPushButton("💾 Сохранить выбранные")
+        self.save_selected_btn = QPushButton("Сохранить выбранные")
         self.save_selected_btn.setObjectName("success")
+        ui_icons.attach(self.save_selected_btn, "save", px=17)
         self.save_selected_btn.clicked.connect(self._save_selected_approaches)
         save_appr_row.addWidget(self.save_selected_btn)
         save_appr_row.addStretch()
@@ -1871,25 +1889,25 @@ class StudyPage(QWidget):
         self._qa_frame.setVisible(False)
 
     def _on_log(self, msg: str):
-        self.log_text.append(msg)
+        self.log_text.append(_rich_block(msg))
         sb = self.log_text.verticalScrollBar()
         sb.setValue(sb.maximum())
 
     def _on_question(self, question: str):
-        self.question_label.setText(f"❓ {question}")
+        self.question_label.setText(question)
         self.answer_input.clear()
         self.answer_input.setEnabled(True)
         self.send_btn.setEnabled(True)
         self._qa_frame.setVisible(True)
         self.answer_input.setFocus()
-        self.log_text.append(f"\n❓ Агент спрашивает: {question}")
+        self.log_text.append(_rich_block(f"Агент спрашивает: {question}"))
 
     def _send_answer(self):
         answer = self.answer_input.text().strip()
         if not answer or not self._runner:
             return
         self._runner.answer_user(answer)
-        self.log_text.append(f"💬 Ваш ответ: {answer}")
+        self.log_text.append(_rich_block(f"Ваш ответ: {answer}"))
         self.answer_input.setEnabled(False)
         self.send_btn.setEnabled(False)
         self._qa_frame.setVisible(False)
@@ -1902,20 +1920,24 @@ class StudyPage(QWidget):
         self._appr_frame.setVisible(True)
 
         sections = [
-            ("approaches", "📋 Подходы", "site", lambda a: f"[{a.get('site', '?')}] {' → '.join(_step_action(s) for s in a.get('concrete_steps', [])[:4])}"),
-            ("hints", "💡 Хинты", "hint_text", lambda a: f"[{a.get('product_type', '?')}] {a.get('hint_text', '')[:80]}"),
-            ("concepts", "🔗 Концепты", "relation", lambda a: f"{a.get('child', '?')} {a.get('relation', '?')} {a.get('parent', '?')}"),
-            ("sites", "🌐 Новые сайты", "domain", lambda a: f"{a.get('domain', '?')} ({a.get('name', '?')})"),
+            ("approaches", "Подходы", "site", lambda a: f"[{a.get('site', '?')}] {' → '.join(_step_action(s) for s in a.get('concrete_steps', [])[:4])}"),
+            ("hints", "Хинты", "hint_text", lambda a: f"[{a.get('product_type', '?')}] {a.get('hint_text', '')[:80]}"),
+            ("concepts", "Концепты", "relation", lambda a: f"{a.get('child', '?')} {a.get('relation', '?')} {a.get('parent', '?')}"),
+            ("sites", "Новые сайты", "domain", lambda a: f"{a.get('domain', '?')} ({a.get('name', '?')})"),
         ]
+        _icons = {"approaches": "notes", "hints": "lightbulb",
+                  "concepts": "link", "sites": "language"}
 
         for key, label, _, fmt in sections:
             items = data.get(key, [])
             if not items:
                 continue
-            section_label = QLabel(f"{label} ({len(items)}):")
+            section_label = QLabel(
+                f'{ui_icons.span(_icons.get(key, "notes"), px=14)}&nbsp;{_rich(f"{label} ({len(items)}):")}')
+            section_label.setTextFormat(Qt.RichText)
             section_label.setStyleSheet("font-weight: bold; margin-top: 4px;")
             self.approaches_container.addWidget(section_label)
-            self.log_text.append(f"\n💡 {label} ({len(items)}):")
+            self.log_text.append(_rich_block(f"{label} ({len(items)}):"))
             for i, a in enumerate(items):
                 summary = fmt(a)
                 self.log_text.append(f"  {i+1}. {summary}")
@@ -1985,9 +2007,9 @@ class StudyPage(QWidget):
                     mm.add_site(a.get("domain", ""), a.get("name", ""), a.get("product_type", ""))
                 saved[typ] += 1
             except Exception as e:
-                self.log_text.append(f"❌ Ошибка сохранения {typ}: {e}")
+                self.log_text.append(_rich_block(f"Ошибка сохранения {typ}: {e}"))
         total = sum(saved.values())
-        self.log_text.append(f"💾 Сохранено: {total} (подходов {saved['approaches']}, хинтов {saved['hints']}, концептов {saved['concepts']}, сайтов {saved['sites']})")
+        self.log_text.append(_rich_block(f"Сохранено: {total} (подходов {saved['approaches']}, хинтов {saved['hints']}, концептов {saved['concepts']}, сайтов {saved['sites']})"))
         self.status_label.setText(f"Сохранено: {total}")
         if total:
             QApplication.processEvents()
@@ -2325,7 +2347,7 @@ class HelpPage(QWidget):
 
         self.browser = QTextEdit()
         self.browser.setReadOnly(True)
-        self.browser.setHtml(HELP_TEXT)
+        self.browser.setHtml(ui_icons.replace_emojis(HELP_TEXT, px=14))
         layout.addWidget(self.browser, 1)
 
 

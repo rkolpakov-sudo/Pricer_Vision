@@ -440,6 +440,23 @@ def build_stylesheet(theme_name: str) -> str:
         height: 0px;
     }}
 
+    /* ── Dashboard tiles (MetricsPanel) ─────────────── */
+    QFrame#metric-tile {{
+        background-color: {t["bg-surface"]};
+        border: 1px solid {t["border"]};
+        border-radius: 8px;
+    }}
+    QLabel#metric-tile-label {{
+        color: {t["text-muted"]};
+        font-size: 10px;
+        letter-spacing: 0.4px;
+    }}
+    QLabel#metric-tile-value {{
+        color: {t["text-primary"]};
+        font-size: 16px;
+        font-weight: 700;
+    }}
+
     /* ── Status Bar ─────────────────────────────────── */
     QStatusBar {{
         background-color: {t["bg-secondary"]};

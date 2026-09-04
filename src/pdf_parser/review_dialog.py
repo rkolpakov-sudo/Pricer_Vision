@@ -9,6 +9,7 @@ from PySide6.QtCore import Qt
 from PySide6.QtGui import QColor
 
 from src.theme import TOKENS, Theme
+from src import icons as ui_icons
 from src.pdf_parser.review import SmartReview
 
 logger = logging.getLogger("pricer.pdf.review")
@@ -98,14 +99,16 @@ class ReviewDialog(QDialog):
         layout.addWidget(self.table)
 
         btn_layout = QHBoxLayout()
-        export_btn = QPushButton("📥 Экспорт в Excel")
+        export_btn = QPushButton("Экспорт в Excel")
+        ui_icons.attach(export_btn, "download", self._tokens["text-primary"], 17)
         export_btn.clicked.connect(self._on_export)
         btn_layout.addWidget(export_btn)
 
         btn_layout.addStretch()
 
-        confirm_btn = QPushButton("✅ Подтвердить")
+        confirm_btn = QPushButton("Подтвердить")
         confirm_btn.setObjectName("success")
+        ui_icons.attach(confirm_btn, "check_circle", self._tokens["success"], 17)
         confirm_btn.clicked.connect(self._on_confirm)
         btn_layout.addWidget(confirm_btn)
 

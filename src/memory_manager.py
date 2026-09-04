@@ -126,7 +126,7 @@ class MemoryManager:
                       selectors_cache: dict | None = None,
                       param_slots: dict | None = None,
                       method: str = "", search_query: str = "",
-                      notes: str = "") -> int:
+                      notes: str = "", success_count: int | None = None) -> int:
         pattern = []
         for step in concrete_steps:
             action = step.get("action", "")
@@ -164,6 +164,7 @@ class MemoryManager:
             "method": method,
             "search_query": search_query,
             "notes": notes,
+            **({"success_count": success_count} if success_count is not None else {}),
         })
 
     def _find_matching_approach(self, product_type: str, site: str,

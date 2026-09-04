@@ -7,6 +7,7 @@ config/matching_rules.yaml и применяется к текущей сесс�
 
 import copy
 import logging
+import html as _html
 
 from PySide6.QtWidgets import (
     QDialog, QHBoxLayout, QHeaderView, QLabel, QLineEdit, QPushButton,
@@ -14,6 +15,7 @@ from PySide6.QtWidgets import (
 )
 
 from src import approach_relevance as ar
+from src import icons as ui_icons
 
 logger = logging.getLogger("pricer.rules.ui")
 
@@ -258,13 +260,17 @@ class RulesEditorDialog(QDialog):
             self.check_result.setStyleSheet("color: #ffb74d;")
             return
         if ar.product_name_matches(spec, found):
-            self.check_result.setText("✓ Совпадает")
-            self.check_result.setStyleSheet("color: #4caf50; font-weight: bold;")
+            self.check_result.setText(
+                f'{ui_icons.span("check_circle", px=15, color="#4caf50")}&nbsp;'
+                '<span style="color:#4caf50;">Совпадает</span>')
+            self.check_result.setStyleSheet("font-weight: bold;")
         else:
             missing = ar.missing_required_tokens(spec, found)
             detail = f" Не хватает: {', '.join(missing)}." if missing else ""
-            self.check_result.setText(f"✗ Не совпадает.{detail}")
-            self.check_result.setStyleSheet("color: #f44336; font-weight: bold;")
+            self.check_result.setText(
+                f'{ui_icons.span("cancel", px=15, color="#f44336")}&nbsp;'
+                f'<span style="color:#f44336;">Не совпадает.{_html.escape(detail)}</span>')
+            self.check_result.setStyleSheet("font-weight: bold;")
 
     def _on_save(self):
         collected = self._collect()
@@ -280,11 +286,12 @@ class RulesEditorDialog(QDialog):
         reloaded = ar.load_rules(path)
         ctx_reloaded = len(reloaded.get("context_insignificant") or [])
         if ctx_reloaded != ctx_count:
-            msg += f"\n⚠️ Ошибка: контекстных правил в файле {ctx_reloaded}, в таблице {ctx_count}"
+            msg += f"\nОшибка: контекстных правил в файле {ctx_reloaded}, в таблице {ctx_count}"
         incomplete = self._incomplete_context_rows()
         if incomplete:
-            msg += "\n⚠️ Пропущено неполных строк контекста: " + "; ".join(incomplete)
-        self.status_label.setText(msg)
+            msg += "\nПропущено неполных строк контекста: " + "; ".join(incomplete)
+        self.status_label.setText(
+            ui_icons.replace_emojis(_html.escape(msg), px=12, color="#ffb74d"))
 
     def _on_reload(self):
         self._rules = copy.deepcopy(ar.load_rules())

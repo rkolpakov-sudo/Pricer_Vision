@@ -397,8 +397,8 @@ class GraphEngine:
                 cur = self._conn.execute(
                     """INSERT INTO approaches
                     (product_type_id, site_id, pattern, concrete, selectors_cache,
-                    param_slots, method, search_query, notes)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    param_slots, method, search_query, notes, success_count)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                     (
                         data["product_type_id"], data["site_id"],
                         json.dumps(data.get("pattern", []), ensure_ascii=False),
@@ -407,6 +407,10 @@ class GraphEngine:
                         json.dumps(data.get("param_slots", {}), ensure_ascii=False),
                         data.get("method", ""), data.get("search_query", ""),
                         data.get("notes", ""),
+                        # success_count явно передаётся вызывающим кодом:
+                        # системное сохранение после цены использует дефолт,
+                        # агентская «заглушка» save_approach — 0 (см. agent_loop).
+                        int(data.get("success_count", 1) or 0),
                     )
                 )
                 self._conn.commit()
@@ -422,7 +426,7 @@ class GraphEngine:
                 "param_slots": data.get("param_slots", {}),
                 "method": data.get("method", ""),
                 "search_query": data.get("search_query", ""),
-                "success_count": data.get("success_count", 1),
+                "success_count": int(data.get("success_count", 1) or 0),
                 "failures_count": data.get("failures_count", 0),
                 "consecutive_failures": data.get("consecutive_failures", 0),
                 "cooldown_until": data.get("cooldown_until"),
@@ -872,8 +876,9 @@ class GraphEngine:
                 )
             # 2) миграция цен/подходов/хинтов по keyword-релевантности
             cp = app = hn = 0
+            moved_sites: set[str] = set()
             for row in self._conn.execute(
-                "SELECT id, spec_text FROM confirmed_prices WHERE product_type_id = ?",
+                "SELECT id, spec_text, site_id FROM confirmed_prices WHERE product_type_id = ?",
                 (source_id,)
             ):
                 if _kw_hits(row["spec_text"], new_kws):
@@ -882,8 +887,10 @@ class GraphEngine:
                         (new_id, row["id"])
                     )
                     cp += 1
+                    if row["site_id"]:
+                        moved_sites.add(row["site_id"])
             for row in self._conn.execute(
-                "SELECT id, search_query FROM approaches WHERE product_type_id = ?",
+                "SELECT id, search_query, site_id FROM approaches WHERE product_type_id = ?",
                 (source_id,)
             ):
                 if _kw_hits(row["search_query"] or "", new_kws):
@@ -892,8 +899,10 @@ class GraphEngine:
                         (new_id, row["id"])
                     )
                     app += 1
+                    if row["site_id"]:
+                        moved_sites.add(row["site_id"])
             for row in self._conn.execute(
-                "SELECT id, hint_text FROM hints WHERE product_type_id = ?",
+                "SELECT id, hint_text, site_id FROM hints WHERE product_type_id = ?",
                 (source_id,)
             ):
                 if _kw_hits(row["hint_text"] or "", new_kws):
@@ -902,18 +911,32 @@ class GraphEngine:
                         (new_id, row["id"])
                     )
                     hn += 1
-            # 3) стартовый список сайтов
+                    if row["site_id"]:
+                        moved_sites.add(row["site_id"])
+            # 3) стартовый список сайтов НЕ копируется слепо из источника.
+            # Фикс: в новый тип попадают только сайты, где у ПЕРЕНЕСЁННЫХ записей
+            # (цен/подходов/хинтов) были реальные данные. Иначе insulation
+            # унаследовала от tools_general магазины безопасности/электро
+            # (tinko/satro-paladin/keaz) и агент уходил не на тот сайт.
             copied_sites = 0
-            if copy_sites:
-                for row in self._conn.execute(
-                    "SELECT site_id, priority FROM product_sites WHERE product_type_id = ?",
-                    (source_id,)
-                ):
+            if copy_sites and moved_sites:
+                src_prio = {
+                    row["site_id"]: row["priority"]
+                    for row in self._conn.execute(
+                        "SELECT site_id, priority FROM product_sites WHERE product_type_id = ?",
+                        (source_id,)
+                    )
+                }
+                for sid in sorted(moved_sites):
+                    self._conn.execute(
+                        "INSERT OR IGNORE INTO sites (id, name, base_url) VALUES (?, ?, ?)",
+                        (sid, sid, f"https://{sid}")
+                    )
                     self._conn.execute(
                         "INSERT OR IGNORE INTO product_sites "
                         "(product_type_id, site_id, priority, consecutive_failures) "
                         "VALUES (?, ?, ?, 0)",
-                        (new_id, row["site_id"], row["priority"])
+                        (new_id, sid, src_prio.get(sid, 2))
                     )
                     copied_sites += 1
             self._conn.commit()
@@ -926,6 +949,9 @@ class GraphEngine:
             warnings.append("исходный тип остался БЕЗ ключевых слов — classify не будет работать")
         if cp == 0 and app == 0 and hn == 0:
             warnings.append("ни одна запись не перемещена — проверь ключевые слова")
+        if copy_sites and copied_sites == 0:
+            warnings.append("сайты не скопированы: у перенесённых записей нет сайтов — "
+                            "добавь сайты вручную на странице «Сайты»")
         return {
             "ok": True, "new_id": new_id,
             "confirmed_moved": cp, "approaches_moved": app,

@@ -4,9 +4,10 @@
 Форматирование вынесено в чистую функцию format_metric_value (тестируется без Qt).
 """
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, QSize
 from PySide6.QtWidgets import (
-    QWidget, QGridLayout, QGroupBox, QVBoxLayout, QLabel,
+    QWidget, QGridLayout, QVBoxLayout, QLabel, QFrame,
+    QSizePolicy,
 )
 
 METRIC_DEFS = [
@@ -25,6 +26,11 @@ METRIC_DEFS = [
 
 DEFAULT_STATS = {key: None for key, _ in METRIC_DEFS}
 
+# Высота одной плитки дашборда (px) — фиксированная, чтобы сетка не растягивалась.
+TILE_HEIGHT = 56
+# Колонок в сетке плиток.
+GRID_COLUMNS = 3
+
 
 def format_metric_value(key: str, value) -> str:
     """Форматирует значение метрики для отображения (чистая функция)."""
@@ -41,8 +47,28 @@ def format_metric_value(key: str, value) -> str:
     return str(value)
 
 
+def _make_tile(label: str, value_label: QLabel) -> QFrame:
+    """Создаёт плитку-карточку: подпись сверху, значение крупно."""
+    tile = QFrame()
+    tile.setObjectName("metric-tile")
+    tile.setFixedHeight(TILE_HEIGHT)
+    tile.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+    v = QVBoxLayout(tile)
+    v.setContentsMargins(6, 5, 6, 4)
+    v.setSpacing(0)
+    cap = QLabel(label)
+    cap.setObjectName("metric-tile-label")
+    cap.setAlignment(Qt.AlignCenter)
+    v.addWidget(cap)
+    value_label.setObjectName("metric-tile-value")
+    value_label.setAlignment(Qt.AlignCenter)
+    value_label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+    v.addWidget(value_label, 1)
+    return tile
+
+
 class MetricsPanel(QWidget):
-    """Панель метрик прогона."""
+    """Панель метрик прогона — сетка фиксированных плиток-карточек."""
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -50,25 +76,32 @@ class MetricsPanel(QWidget):
 
     def _init_ui(self):
         layout = QGridLayout(self)
-        layout.setContentsMargins(10, 8, 10, 10)
-        layout.setSpacing(8)
+        layout.setContentsMargins(8, 2, 8, 2)
+        layout.setSpacing(6)
+        layout.setHorizontalSpacing(8)
+        layout.setVerticalSpacing(8)
 
         self._boxes = {}
+        self._rows = (len(METRIC_DEFS) + GRID_COLUMNS - 1) // GRID_COLUMNS
         for i, (key, label) in enumerate(METRIC_DEFS):
-            row, col = divmod(i, 3)
-            group = QGroupBox(label)
-            group_layout = QVBoxLayout(group)
-            group_layout.setContentsMargins(8, 14, 8, 8)
+            row, col = divmod(i, GRID_COLUMNS)
             value_label = QLabel("—")
-            value_label.setStyleSheet("font-size: 22px; font-weight: 700;")
-            value_label.setAlignment(Qt.AlignCenter)
-            group_layout.addWidget(value_label)
             self._boxes[key] = value_label
-            layout.addWidget(group, row, col)
+            layout.addWidget(_make_tile(label, value_label), row, col)
 
-        layout.setColumnStretch(0, 1)
-        layout.setColumnStretch(1, 1)
-        layout.setColumnStretch(2, 1)
+        for c in range(GRID_COLUMNS):
+            layout.setColumnStretch(c, 1)
+        # Запрещаем вертикальное растяжение — высота по числу рядов плиток.
+        self.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
+
+    def _height_hint(self) -> int:
+        return self._rows * TILE_HEIGHT + (self._rows - 1) * 8 + 4
+
+    def minimumSizeHint(self) -> QSize:
+        return QSize(super().minimumSizeHint().width(), self._height_hint())
+
+    def sizeHint(self) -> QSize:
+        return QSize(super().sizeHint().width(), self._height_hint())
 
     def reset(self):
         for label in self._boxes.values():
