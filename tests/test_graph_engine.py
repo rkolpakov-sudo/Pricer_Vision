@@ -512,3 +512,95 @@ class TestCategories:
         assert "tinko.ru" not in new_sites
         assert "satro-paladin.com" not in new_sites
 
+
+class TestUserOverrides:
+    def test_override_prioritized_over_keywords(self, graph_engine):
+        """Пользовательская переклассификация перекрывает keyword-классификацию —
+        критично при пересекающихся обозначениях (КТР-20 в двух типах)."""
+        # два типа с общим префиксом, но разными деталями
+        graph_engine.save_product_type("valve", "Клапан", keywords="клапан, фланцев")
+        graph_engine.save_product_type("compressor", "Компрессор", keywords="компрессор, КТР")
+        spec = "Компрессор КТР-20 Ду15"
+        # по умолчанию «компрессор»+«ктр» укажет на compressor
+        assert graph_engine.classify_product_type(spec) == "compressor"
+        # пользователь говорит: это клапан
+        assert graph_engine.set_product_type_override(spec, "valve") is True
+        assert graph_engine.classify_product_type(spec) == "valve"
+        # override точечный: соседняя строка (др. размер) не затронута
+        assert graph_engine.classify_product_type("Компрессор КТР-25 Ду20") == "compressor"
+
+    def test_override_requires_existing_type(self, graph_engine):
+        assert graph_engine.set_product_type_override("что-то", "no_such_type") is False
+
+    def test_override_delete(self, graph_engine):
+        graph_engine.save_product_type("type_a", "Тип A", keywords="КТР")
+        spec = "Клапан КТР-20"
+        graph_engine.set_product_type_override(spec, "type_a")
+        assert graph_engine.classify_product_type(spec) == "type_a"
+        assert graph_engine.delete_product_type_override(spec) is True
+        # после удаления снова keyword-классификация
+        assert graph_engine.classify_product_type(spec) == "type_a"
+
+
+class TestRowPurge:
+    def _seed(self, graph_engine):
+        graph_engine.save_product_type("tools", "Инструменты", keywords="изоляция, ктр")
+        graph_engine.save_confirmed_price({
+            "spec_text": "Клапан КТР-20 Ду15",
+            "product_type_id": "tools", "site_id": "santech.ru",
+            "price": 150.0, "url": "https://santech.ru/product/ktr20",
+        })
+        graph_engine.save_confirmed_price({
+            "spec_text": "Клапан КТР-20 Ду20",
+            "product_type_id": "tools", "site_id": "santech.ru",
+            "price": 200.0, "url": "https://santech.ru/product/ktr20-20",
+        })
+        graph_engine._conn.execute(
+            "INSERT INTO hints (product_type_id, site_id, hint_text, priority) "
+            "VALUES ('tools', 'santech.ru', 'santech.ru: найден по запросу «Клапан КТР-20 Ду15»; карточка: https://santech.ru/product/ktr20', 0.7)")
+        graph_engine.save_approach({
+            "product_type_id": "tools", "site_id": "santech.ru",
+            "pattern": [{"action": "search"}],
+            "concrete": [{"action": "browser_navigate", "url": "https://santech.ru/"}],
+            "search_query": "Клапан КТР-20 Ду15", "method": "browser_search",
+        })
+        graph_engine._built = False
+        graph_engine.build()
+
+    def test_purge_confirmed_by_spec(self, graph_engine):
+        self._seed(graph_engine)
+        n = graph_engine.purge_confirmed_prices("Клапан КТР-20 Ду15")
+        assert n == 1
+        prices = graph_engine.get_all_confirmed_prices()
+        texts = [p["spec_text"] for p in prices]
+        assert "Клапан КТР-20 Ду15" not in texts
+        assert "Клапан КТР-20 Ду20" in texts  # соседний размер не тронут
+
+    def test_purge_confirmed_by_url(self, graph_engine):
+        self._seed(graph_engine)
+        n = graph_engine.purge_confirmed_prices("", url="https://santech.ru/product/ktr20")
+        assert n == 1
+
+    def test_purge_deprecates_own_approach_only(self, graph_engine):
+        self._seed(graph_engine)
+        # чужой подход для Ду20 остаётся
+        graph_engine.save_approach({
+            "product_type_id": "tools", "site_id": "santech.ru",
+            "pattern": [{"action": "search"}],
+            "concrete": [{"action": "browser_navigate", "url": "https://santech.ru/"}],
+            "search_query": "Клапан КТР-20 Ду20", "method": "browser_search",
+        })
+        n = graph_engine.purge_approaches_for_spec("Клапан КТР-20 Ду15",
+                                                   url="https://santech.ru/product/ktr20")
+        assert n >= 1
+        active = [a for a in graph_engine.get_all_approaches() if not a.get("is_deprecated")]
+        assert all("Ду15" not in (a.get("search_query") or "") for a in active)
+        assert any("Ду20" in (a.get("search_query") or "") for a in active)
+
+    def test_purge_hints(self, graph_engine):
+        self._seed(graph_engine)
+        n = graph_engine.purge_hints_for_spec("Клапан КТР-20 Ду15",
+                                              url="https://santech.ru/product/ktr20")
+        assert n >= 1
+
+

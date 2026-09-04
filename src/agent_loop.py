@@ -35,6 +35,20 @@ MAX_ROUNDS = get_run_config("max_rounds", 60)
 MAX_ROUNDS_PER_SITE = get_run_config("max_rounds_per_site", 15)
 DIAGNOSTIC_PROMPT_CAP = get_run_config("diagnostic_prompt_cap", 2)
 EMPTY_PROBE_LIMIT = get_run_config("empty_probe_limit", 3)
+
+# Структурные заметки по сайтам со скрытым/нестандартным поиском. Показываются
+# в контексте ПЕРЕД навигацией (в отличие от hints, которые агент запрашивает сам
+# и может «пролистать»). Ключ — домен сайта.
+SITE_SEARCH_HINTS: dict[str, str] = {
+    "satro-paladin.com": (
+        "satro-paladin.com: поле input[name=\"location-search\"] — это выбор ГОРОДА, "
+        "НЕ товарный поиск. Товарный поиск открывается по клику на иконку-лупу "
+        "(.search_icon / #header_search): сначала КЛИКНИ иконку поиска, затем вводи "
+        "запрос в появившееся поле input.search_input и НАЖМИ кнопку/Enter. Не путай "
+        "с выбором города."
+    ),
+}
+
 SUMMARIZE_MAX_CHARS = get_run_config("summarize_max_chars", 8000)
 SUMMARIZE_MAX_LINES = get_run_config("summarize_max_lines", 200)
 CAPTCHA_KEYWORDS = get_run_config("captcha_keywords", None) or [
@@ -1976,6 +1990,13 @@ def _build_context(spec_text, product_type, approaches, confirmed_prices, sites,
         if len(ordered) > 1:
             rest = ", ".join(s['id'] for s in ordered[1:5])
             parts.append(f"Остальные сайты (если на первом не нашлось): {rest}")
+        # Структурные заметки по сайтам (digi/скрытый поиск и т.п.) — показываем
+        # до навигации, чтобы агент не вводил запрос в поле города и не тратил
+        # раунды на «сломанный» поиск.
+        for s in ordered[:3]:
+            note = SITE_SEARCH_HINTS.get(s['id'])
+            if note:
+                parts.append(f"\nВАЖНО по сайту {s['id']}: {note}")
     else:
         parts.append(f"\n(известных сайтов нет — начни поиск через {SEARCH_ENGINE})")
     if approaches:
@@ -2250,6 +2271,10 @@ def _execute_graph_tool(name: str, args: dict, engine, mm, spec_text: str = "",
             hints = mm.get_hints(pt) + mm.get_hints(UNKNOWN_PT)
             if not hints:
                 return "Нет подсказок для этого типа товара"
+            # Сначала самые важные (высокий priority) — иначе специфичные
+            # подсказки (напр. «satro-paladin: скрытый digi-оверлей») теряются
+            # среди десятков общих при обрезке [:5].
+            hints = sorted(hints, key=lambda h: -(h.get("priority") or 0))
             lines = [f"Подсказки ({len(hints)}):"]
             for h in hints[:5]:
                 text = h.get("hint_text", "")

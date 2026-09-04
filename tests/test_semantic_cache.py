@@ -127,3 +127,35 @@ def test_brand_mismatch_entry_stored_but_not_auto_reusable(cache):
     assert hit is not None
     assert hit["brand_mismatch"] is True
     assert hit["confidence"] <= 0.8
+
+
+def test_remove_for_row_by_spec(cache):
+    cache.store("Клапан КТР-20 Ду15", {
+        "price": 150.0, "confidence": 0.95, "url": "https://x.ru/p/ktr20", "site": "x.ru",
+    })
+    assert cache.get_similar("Клапан КТР-20 Ду15") is not None
+    removed = cache.remove_for_row("Клапан  КТР-20  Ду15")
+    assert removed == 1
+    assert cache.get_similar("Клапан КТР-20 Ду15") is None
+
+
+def test_remove_for_row_by_url(cache):
+    cache.store("Нечто иное", {
+        "price": 99.0, "confidence": 0.9, "url": "https://x.ru/p/ktr20", "site": "x.ru",
+    })
+    removed = cache.remove_for_row("Совсем другой запрос", url="https://x.ru/p/ktr20")
+    assert removed == 1
+    assert cache.get_similar("Нечто иное") is None
+
+
+def test_remove_for_row_ignores_unrelated(cache):
+    cache.store("Клапан КТР-20 Ду15", {
+        "price": 150.0, "confidence": 0.95, "url": "https://x.ru/p/ktr20", "site": "x.ru",
+    })
+    cache.store("Труба ВГП 20", {
+        "price": 60.0, "confidence": 0.9, "url": "https://y.ru/p/truba", "site": "y.ru",
+    })
+    removed = cache.remove_for_row("Труба ВГП 20", url="https://y.ru/p/truba")
+    assert removed == 1
+    assert cache.get_similar("Клапан КТР-20 Ду15") is not None
+

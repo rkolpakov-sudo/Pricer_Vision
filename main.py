@@ -7,7 +7,7 @@ from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
                                  QHBoxLayout, QGridLayout, QSplitter, QTableWidget, QTableWidgetItem,
                                    QPushButton, QLabel, QFileDialog, QProgressBar,
                                     QComboBox, QLineEdit, QTextBrowser,
-                                    QDialog, QDialogButtonBox, QMessageBox,
+                                    QDialog, QDialogButtonBox, QMessageBox, QMenu,
                                     QStyleFactory, QCheckBox, QHeaderView, QDoubleSpinBox,
                                     QTabWidget, QSizePolicy, QFrame, QLayout, QGroupBox)
 from PySide6.QtCore import QObject, Signal, Qt, QTimer, QUrl, QThread, QEvent
@@ -526,6 +526,7 @@ class MainWindow(QMainWindow):
         self._skip_reconciling = False
         self._restored_results = []
         self._restored_row_indices = set()
+        self._retry_row = None
         self._restored_caches = None
         self._restored_audit_id = ""
         self._original_restored_results = []
@@ -958,9 +959,9 @@ class MainWindow(QMainWindow):
         center_tabs.setTabPosition(QTabWidget.South)
         self._center_tabs = center_tabs
 
-        self.results_table = QTableWidget(0, 9)
+        self.results_table = QTableWidget(0, 8)
         self.results_table.setHorizontalHeaderLabels([
-            "#", "Спецификация", "Тип", "Цена", "Уверенность", "Время", "Сайт", "URL", "Обучение"
+            "#", "Спецификация", "Тип", "Цена", "Уверенность", "Время", "Сайт", "URL"
         ])
         self.results_table.setColumnWidth(0, 30)
         self.results_table.setColumnWidth(1, 400)
@@ -970,7 +971,6 @@ class MainWindow(QMainWindow):
         self.results_table.setColumnWidth(5, 65)
         self.results_table.setColumnWidth(6, 110)
         self.results_table.horizontalHeader().setSectionResizeMode(7, QHeaderView.Stretch)
-        self.results_table.setColumnWidth(8, 110)
         self.results_table.setWordWrap(True)
         self.results_table.verticalHeader().setDefaultSectionSize(30)
         self.results_table.setAlternatingRowColors(True)
@@ -1049,38 +1049,190 @@ class MainWindow(QMainWindow):
                 QDesktopServices.openUrl(QUrl(url))
 
     def _on_results_context_menu(self, pos):
-        """Right-click context menu on results table — retry failed rows."""
+        """Контекстное меню строки результатов — полный контроль над любой строкой.
+
+        Доступно всегда (независимо от того, найдена цена или нет):
+          - Повторить поиск (fresh, с очисткой памяти строки)
+          - Удалить результат (полная очистка: таблица + граф + кэши + Excel)
+          - Обучить агента на этой позиции
+          - Исправить тип товара (переклассификация + перепоиск)
+        """
         item = self.results_table.itemAt(pos)
         if not item:
             return
         row = item.row()
-        # Get spec_text from column 1
         spec_item = self.results_table.item(row, 1)
         if not spec_item:
             return
         spec_text = spec_item.text()
-        # Find the result in _restored_results
         result = None
         for r in self._restored_results:
             if r.get("spec_text") == spec_text:
                 result = r
                 break
         if not result:
-            return
-        price = result.get("price")
-        error = result.get("error", "")
-        # Only show retry for failed/not-found rows
-        if price is not None and not error:
-            return
-        menu = QMenu(self)
-        retry_action = menu.addAction("Повторить поиск")
+            # Строка может не иметь result (не обработана) — всё равно даём повтор.
+            result = {"spec_text": spec_text, "excel_row": row + 2}
+
         _rt = TOKENS.get(self._current_theme, TOKENS[Theme.DARK])
-        retry_action.setIcon(ui_icons.icon("refresh", _rt["text-primary"], 16))
-        retry_action.triggered.connect(lambda checked, r=row: self._retry_single_row(r))
+        menu = QMenu(self)
+        can_edit = not self._processing_active
+
+        action_retry = menu.addAction("Повторить поиск (с нуля)")
+        action_retry.setIcon(ui_icons.icon("refresh", _rt["text-primary"], 16))
+        action_retry.setEnabled(can_edit)
+        action_retry.triggered.connect(lambda: self._confirm_and_retry_row(row, spec_text))
+
+        action_delete = menu.addAction("Удалить результат")
+        action_delete.setIcon(ui_icons.icon("delete", _rt["danger"], 16))
+        action_delete.setEnabled(can_edit)
+        action_delete.triggered.connect(lambda: self._delete_row_result(row, spec_text))
+
+        action_study = menu.addAction("Обучить агента на этой позиции")
+        action_study.setIcon(ui_icons.icon("smart_toy", _rt["text-primary"], 16))
+        pt = result.get("product_type", "")
+        action_study.triggered.connect(
+            lambda: self._open_study(spec_text, pt or self._engine.classify_product_type(spec_text)))
+
+        action_type = menu.addAction("Исправить тип товара…")
+        action_type.setIcon(ui_icons.icon("edit_note", _rt["text-primary"], 16))
+        action_type.setEnabled(can_edit)
+        action_type.triggered.connect(lambda: self._fix_row_type(row, spec_text))
+
         menu.exec(self.results_table.viewport().mapToGlobal(pos))
 
-    def _retry_single_row(self, table_row: int):
-        """Retry a single failed row — create a minimal runner for one spec."""
+    def _confirm_and_retry_row(self, table_row: int, spec_text: str):
+        """Повтор строки с нуля: подтверждение, очистка памяти, fresh-прогон."""
+        if self._processing_active:
+            return
+        ret = QMessageBox.question(
+            self, "Повторить поиск",
+            "Повторный поиск очистит сохранённый результат этой строки\n"
+            "(цену, URL и память графа/кэша) и запустит поиск с нуля.\n\nПродолжить?",
+            QMessageBox.Yes | QMessageBox.No)
+        if ret != QMessageBox.Yes:
+            return
+        self._purge_row_memory(spec_text)
+        self._retry_single_row(table_row)
+
+    def _delete_row_result(self, table_row: int, spec_text: str):
+        """Полное удаление результата строки: таблица, граф, кэши, Excel."""
+        if self._processing_active:
+            return
+        url, site, price, pt, excel_row = "", "", None, "", None
+        for r in self._restored_results:
+            if r.get("spec_text") == spec_text:
+                url = r.get("url", "")
+                site = r.get("site", "")
+                price = r.get("price")
+                pt = r.get("product_type", "")
+                excel_row = r.get("excel_row")
+                break
+        msg = "Удалить результат этой строки? Будет очищена память графа/кэша."
+        if price is None and not url:
+            msg = "У строки нет результата. Очистить связанную память графа/кэша?"
+        ret = QMessageBox.question(self, "Удалить результат", msg,
+                                   QMessageBox.Yes | QMessageBox.No)
+        if ret != QMessageBox.Yes:
+            return
+        purged = self._purge_row_memory(spec_text, url=url)
+        # Сброс строки таблицы к «пусто»
+        t = TOKENS.get(self._current_theme, TOKENS[Theme.DARK])
+        for c, default in ((2, ""), (3, "—"), (4, "—"), (5, "—"), (6, ""), (7, "")):
+            cell_item = QTableWidgetItem(default)
+            cell_item.setForeground(QColor(t["text-muted"]))
+            self.results_table.setItem(table_row, c, cell_item)
+        # Очистить в _restored_results (сохранить запись-заглушку с ценой None)
+        self._restored_results = [
+            r for r in self._restored_results if r.get("spec_text") != spec_text
+        ]
+        # Excel: очистить ячейки результата
+        ws = self.excel_writer.ws
+        hm = self.excel_writer.header_map
+        if ws and hm:
+            if excel_row is None:
+                for spec in self.excel_writer.get_specs():
+                    if spec.text == spec_text:
+                        excel_row = spec.row
+                        break
+            if excel_row:
+                for col_key in ("price", "url", "category"):
+                    if col_key in hm:
+                        ws.cell(excel_row, hm[col_key], None)
+        self.add_log("WARN", "user",
+                     f"Удалён результат строки «{spec_text[:60]}»"
+                     f" (цены: {purged.get('prices', 0)}, подходов: {purged.get('approaches', 0)}, "
+                     f"хинтов: {purged.get('hints', 0)})")
+        # Удаляем строку из таблицы результатов: позиция вернётся при полном
+        # повторном прогоне. Excel очищен выше.
+        self.results_table.removeRow(table_row)
+        for r in range(self.results_table.rowCount()):
+            num_item = QTableWidgetItem(str(r + 1))
+            num_item.setTextAlignment(Qt.AlignCenter)
+            self.results_table.setItem(r, 0, num_item)
+        self._auto_save_session()
+
+    def _purge_row_memory(self, spec_text: str, url: str = "", site: str = "") -> dict:
+        """Полная очистка памяти строки: граф (цены/подходы/хинты) + семантик-кэш.
+
+        Вызывается до повторного поиска или при удалении результата.
+        """
+        from src.memory_manager import MemoryManager
+        from src.semantic_cache import SemanticCache
+        purged = {"prices": 0, "approaches": 0, "hints": 0}
+        try:
+            mm = MemoryManager(self._engine)
+            purged = mm.purge_row(spec_text, url=url, site_id=site)
+        except Exception as e:
+            logger.error("Row purge (graph) failed: %s", e)
+        try:
+            sc = SemanticCache()
+            sc.remove_for_row(spec_text, url=url)
+        except Exception as e:
+            logger.error("Row purge (semantic cache) failed: %s", e)
+        return purged
+
+    def _fix_row_type(self, table_row: int, spec_text: str):
+        """Переклассификация строки: выбор правильного типа → purge → перепоиск."""
+        if self._processing_active:
+            return
+        products = self._engine.get_all_products()
+        if not products:
+            QMessageBox.warning(self, "Исправить тип", "Нет доступных типов товаров.")
+            return
+        # Текущий тип: из результата или по классификации
+        current = ""
+        for r in self._restored_results:
+            if r.get("spec_text") == spec_text:
+                current = r.get("product_type", "")
+                break
+        if not current:
+            current = self._engine.classify_product_type(spec_text)
+
+        from gui.reclassify_dialog import ReclassifyDialog
+        dlg = ReclassifyDialog(spec_text, current, products, self)
+        if not dlg.exec():
+            return
+        new_type = dlg.selected_type()
+        if not new_type or new_type == current:
+            return
+        if not self._engine.set_product_type_override(spec_text, new_type):
+            QMessageBox.warning(self, "Исправить тип", "Не удалось сохранить правило типа.")
+            return
+        self._purge_row_memory(spec_text)
+        self.add_log("WARN", "user",
+                     f"Переклассификация «{spec_text[:60]}»: {current or 'unknown'} → {new_type}. "
+                     "Запускаю повторный поиск.")
+        # После переклассификации строка должна перезапуститься с новым типом.
+        self._retry_single_row(table_row, display_type=new_type)
+
+    def _retry_single_row(self, table_row: int, display_type: str = ""):
+        """Повторный поиск одной строки (fresh) БЕЗ удаления из таблицы.
+
+        Строка остаётся на месте и помечается «поиск…», чтобы было видно, что
+        агент сейчас работает именно над ней. По завершении результат
+        обновляется в той же строке (см. _on_retry_row_done).
+        """
         if self._processing_active:
             return
         # Get spec_text from the table
@@ -1097,23 +1249,53 @@ class MainWindow(QMainWindow):
         if not original_spec:
             self.add_log("WARN", "retry", f"Не найден SpecItem для: {spec_text[:60]}")
             return
-        # Remove old row from results table
-        self.results_table.removeRow(table_row)
+        # Сброс результата в памяти строки (правило reuse не вернёт старую цену)
         self._restored_results = [
             r for r in self._restored_results
             if r.get("spec_text") != spec_text
         ]
-        # Update row numbers in first column
-        for r in range(self.results_table.rowCount()):
-            num_item = QTableWidgetItem(str(r + 1))
-            num_item.setTextAlignment(Qt.AlignCenter)
-            self.results_table.setItem(r, 0, num_item)
+        # Помечаем строку как «идёт повторный поиск» — пользователь видит работу.
+        t = TOKENS.get(self._current_theme, TOKENS[Theme.DARK])
+        status = "поиск…"
+        items = {
+            2: display_type or "",
+            3: status,
+            4: "…",
+            5: "…",
+            6: "",
+            7: "",
+        }
+        for c, text in items.items():
+            cell_item = QTableWidgetItem(text)
+            cell_item.setForeground(QColor(t["accent"]))
+            cell_item.setToolTip("Идёт повторный поиск этой позиции…")
+            self.results_table.setItem(table_row, c, cell_item)
+        self.results_table.selectRow(table_row)
+        self.results_table.scrollToItem(self.results_table.item(table_row, 1))
         self.config = self._load_config()
         self._processing_active = True
         self._spinner.setFixedSize(20, 20)
         self._spinner.tick()
         self._spinner_timer.start()
         llm_client = llm_providers.create_llm_client(self.config)
+        self._retry_row = table_row  # строка, которую сейчас повторяем (для сброса при ошибке)
+        # Свежая попытка: снимаем negative-блокировку строки, чтобы runner не
+        # вернул «not_found_cached» мгновенно. Остальные кэши не передаём —
+        # поиск полностью с нуля.
+        retry_caches = None
+        try:
+            from src.session_cache import NegativeCache
+            if self._restored_caches and self._restored_caches.get("negative_cache"):
+                nc = NegativeCache()
+                nc.from_dict(self._restored_caches["negative_cache"])
+                nc.unblock(spec_text)
+                retry_caches = {
+                    "negative_cache": nc.to_dict(),
+                    "site_blacklist": self._restored_caches.get("site_blacklist", {}),
+                    "session_facts": self._restored_caches.get("session_facts", {}),
+                }
+        except Exception:
+            retry_caches = None
         self._retry_runner = MCPAgentRunner(
             specs=[original_spec],
             llm_client=llm_client,
@@ -1122,21 +1304,21 @@ class MainWindow(QMainWindow):
             use_site_ranking=self.use_site_ranking_cb.isChecked(),
             ductwork_enabled=self.ductwork_cb.isChecked(),
             skip_registry=self._skip_registry,
-            restored_caches=self._restored_caches,
+            restored_caches=retry_caches,
             restored_results=[],
         )
         self._retry_runner.row_done_signal.connect(
             lambda idx, result: self._on_retry_row_done(table_row, result)
         )
         self._retry_runner.done_signal.connect(self._on_retry_done)
-        self._retry_runner.error_signal.connect(self._on_runner_error)
+        self._retry_runner.error_signal.connect(self._on_retry_error)
         self._retry_runner.start()
         self.add_log("INFO", "retry", f"Повтор поиска: {spec_text[:60]}")
 
-    def _on_retry_row_done(self, insert_at, result):
-        """Handle retry result — insert at original position."""
-        row = insert_at
-        self.results_table.insertRow(row)
+    def _on_retry_row_done(self, row, result):
+        """Обновляет строку результата НА МЕСТЕ после повторного поиска."""
+        if row >= self.results_table.rowCount():
+            self.results_table.insertRow(self.results_table.rowCount())
         self._restored_results.append(result)
         price = result.get("price")
         conf = result.get("confidence", 0)
@@ -1150,8 +1332,11 @@ class MainWindow(QMainWindow):
         pt = result.get("product_type", "")
         error = result.get("error", "")
         brand_mismatch = result.get("brand_mismatch", False)
+        # Номер строки сохраняем прежним (если ячейка есть), иначе row+1
+        old_num = self.results_table.item(row, 0)
+        num = old_num.text() if old_num is not None else str(row + 1)
         items = [
-            str(row + 1), spec, pt, price_text, conf_text, elapsed_text,
+            num, spec, pt, price_text, conf_text, elapsed_text,
             site if site else "", url if url else ""
         ]
         t = TOKENS.get(self._current_theme, TOKENS[Theme.DARK])
@@ -1171,33 +1356,9 @@ class MainWindow(QMainWindow):
             else:
                 item.setForeground(QColor(t["warning"]))
             self.results_table.setItem(row, c, item)
-        # Retry button
-        retry_btn = QPushButton()
-        retry_btn.setObjectName("row-action")
-        ui_icons.attach(retry_btn, "refresh", t["text-primary"], 16)
-        retry_btn.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
-        retry_btn.setMinimumHeight(0)
-        retry_btn.setMaximumHeight(self.results_table.verticalHeader().defaultSectionSize())
-        retry_btn.setToolTip("Повторить поиск для этого товара")
-        spec_full = result.get("spec_text", "")
-        retry_btn.clicked.connect(
-            lambda checked, s=spec_full: self._retry_by_spec(s)
-        )
-        btn_wrap = QWidget()
-        btn_wrap.setMinimumSize(0, 0)
-        btn_layout = QHBoxLayout(btn_wrap)
-        btn_layout.setContentsMargins(0, 0, 0, 0)
-        btn_layout.setSpacing(0)
-        btn_layout.setSizeConstraint(QLayout.SetNoConstraint)
-        btn_layout.setAlignment(Qt.AlignCenter)
-        btn_layout.addWidget(retry_btn)
-        self.results_table.setCellWidget(row, 8, btn_wrap)
-        # Update row numbers after insert
-        for r in range(self.results_table.rowCount()):
-            num_item = QTableWidgetItem(str(r + 1))
-            num_item.setTextAlignment(Qt.AlignCenter)
-            self.results_table.setItem(r, 0, num_item)
+        # Действия — в контекстном меню строки (ПКМ), кнопок нет.
         self.results_table.scrollToBottom()
+        self._retry_row = None
         # Write to Excel
         ws = self.excel_writer.ws
         hm = self.excel_writer.header_map
@@ -1211,22 +1372,42 @@ class MainWindow(QMainWindow):
         elif price:
             self.add_log("INFO", "retry", f"Row {row+1}: {price_text} ({conf_text}) on {site}")
 
-    def _retry_by_spec(self, spec_text: str):
-        """Find table row by spec_text and trigger retry."""
-        if self._processing_active:
-            return
-        for r in range(self.results_table.rowCount()):
-            item = self.results_table.item(r, 1)
-            if item and item.text() == spec_text:
-                self._retry_single_row(r)
-                return
-
     def _on_retry_done(self, ok, results):
         """Retry runner finished."""
         self._processing_active = False
         self._spinner_timer.stop()
         self._spinner.setFixedSize(0, 0)
+        # Если результат строки так и не пришёл (ранний стоп/сбой до row_done),
+        # снимаем маркер «поиск…» и возвращаем строку в состояние «не найдено».
+        if self._retry_row is not None:
+            row = self._retry_row
+            self._retry_row = None
+            if row < self.results_table.rowCount():
+                t = TOKENS.get(self._current_theme, TOKENS[Theme.DARK])
+                for c, text in ((3, "—"), (4, "—"), (5, "—"), (6, ""), (7, "")):
+                    cell_item = QTableWidgetItem(text)
+                    cell_item.setForeground(QColor(t["warning"]))
+                    self.results_table.setItem(row, c, cell_item)
         self.add_log("INFO", "retry", "Повтор завершён")
+
+    def _on_retry_error(self, msg):
+        """Ошибка retry-runner: сбрасываем маркер «поиск…» строки."""
+        self._processing_active = False
+        self._spinner_timer.stop()
+        self._spinner.setFixedSize(0, 0)
+        self.add_log("ERR", "retry", f"Ошибка повтора: {msg}")
+        if self._retry_row is not None:
+            row = self._retry_row
+            self._retry_row = None
+            if row < self.results_table.rowCount():
+                t = TOKENS.get(self._current_theme, TOKENS[Theme.DARK])
+                for c, text in ((3, "—"), (4, "—"), (5, "—"), (6, ""), (7, "")):
+                    cell_item = QTableWidgetItem(text)
+                    cell_item.setForeground(QColor(t["warning"]))
+                    self.results_table.setItem(row, c, cell_item)
+        self.start_btn.setEnabled(True)
+        self.stop_btn.setEnabled(False)
+        self.status_label.setText(f"Ошибка повтора: {msg[:60]}")
 
     def add_log(self, level, phase, message):
         entry = {
@@ -1630,44 +1811,8 @@ class MainWindow(QMainWindow):
                 item.setForeground(QColor(t["warning"]))
             self.results_table.setItem(row, c, item)
 
-        # Study button — constrained to the row height so it can't overflow the cell
-        study_btn = QPushButton()
-        study_btn.setObjectName("row-action")
-        ui_icons.attach(study_btn, "smart_toy", t["text-primary"], 16)
-        study_btn.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
-        study_btn.setMinimumHeight(0)
-        study_btn.setMaximumHeight(self.results_table.verticalHeader().defaultSectionSize())
-        study_btn.setToolTip("Обучить агента на этом товаре")
-        spec_full = result.get("spec_text", "")
-        err_ctx = error or result.get("reason", "")
-        if err_ctx:
-            err_ctx = f"Ошибка: {err_ctx}\nСайт: {site or '?'}"
-        study_btn.clicked.connect(
-            lambda checked, s=spec_full, p=pt, f=err_ctx: self._open_study(s, p, f)
-        )
-        btn_wrap = QWidget()
-        btn_wrap.setMinimumSize(0, 0)
-        btn_layout = QHBoxLayout(btn_wrap)
-        btn_layout.setContentsMargins(0, 0, 0, 0)
-        btn_layout.setSpacing(0)
-        btn_layout.setSizeConstraint(QLayout.SetNoConstraint)
-        btn_layout.setAlignment(Qt.AlignCenter)
-        btn_layout.addWidget(study_btn)
-        # Add retry button for failed rows
-        if price is None or error:
-            retry_btn = QPushButton()
-            retry_btn.setObjectName("row-action")
-            ui_icons.attach(retry_btn, "refresh", t["text-primary"], 16)
-            retry_btn.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
-            retry_btn.setMinimumHeight(0)
-            retry_btn.setMaximumHeight(self.results_table.verticalHeader().defaultSectionSize())
-            retry_btn.setToolTip("Повторить поиск для этого товара")
-            retry_btn.clicked.connect(
-                lambda checked, s=spec_full: self._retry_by_spec(s)
-            )
-            btn_layout.addWidget(retry_btn)
-        self.results_table.setCellWidget(row, 8, btn_wrap)
-
+        # Действия над строкой — в контекстном меню (ПКМ по строке):
+        # повторный поиск, удаление результата, обучение, переклассификация.
         self.results_table.scrollToBottom()
 
         if error:

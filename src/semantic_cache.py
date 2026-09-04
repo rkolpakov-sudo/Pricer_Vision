@@ -81,6 +81,34 @@ class SemanticCache:
 
         self._save()
 
+    def remove_for_row(self, spec_text: str, url: str = "") -> int:
+        """Удаляет из кэша записи, относящиеся к конкретной строке результата.
+
+        Матчинг: нормализованный spec_text ИЛИ url карточки в result. Позволяет
+        полностью очистить память по строке перед принудительным повторным поиском.
+        """
+        norm = self._normalize(spec_text)
+        removed = 0
+        keys = []
+        for key, cached in self.cache.items():
+            result = cached.get("result", {})
+            hit = False
+            if url and result.get("url") == url:
+                hit = True
+            if not hit and norm and cached.get("normalized_name", "") == norm:
+                hit = True
+            if not hit and norm and result.get("spec_text") and \
+                    self._normalize(result.get("spec_text", "")) == norm:
+                hit = True
+            if hit:
+                keys.append(key)
+        for k in keys:
+            del self.cache[k]
+            removed += 1
+        if removed:
+            self._save()
+        return removed
+
     @staticmethod
     def _normalize(name: str) -> str:
         name = re.sub(r"\(.*?\)", "", name)

@@ -52,6 +52,14 @@ class NegativeCache:
         """Сколько товаров помечено «не найден» в текущей сессии."""
         return sum(1 for c in self._counts.values() if c >= self._limit)
 
+    def unblock(self, spec_text: str) -> bool:
+        """Снимает пометку «не найден» с товара (принудительный повтор)."""
+        key = self._normalize(spec_text)
+        if key in self._counts:
+            del self._counts[key]
+            return True
+        return False
+
     def reset(self) -> None:
         self._counts.clear()
 

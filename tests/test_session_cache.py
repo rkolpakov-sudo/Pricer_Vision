@@ -180,3 +180,28 @@ class TestSiteBlacklist:
         assert bl.reasons("santech.ru") == {}
         assert bl.successful_sites() == set()
         assert len(bl) == 0
+
+
+class TestNegativeCacheUnblock:
+    def test_unblock_removes_entry(self):
+        nc = NegativeCache()
+        nc.record("Клапан КТР-20 Ду15")
+        nc.record("Клапан КТР-20 Ду15")
+        assert nc.is_blocked("Клапан КТР-20 Ду15") is True
+        assert nc.unblock("Клапан  КТР-20  Ду15") is True
+        assert nc.is_blocked("Клапан КТР-20 Ду15") is False
+
+    def test_unblock_unknown_returns_false(self):
+        nc = NegativeCache()
+        assert nc.unblock("чего-то") is False
+
+    def test_unblock_allows_repeat_search(self):
+        """Снятие блока = принудительный повторный поиск строки (даже если ранее
+        дважды не найдена)."""
+        nc = NegativeCache()
+        for _ in range(3):
+            nc.record("Труба ВГП 20")
+        assert nc.is_blocked("Труба ВГП 20") is True
+        nc.unblock("Труба ВГП 20")
+        assert nc.is_blocked("Труба ВГП 20") is False
+

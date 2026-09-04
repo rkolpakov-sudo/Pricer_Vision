@@ -255,26 +255,6 @@ def build_stylesheet(theme_name: str) -> str:
         background-color: {t["bg-hover"]};
     }}
 
-    /* Row action button (e.g. "🤖 Обучить" in results table) */
-    QPushButton#row-action {{
-        background-color: transparent;
-        border: 1px solid transparent;
-        border-radius: 5px;
-        color: {t["accent"]};
-        padding: 1px 8px;
-        font-size: 12px;
-        font-weight: 600;
-        min-height: 18px;
-    }}
-    QPushButton#row-action:hover {{
-        background-color: {t["bg-hover"]};
-        border-color: {t["border-light"]};
-        color: {t["accent"]};
-    }}
-    QPushButton#row-action:pressed {{
-        background-color: {t["bg-active"]};
-    }}
-
     /* ── Inputs ─────────────────────────────────────── */
     QLineEdit, QSpinBox, QDoubleSpinBox, QComboBox {{
         background-color: {t["input-bg"]};

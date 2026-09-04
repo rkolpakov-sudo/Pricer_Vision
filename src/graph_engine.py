@@ -147,6 +147,15 @@ CREATE TABLE IF NOT EXISTS matching_equivalences (
 );
 CREATE UNIQUE INDEX IF NOT EXISTS idx_matching_equiv ON matching_equivalences(spec_text, found_name);
 
+CREATE TABLE IF NOT EXISTS product_type_overrides (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    spec_text TEXT NOT NULL,
+    product_type_id TEXT NOT NULL,
+    source TEXT DEFAULT 'user',
+    created_at TEXT DEFAULT (datetime('now')),
+    UNIQUE (spec_text)
+);
+
 CREATE INDEX IF NOT EXISTS idx_approaches_product_site ON approaches(product_type_id, site_id);
 CREATE INDEX IF NOT EXISTS idx_approaches_site ON approaches(site_id);
 CREATE INDEX IF NOT EXISTS idx_confirmed_spec ON confirmed_prices(spec_text);
@@ -185,6 +194,7 @@ class GraphEngine:
         self._all_sites: dict[str, dict] = {}
         self._all_products: dict[str, dict] = {}
         self._all_categories: dict[str, dict] = {}
+        self._type_overrides: dict[str, str] = {}
         self._equivalences: set[tuple[str, str]] = set()
         self._built = False
 
@@ -241,6 +251,11 @@ class GraphEngine:
         self._approaches_by_product.clear()
         self._approaches_by_site.clear()
         self._approaches_by_id.clear()
+        self._type_overrides.clear()
+        for row in self._conn.execute(
+            "SELECT spec_text, product_type_id FROM product_type_overrides"
+        ):
+            self._type_overrides[row["spec_text"]] = row["product_type_id"]
         now_iso = datetime.now().isoformat()
         for row in self._conn.execute(
             "SELECT * FROM approaches WHERE is_deprecated = 0 "
@@ -998,6 +1013,13 @@ class GraphEngine:
 
     def classify_product_type(self, spec_text: str) -> str:
         self.build()
+        # Приоритет 1: явный пользовательский override (переклассификация).
+        # Точное соответствие по нормализованному spec_text — гарантия, что
+        # «КТР-20» не уедет в чужой тип из-за пересечения обозначений.
+        override = self._get_type_override(spec_text)
+        if override:
+            return override
+
         spec_lower = spec_text.lower()
         best = None
         best_score = 0
@@ -1010,6 +1032,58 @@ class GraphEngine:
                 best_score = score
                 best = pid
         return best or "unknown"
+
+    # ── User type overrides (переклассификация строки) ──
+
+    @staticmethod
+    def _normalize_spec_key(spec_text: str) -> str:
+        return " ".join((spec_text or "").lower().split())
+
+    def _get_type_override(self, spec_text: str) -> str:
+        key = self._normalize_spec_key(spec_text)
+        return self._type_overrides.get(key, "")
+
+    def set_product_type_override(self, spec_text: str, product_type_id: str) -> bool:
+        """Записывает пользовательскую переклассификацию spec_text → тип."""
+        self.build()
+        key = self._normalize_spec_key(spec_text)
+        if not key or not product_type_id:
+            return False
+        with self._lock:
+            # Тип должен существовать, иначе правило бесполезно.
+            if self._conn.execute(
+                "SELECT 1 FROM product_types WHERE id = ?", (product_type_id,)
+            ).fetchone() is None:
+                return False
+            self._conn.execute(
+                "INSERT INTO product_type_overrides (spec_text, product_type_id, source) "
+                "VALUES (?, ?, 'user') "
+                "ON CONFLICT(spec_text) DO UPDATE SET product_type_id=excluded.product_type_id",
+                (key, product_type_id)
+            )
+            self._conn.commit()
+            self._type_overrides[key] = product_type_id
+        return True
+
+    def list_product_type_overrides(self) -> list[dict]:
+        self.build()
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT * FROM product_type_overrides ORDER BY created_at DESC"
+            ).fetchall()
+            return [dict(r) for r in rows]
+
+    def delete_product_type_override(self, spec_text: str) -> bool:
+        key = self._normalize_spec_key(spec_text)
+        if not key:
+            return False
+        with self._lock:
+            self._conn.execute(
+                "DELETE FROM product_type_overrides WHERE spec_text = ?", (key,)
+            )
+            self._conn.commit()
+            self._type_overrides.pop(key, None)
+        return True
 
     # ── YAML seed loading ──
 
@@ -1324,3 +1398,83 @@ class GraphEngine:
             self._conn.commit()
         self._built = False
         return True
+
+    # ── Row purge (полная очистка памяти по строке результата) ──
+
+    def purge_confirmed_prices(self, spec_text: str, url: str = "",
+                               site_id: str = "") -> int:
+        """Удаляет подтверждённые цены строки: нормализованный spec ИЛИ url.
+
+        Возвращает число удалённых записей. Требует пересборки (build) — лениво.
+        """
+        self.build()
+        rows = self._conn.execute(
+            "SELECT id, spec_text, url FROM confirmed_prices"
+        ).fetchall()
+        spec_norm = self._normalize_spec_key(spec_text)
+        with self._lock:
+            removed = 0
+            for r in rows:
+                hit = bool(url) and r["url"] == url
+                if not hit and spec_norm and self._normalize_spec_key(r["spec_text"] or "") == spec_norm:
+                    hit = True
+                if hit:
+                    self._conn.execute("DELETE FROM confirmed_prices WHERE id = ?", (r["id"],))
+                    removed += 1
+            self._conn.commit()
+        self._built = False
+        return removed
+
+    def purge_approaches_for_spec(self, spec_text: str, url: str = "") -> int:
+        """Деприкейтит подходы, обученные на ЭТОЙ строке (search_query == spec
+        или concrete содержит url карточки). Удаляет только релевантные — чужие
+        подходы сайта не трогаем (иначе сгорят стратегии соседних размеров)."""
+        self.build()
+        removed = 0
+        rows = self._conn.execute(
+            "SELECT id, search_query, concrete, notes FROM approaches "
+            "WHERE is_deprecated = 0"
+        ).fetchall()
+        spec_norm = self._normalize_spec_key(spec_text)
+        with self._lock:
+            for r in rows:
+                hit = False
+                if spec_norm and self._normalize_spec_key(r["search_query"] or "") == spec_norm:
+                    hit = True
+                if not hit and url:
+                    try:
+                        concrete = json.loads(r["concrete"] or "[]")
+                        notes = r["notes"] or ""
+                        if any(url in str(s.get("url", "")) for s in concrete) or url in notes:
+                            hit = True
+                    except Exception:
+                        hit = False
+                if hit:
+                    self._conn.execute(
+                        "UPDATE approaches SET is_deprecated=1, "
+                        "notes=COALESCE(notes,'') || ' | deprecated: user rejected row result' "
+                        "WHERE id=?", (r["id"],)
+                    )
+                    removed += 1
+            self._conn.commit()
+        self._built = False
+        return removed
+
+    def purge_hints_for_spec(self, spec_text: str, url: str = "") -> int:
+        """Удаляет хинты, ссылающиеся на удалённую карточку/спецификацию."""
+        self.build()
+        removed = 0
+        rows = self._conn.execute(
+            "SELECT id, hint_text FROM hints"
+        ).fetchall()
+        spec_norm = self._normalize_spec_key(spec_text)
+        with self._lock:
+            for r in rows:
+                text = r["hint_text"] or ""
+                if (url and url in text) or (spec_norm and spec_norm in self._normalize_spec_key(text)):
+                    self._conn.execute("DELETE FROM hints WHERE id = ?", (r["id"],))
+                    removed += 1
+            self._conn.commit()
+        self._built = False
+        return removed
+

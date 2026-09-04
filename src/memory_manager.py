@@ -388,6 +388,31 @@ class MemoryManager:
     def delete_product_site(self, product_type_id: str, site_id: str) -> bool:
         return self._engine.delete_product_site(product_type_id, site_id)
 
+    # ── Row purge / type overrides (полный контроль строки) ──
+
+    def purge_row(self, spec_text: str, url: str = "", site_id: str = "") -> dict:
+        """Полная очистка памяти по строке результата.
+
+        Удаляет/деприкейтит подтверждённые цены, подходы и хинты, связанные с
+        этой спецификацией/карточкой. Возвращает счётчики {prices, approaches, hints}.
+        """
+        prices = self._engine.purge_confirmed_prices(spec_text, url, site_id)
+        approaches = self._engine.purge_approaches_for_spec(spec_text, url)
+        hints = self._engine.purge_hints_for_spec(spec_text, url)
+        return {"prices": prices, "approaches": approaches, "hints": hints}
+
+    def classify_product_type(self, spec_text: str) -> str:
+        return self._engine.classify_product_type(spec_text)
+
+    def set_product_type_override(self, spec_text: str, product_type_id: str) -> bool:
+        return self._engine.set_product_type_override(spec_text, product_type_id)
+
+    def list_product_type_overrides(self) -> list[dict]:
+        return self._engine.list_product_type_overrides()
+
+    def delete_product_type_override(self, spec_text: str) -> bool:
+        return self._engine.delete_product_type_override(spec_text)
+
 
 class ApproachVersioning:
     """Управление версиями и эффективностью подходов (Фаза 4).

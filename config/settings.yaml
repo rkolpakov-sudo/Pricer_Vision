@@ -31,7 +31,7 @@ deps:
 ductwork:
   area_allowance: 1.05
   confidence: 1.0
-  enabled: false
+  enabled: true
   nomenclature_lengths:
     rect: 1.25
     round: 3.0

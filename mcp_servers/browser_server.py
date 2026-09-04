@@ -334,21 +334,30 @@ _SNAPSHOT_REF_RE = re.compile(r"^e\d+$")
 
 # Заполняет первый ВИДИМЫЙ поисковый input на странице (тип search / name*=search /
 # placeholder с «Поиск»/«Искать»). Возвращает описание найденного поля или null.
+# NB: ПОЛЯ ГОРОДА/ЛОКАЦИИ (location-search, city-search) исключаются — у многих
+# SPA-магазинов (satro-paladin Digi) name="location-search" — это выбор города,
+# и запрос туда «улетает в никуда» (агент думает, что ищет, а поиска нет).
 _SEARCH_INPUT_FILL_JS = r"""
 (text) => {
   const SELECTORS = [
     'input[type="search"]',
-    'input[name*="search" i]',
+    'input[name*="search" i]:not([name*="location" i]):not([name*="city" i]):not([name*="locality" i])',
     'input[name="q"]',
     'input[name="text"]',
-    'input[placeholder*="Поиск" i]',
-    'input[placeholder*="Искать" i]',
+    'input[placeholder*="Поиск" i]:not([name*="location" i]):not([name*="city" i])',
+    'input[placeholder*="Искать" i]:not([name*="location" i]):not([name*="city" i])',
     'input[placeholder*="Оригинальные" i]',
-    'input[aria-label*="Поиск" i]',
+    'input[aria-label*="Поиск" i]:not([name*="location" i]):not([name*="city" i])',
+    'input.search_input, .search input[type="text"], [class*="search"] input[type="text"]',
   ];
   const seen = new Set();
+  const isCity = (inp) => {
+    const n = (inp.name || '') + ' ' + (inp.id || '') + ' ' + (inp.placeholder || '') + ' ' + (inp.className || '');
+    return /location|citi|locality|города|выбор города|city/i.test(n);
+  };
   for (const sel of SELECTORS) {
     for (const inp of document.querySelectorAll(sel)) {
+      if (isCity(inp)) continue;
       const key = inp.name + '|' + inp.type + '|' + (inp.placeholder || '');
       if (seen.has(key)) continue;
       seen.add(key);
@@ -364,11 +373,14 @@ _SEARCH_INPUT_FILL_JS = r"""
   return null;
 }
 """
-# Last-resort: берём первый видимый <input> на странице (кроме hidden/submit/button/reset).
+# Last-resort: берём первый видимый <input> (кроме hidden/submit/button/reset),
+# НО пропускаем поля выбора города/локации.
 _SEARCH_INPUT_FALLBACK_JS = r"""
 () => {
   for (const inp of document.querySelectorAll('input')) {
     if (['hidden','submit','button','reset','file','image'].includes(inp.type)) continue;
+    const n = (inp.name || '') + ' ' + (inp.id || '') + ' ' + (inp.className || '');
+    if (/(location|citi|locality|city)/i.test(n)) continue;
     if (inp.offsetParent === null && !inp.matches(':focus')) continue;
     const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
     setter.call(inp, '');
@@ -463,7 +475,10 @@ _CLICK_FORCE_JS = "((arg) => {\n" + _CLICK_FINDER_JS + r"""
     const r = el.getBoundingClientRect();
     const x = r.left + r.width / 2;
     const y = r.top + r.height / 2;
-    const base = { bubbles: true, cancelable: true, view: window, clientX: x, clientY: y, button: 0, detail: 1 };
+    // NB: НЕ передаём view: window — в контексте page.evaluate (изолированный мир
+    // Firefox/Camoufox) window не проходит проверку "does not implement interface
+    // Window", и ЛЮБОЙ force-click падает. Событиям view не требуется.
+    const base = { bubbles: true, cancelable: true, clientX: x, clientY: y, button: 0, detail: 1 };
     el.dispatchEvent(new MouseEvent('pointerdown', Object.assign({}, base, { pointerId: 1, pointerType: 'mouse' })));
     el.dispatchEvent(new MouseEvent('mousedown', base));
     el.dispatchEvent(new MouseEvent('pointerup', Object.assign({}, base, { pointerId: 1, pointerType: 'mouse' })));
