@@ -270,6 +270,31 @@ class TestDuctContextDetection:
         assert r is not None
         assert r["price"] > 0
 
+    def test_normalize_round_to_rect_hyphen_digit(self):
+        # Регрессия: "p400-500x250" (Ø400 → прямоугольник 500x250). Дефис перед
+        # ЦИФРОЙ с 'x' — продолжение размерности, p должен конвертироваться.
+        assert normalize_diameter_symbols("Переход p400-500x250") == "Переход Ø400-500x250"
+        assert normalize_diameter_symbols("p630-600x490") == "Ø630-600x490"
+        # но латинская модель с простой цифрой после дефиса — НЕ трогаем
+        assert normalize_diameter_symbols("Насос P125-40") == "Насос P125-40"
+
+    def test_round_to_rect_transition_calc(self):
+        r = calculate_ductwork_row(
+            "Переход p400-500x250/тип 1/l200/",
+            {"qty": 1, "unit": "шт"},
+        )
+        assert r is not None
+        assert r["price"] > 0
+
+    def test_round_tee_with_rect_tap_calc(self):
+        assert is_ductwork_row("Тройник круглый с прямоугольной врезкой p500-p500-300x150")
+        r = calculate_ductwork_row(
+            "Тройник круглый с прямоугольной врезкой p500-p500-300x150",
+            {"qty": 1, "unit": "шт"},
+        )
+        assert r is not None
+        assert r["price"] > 0
+
     def test_p125_transition_detected_standalone(self):
         text = "Переход 300x200-p125/тип 1/l200/"
         assert is_ductwork_row(text)
