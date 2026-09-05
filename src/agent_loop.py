@@ -589,10 +589,16 @@ async def process_row(
         memory_manager.get_all_approaches(product_type) if product_type != UNKNOWN_PT else memory_manager.get_all_approaches_flat()
     )
     # Строгие кандидаты на РЕЮЗ (rule 8): тот же типоразмер обязателен.
-    confirmed_prices = [] if fresh else memory_manager.get_relevant_prices(spec_text, strict_sizes=True)
+    # fresh=True (принудительный поиск): пропускаем НЕнадёжные цены, но
+    # сохраняем высоконадёжные (conf >= 0.9) — они из study/ручного подтверждения.
+    if fresh:
+        confirmed_prices = [p for p in memory_manager.get_relevant_prices(spec_text, strict_sizes=True)
+                            if (p.get("confidence") or 0) >= 0.9]
+    else:
+        confirmed_prices = memory_manager.get_relevant_prices(spec_text, strict_sizes=True)
 
     # code-enforced rule 8: reuse high-confidence prices without LLM
-    if not fresh and confirmed_prices:
+    if confirmed_prices:
         # Исключаем цены, непригодные как источник: маркетплейсы, невалидные URL
         # (главная/поиск/семейная страница), stale, битые из сессии, мусорный conf.
         reusable = [p for p in confirmed_prices
@@ -614,7 +620,7 @@ async def process_row(
                 reuse_threshold = 0.7
             else:
                 reuse_threshold = CONF_TRUSTED
-            if conf >= reuse_threshold and (not fresh or conf >= 0.95):
+            if conf >= reuse_threshold:
                 elapsed = (datetime.now() - start_time).total_seconds()
                 result = {
                     "spec_text": spec_text, "price": best.get("price"),

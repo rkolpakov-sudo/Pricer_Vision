@@ -678,17 +678,21 @@ class StudyRunner(QThread):
                 return "\n".join(lines)
 
             elif name == "save_confirmed_price":
+                site_id = args.get("site", site_fallback)
                 pid = mm.save_price(
                     spec_text=args.get("spec_text", self._spec),
                     product_type=args.get("product_type", self._pt),
-                    site=args.get("site", site_fallback),
+                    site=site_id,
                     price=args.get("price", 0),
                     url=args.get("url", self._url),
                     confidence=args.get("confidence", 0.95),
                     reason=args.get("reason", "study"),
                 )
                 if pid:
-                    mm.record_soldat(args.get("product_type", self._pt), args.get("site", site_fallback))
+                    mm.record_soldat(args.get("product_type", self._pt), site_id)
+                    existing_sites = {s["id"] for s in mm.get_sites(self._pt)}
+                    if site_id and site_id not in existing_sites:
+                        mm.add_site(site_id, site_id, self._pt)
                 return f"Цена сохранена (ID: {pid})" if pid else "Цена не сохранена"
 
             elif name == "search_sites":

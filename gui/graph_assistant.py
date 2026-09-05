@@ -1973,15 +1973,18 @@ class StudyPage(QWidget):
             return
         mm = self._panel.mm
         saved = {"approaches": 0, "hints": 0, "concepts": 0, "sites": 0}
+        known_sites: set[str] = set()
         for cb, a in self._approach_checkboxes:
             if not cb.isChecked():
                 continue
             typ = a.get("_type", "approaches")
             try:
                 if typ == "approaches":
+                    site = a.get("site", "")
+                    pt = a.get("product_type", "")
                     mm.save_approach(
-                        product_type=a.get("product_type", ""),
-                        site=a.get("site", ""),
+                        product_type=pt,
+                        site=site,
                         concrete_steps=a.get("concrete_steps", []),
                         selectors_cache=a.get("selectors_cache"),
                         param_slots=a.get("param_slots"),
@@ -1989,11 +1992,16 @@ class StudyPage(QWidget):
                         search_query=a.get("search_query", ""),
                         notes=a.get("notes", ""),
                     )
+                    if site and pt and site not in known_sites:
+                        existing_sites = {s["id"] for s in mm.get_sites(pt)}
+                        if site not in existing_sites:
+                            mm.add_site(site, site, pt)
+                            known_sites.add(site)
                 elif typ == "hints":
                     mm.add_hint(
                         a.get("product_type", "unknown"),
                         a.get("hint_text", ""),
-                        None,
+                        a.get("site"),
                         a.get("priority", 0.7),
                     )
                 elif typ == "concepts":
