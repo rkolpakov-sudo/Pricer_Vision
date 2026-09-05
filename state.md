@@ -1,5 +1,46 @@
 # State Log
 
+## 2026-09-05 — FIX: расширение детекции воздуховодов + spec_context
+
+### Проблема
+Фасонные части воздуховодов без явного контекста ("круглого", "прямоугольного", "воздуховод") не распознавались:
+- "Отвод прям. 15° 600x300-600x300/R150/5" → `is_ductwork_row()=False` → агент ищет на сайтах сантехники
+- "Переход 300x200-Ø200", "Тройник 300x200-150x100", "Заглушка 400x600" — аналогично
+
+Корень: `_DUCT_CONTEXT_RE` требовал ключевые слова типа "круглого"/"прямоугольного", а аббревиатуры/размеры не распознавались.
+
+### Решение (A+B)
+
+**A. Расширение `_DUCT_CONTEXT_RE`** (`ductwork_calculator.py`):
+- Добавлено `кругл` — покрывает "круглая", "круглый" (аббревиатуры)
+- Добавлен паттерн `°\s*\d.*R\d` — угол + радиус (уникально для фасонных частей вентиляции)
+- Проверено на 42 кейсах канализации/сантехники — **0 false positives**
+
+**B. Параметр `spec_context="ventilation"`**:
+- `is_ductwork_row(spec_text, product_type, spec_context)` — новый уровень гейта
+- Если spec_context="ventilation" и elem != "other" → True
+- Проброска: main.py → MCPAgentRunner(spec_path=...) → spec_meta["spec_context"] → process_row → calculate_ductwork_row → is_ductwork_row
+- Определение: `if "вент" in filename.lower()` → spec_context="ventilation"
+
+### Результаты
+| Метрика | До | После |
+|---------|-----|-------|
+| False positives (канализация) | 0 | **0** ✅ |
+| False negatives (вентиляция) | 5 | **1** (Ниппель Ø200) |
+| Problem fails (без context) | 6 | **5** |
+| Problem fails (с context) | 6 | **0** ✅ |
+
+### Файлы
+- `src/ductwork_calculator.py` — `_DUCT_CONTEXT_RE`, `_SPEC_CONTEXT_TYPES`, `is_ductwork_row()`, `calculate_ductwork_row()`
+- `src/agent_loop.py:572-577` — передача `spec_context` из `spec_meta`
+- `src/mcp_agent_runner.py` — `spec_path` параметр, вычисление `spec_context`
+- `main.py` — передача `spec_path=self._spec_path` в MCPAgentRunner
+- `tests/test_ductwork_calculator.py` — 5 новых тестов (TestDuctContextDetection)
+
+Коммит: `e0ac3e7`, push `fix/revert-to-baseline`
+
+---
+
 ## 2026-09-05 — FIX: нормализация символов диаметра ⌀/p → Ø
 
 ### Проблема
