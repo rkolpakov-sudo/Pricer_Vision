@@ -1,5 +1,131 @@
 # State Log
 
+## 2026-09-05 — FIX: нормализация символов диаметра ⌀/p → Ø
+
+### Проблема
+PDF-парсер (MinerU/pdf-inspector) извлекает символ ⌀ (U+2300) как латинскую 'p' из-за кодировки шрифтов в PDF. Результат:
+1. "Воздуховод из тонколистовой оцинкованной стали ⌀225" → "p225"
+2. `parse_round_dims()` regex `[Ø⌀ø]\s*(\d+)` не матчит "p225" → `calc_area()` возвращает 0
+3. `calculate_ductwork_row()` → None → агент идёт в LLM и ищет в сети
+
+### Цепочка ошибок
+```
+PDF (шрифт кодирует ⌀ как 'p')
+→ MinerU извлекает "p225"
+→ fix_circle_notation() не чинит (нет p→Ø)
+→ parse_round_dims() → None (regex не матчит)
+→ calc_area() → 0.0 → calculate_ductwork_row() → None
+→ Агент идёт в LLM → "ищи в сети" → потеря раундов
+```
+
+### Фиксы (3 файла, ~40 строк)
+
+**`src/pdf2spec/clean.py:115`** — нормализация на уровне PDF-парсера:
+```python
+s2 = ... .replace('∅', 'Ø').replace('⌀', 'Ø')  # добавлен ⌀→Ø
+```
+
+**`src/ductwork_calculator.py`** — три изменения:
+1. `fix_circle_notation()` — добавлены правила `p→Ø` и `р→Ø` в контексте воздуховода
+2. Новая функция `normalize_diameter_symbols()` — нормализация на входе пайплайна:
+   - `⌀ ∅ ø` → `Ø`
+   - `p\d{2,4}` → `Ø\d{2,4}` (после пробела/начала строки)
+3. `calculate_ductwork_row()` — fallback: если `calc_area()` вернул 0, повторная попытка с `p/р→Ø`
+
+**`src/agent_loop.py:564`** — вызов `normalize_diameter_symbols(spec_text)` перед `classify_product_type()`
+
+### Результат
+- Коммит: `beed23c`, push `fix/revert-to-baseline`
+- Тесты: 197 passed (ductwork 32, graph_engine, main, approach_relevance)
+- Новые тесты: `TestNormalizeDiameterSymbols` (7 тестов), `test_ductwork_with_p_dimension`
+
+---
+
+## 2026-09-05 — FIX: реюз цен из study, автосайты, хинт site propagation
+
+### Проблема
+После обучения (study) на ventor.рф агент:
+1. Не использовал сохранённую цену 882₽ при принудительном повторном поиске
+2. Не знал о сайте ventor.рф (не в `product_sites`)
+3. Хинт сохранился с `site=None` — не привязан к ventor
+
+### Корневые причины (4 бага)
+1. **`fresh=True`** → `confirmed_prices = []` (line 592) → реюз цен ИЗ БД полностью отключён даже для conf=0.95
+2. **`_save_selected_approaches`**: `add_hint(product_type, text, None, priority)` — site ВСЕГДА None
+3. **`_save_selected_approaches`**: не вызывает `save_discovered_site` → новые сайты (ventor) не попадают в `product_sites`
+4. **`study_runner.save_confirmed_price`**: не регистрирует сайт в `product_sites` → при сохранении цены ventor не добавляется
+
+### Фиксы (`src/agent_loop.py:591-597`, `gui/graph_assistant.py:1968-2025`, `src/study_runner.py:680-698`)
+
+**agent_loop.py** — fresh=True теперь сохраняет высоконадёжные цены:
+```python
+if fresh:
+    confirmed_prices = [p for p in ... if (p.get("confidence") or 0) >= 0.9]
+else:
+    confirmed_prices = memory_manager.get_relevant_prices(...)
+```
+Убрана冗余ная проверка `not fresh or conf >= 0.95` на line 617.
+
+**graph_assistant.py** — `_save_selected_approaches`:
+- `add_hint(..., a.get("site"), ...)` — site передаётся из proposal
+- При сохранении подхода: `mm.get_sites(pt)` → если сайт не найден → `mm.add_site(site, site, pt)`
+
+**study_runner.py** — `save_confirmed_price`:
+- После сохранения цены: `mm.get_sites(pt)` → если сайт не найден → `mm.add_site(site_id, site_id, pt)`
+
+### Результат
+- Коммит: `e65722c`, push `fix/revert-to-baseline`
+- Тесты: 165 passed (graph_engine + main + approach_relevance)
+
+---
+
+## 2026-09-05 — FIX: блокировка маркетплейсов (ozon, wildberries и др.)
+
+### Проблема
+Агент взял цену с ozon.ru — маркетплейс-агрегатор, не магазин. `_MARKETPLACE_DOMAINS` содержал **только** Yandex Market (`market.yandex.ru`, `yandex.market.ru`, `market.yandex.com`). Ozon, Wildberries, Мегамаркет, AliExpress не были заблокированы.
+
+### Фикс (`src/agent_loop.py:2511-2521`, `src/task_scheduler.py:11-19`)
+Расширен `_MARKETPLACE_DOMAINS`:
+```
+market.yandex.ru, yandex.market.ru, yandex.market.com,
+ozon.ru, www.ozon.ru,
+wildberries.ru, www.wildberries.ru, wb.ru, www.wb.ru,
+megamarket.ru, www.megamarket.ru,
+aliexpress.ru, www.aliexpress.ru
+```
+
+Блокировка работает на 6 уровнях:
+1. Подбор целевых сайтов (line 662)
+2. Переиспользование подходов (lines 429, 672)
+3. Сохранение цены агентом (line 1575) — отклоняется с ошибкой «правило 12»
+4. Сохранение в БД (line 2362) — пропускается
+5. Доверие к цене (line 2531) — `_trustable_price` = False
+6. TaskScheduler (line 69) — исключены из batches
+
+### Результат
+- Коммит: `830bd81`, push `fix/revert-to-baseline`
+- Тесты: 66 passed (graph_engine + main)
+
+---
+
+## 2026-09-05 — FIX: компактная компоновка панели мониторинга
+
+### Проблема
+Элементы панели мониторинга (Строка, Позиция, прогресс-бар, статус) были размазаны по всей высоте — огромные зазоры между строками. История действий прижата к низу с жёстким `maxHeight=180`. Метрики занимали лишнее пространство.
+
+### Фиксы (`gui/agent_monitor.py`, `main.py`)
+- Все компактные виджеты (row_label, position_label, progress_bar, action_label) добавлены с `stretch=0` — не растягиваются
+- `position_label.setMaximumHeight(40)` (было 60), `progress_bar.setFixedHeight(18)` — компактнее
+- `history_list.setMaximumHeight(180)` **удалён** — история занимает всё доступное пространство
+- `layout.setSpacing(4)` (было 6)
+- `metrics_panel` без `Qt.AlignTop` — прижата к низу через `stretch=0`
+
+### Результат
+- Коммит: `b088f0b`, push `fix/revert-to-baseline`
+- Тесты: ≥1291 passed (таймаут перед завершением, все dots — green)
+
+---
+
 ## 2026-09-05 — FIX: восстановление сессий (auto-archive, fallback path, corrupted recovery)
 
 ### Проблема
