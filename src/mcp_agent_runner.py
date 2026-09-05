@@ -104,7 +104,7 @@ class MCPAgentRunner(QThread):
     def __init__(self, specs: list, llm_client, db_path: str = DB_PATH, parent=None, fresh: bool = True,
                  skip_registry=None, use_approaches: bool = True, use_site_ranking: bool = True,
                  ductwork_enabled: bool = False, restored_caches: dict | None = None,
-                 restored_results: list | None = None):
+                 restored_results: list | None = None, spec_path: str = ""):
         super().__init__(parent)
         self.specs = specs
         self.llm_client = llm_client
@@ -116,6 +116,7 @@ class MCPAgentRunner(QThread):
         self._skip_registry = skip_registry
         self._restored_caches = restored_caches
         self._restored_results = restored_results or []
+        self._spec_path = spec_path
         self._stop_event = threading.Event()
         self._restart_bridge = threading.Event()
         self._restart_bridge_value = None
@@ -389,6 +390,11 @@ class MCPAgentRunner(QThread):
                                  "spec": getattr(spec, "spec", ""),
                                  "headers": spec.headers,
                                  "qty": getattr(spec, "qty", None)} if hasattr(spec, 'article') else None
+                    if spec_meta and self._spec_path:
+                        from pathlib import Path
+                        _fname = Path(self._spec_path).name.lower()
+                        if "вент" in _fname:
+                            spec_meta["spec_context"] = "ventilation"
 
                     try:
                         price_candidate_holder = {}

@@ -571,9 +571,11 @@ async def process_row(
     # НЕ сохраняется в граф — только в Excel.
     if ductwork_enabled:
         from src.ductwork_calculator import calculate_ductwork_row
+        _spec_ctx = (spec_meta or {}).get("spec_context")
         try:
             duct_result = calculate_ductwork_row(spec_text, spec_meta,
-                                                 product_type=product_type)
+                                                 product_type=product_type,
+                                                 spec_context=_spec_ctx)
         except Exception as e:
             logger.warning("Ductwork calculation failed: %s", e)
             duct_result = None

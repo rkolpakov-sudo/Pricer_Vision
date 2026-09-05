@@ -1344,6 +1344,7 @@ class MainWindow(QMainWindow):
             skip_registry=self._skip_registry,
             restored_caches=retry_caches,
             restored_results=[],
+            spec_path=self._spec_path or "",
         )
         self._retry_runner.row_done_signal.connect(
             lambda idx, result: self._on_retry_row_done(table_row, result)
@@ -1752,6 +1753,7 @@ class MainWindow(QMainWindow):
             skip_registry=self._skip_registry,
             restored_caches=self._restored_caches,
             restored_results=self._original_restored_results,
+            spec_path=self._spec_path or "",
         )
         mode_str = (
             f"цены={'вкл' if self.reuse_price_cb.isChecked() else 'выкл'}, "

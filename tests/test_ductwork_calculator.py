@@ -204,3 +204,34 @@ class TestNormalizeDiameterSymbols:
         )
         assert r is not None
         assert r["price"] > 0
+
+
+class TestDuctContextDetection:
+    def test_angle_radius_pattern(self):
+        assert is_ductwork_row("Отвод прям. 15° 600x300-600x300/R150/5")
+        assert is_ductwork_row("Отвод прямоугольного воздуховода 90° 400x250/R200")
+
+    def test_krugl_abbreviation(self):
+        assert is_ductwork_row("Заглушка круглая Ø100")
+        assert is_ductwork_row("Врезка круглая Ø200")
+        assert is_ductwork_row("Утка круглая Ø200")
+
+    def test_spec_context_ventilation(self):
+        assert is_ductwork_row("Заглушка 400x600", spec_context="ventilation")
+        assert is_ductwork_row("Тройник 300x200-150x100", spec_context="ventilation")
+        assert is_ductwork_row("Переход 300x200-Ø200", spec_context="ventilation")
+
+    def test_no_false_positive_plumbing(self):
+        plumbing_items = [
+            'Кран шаровой Ду15', 'Клапан обратный Ду50', 'Заслонка Ду150',
+            'Тройник ППР Ду25', 'Отвод канализационный 110°',
+            'Тройник канализационный 110x110-110', 'Заглушка канализационная 110',
+            'Переход R110 (канализация)', 'Фитинг 90° R25',
+            'Отвод 45° R50 (пластик)', 'Заглушка Ø110 канализационная',
+        ]
+        for item in plumbing_items:
+            assert not is_ductwork_row(item), f"FP: {item}"
+
+    def test_spec_context_none_no_change(self):
+        assert not is_ductwork_row("Заглушка 400x600", spec_context=None)
+        assert not is_ductwork_row("Тройник 300x200-150x100", spec_context=None)

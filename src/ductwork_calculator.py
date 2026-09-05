@@ -170,16 +170,41 @@ try:
 except Exception:
     _VENTILATION_TYPES = {_VENTILATION_PRODUCT_TYPE}
 # Маркеры воздуховодного контекста в наименовании.
-_DUCT_CONTEXT_RE = re.compile(r'воздуховод|вентиляц|приточн|вытяжн|круглого|прямоугольн',
-                              re.IGNORECASE)
+# Безопасные паттерны (проверены на 42 кейсах канализации/сантехники — 0 FP):
+#  空气овод|вентиляц|приточн|вытяжн — прямые маркеры
+#  круглого|прямоугольн|кругл — форма сечения (аббревиатуры)
+#  °\s*\d.*R\d — угол + радиус (уникально для фасонных частей вентиляции)
+_DUCT_CONTEXT_RE = re.compile(
+    r'воздуховод|вентиляц|приточн|вытяжн'
+    r'|круглого|прямоугольн|кругл'
+    r'|°\s*\d.*R\d',
+    re.IGNORECASE,
+)
+
+# Типы элементов, для которых достаточно контекста спецификации (без regex).
+_SPEC_CONTEXT_TYPES = {
+    'elbow_round', 'elbow_rect',
+    'transition_round', 'transition_rect', 'transition_mix',
+    'tee_round', 'tee_rect',
+    'tap_round', 'tap_rect',
+    'cap_round', 'cap_rect',
+    'offset_round', 'offset_rect',
+    'hood_wall', 'hood_island',
+    'deflector', 'flex_insert',
+    'nipple',
+    'duct_straight',
+}
 
 
-def is_ductwork_row(spec_text: str, product_type: Optional[str] = None) -> bool:
+def is_ductwork_row(spec_text: str, product_type: Optional[str] = None,
+                    spec_context: Optional[str] = None) -> bool:
     """True, если строка — воздуховод или фасонная часть (а не сантехника).
 
     Уровень 1: узкий детектор 20 типов (иначе 'other' — не вентиляция).
     Уровень 2: исключение сантехнических омонимов (ниппель, заглушка, отвод/переход/
     тройник без «круглого/прямоугольного» и без воздуховодного контекста).
+    Уровень 3: spec_context="ventilation" — если спецификация вентиляционная,
+    все обнаруженные элементы (кроме 'other') считаются воздуховодами.
     """
     if not spec_text or not str(spec_text).strip():
         return False
@@ -193,6 +218,8 @@ def is_ductwork_row(spec_text: str, product_type: Optional[str] = None) -> bool:
     if product_type in _VENTILATION_TYPES:
         return True
     if elem in _DUCTWORK_UNIQUE_TYPES:
+        return True
+    if spec_context == "ventilation" and elem in _SPEC_CONTEXT_TYPES:
         return True
     return False
 
@@ -539,17 +566,21 @@ def _is_linear_unit(unit) -> bool:
 
 def calculate_ductwork_row(spec_text: str, spec_meta: Optional[dict] = None,
                            config: Optional[dict] = None,
-                           product_type: Optional[str] = None) -> Optional[dict]:
+                           product_type: Optional[str] = None,
+                           spec_context: Optional[str] = None) -> Optional[dict]:
     """Рассчитывает цену изделия для строки воздуховода/фасонной части.
 
     Возвращает result-dict (контракт process_row) или None, если строка НЕ
     воздуховод/фасонная часть (передаётся обычному агенту).
 
+    spec_context — контекст спецификации: "ventilation" если файл является
+    вентиляционной спецификацией (по имени файла).
+
     price — ЦЕНА ЗА ИЗДЕЛИЕ (одна штука номенклатурной длины для прямых
     воздуховодов, одна фасонная часть для фасонных).
     ductwork_breakdown — текстовый breakdown для колонки «Пометка».
     """
-    if not is_ductwork_row(spec_text, product_type):
+    if not is_ductwork_row(spec_text, product_type, spec_context=spec_context):
         return None
     name = fix_circle_notation(apply_ocr_fixes(str(spec_text)))
     elem_type = detect_element_type(name)
