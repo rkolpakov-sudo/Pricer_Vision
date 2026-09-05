@@ -1027,7 +1027,10 @@ class GraphEngine:
             keywords = (pdata.get("keywords") or "").lower()
             if not keywords:
                 continue
-            score = sum(1 for kw in re.split(r'[,;]\s*', keywords) if kw.strip() in spec_lower)
+            score = sum(
+                1 for kw in re.split(r'[,;]\s*', keywords)
+                if kw.strip() and re.search(r'(?<!\w)' + re.escape(kw.strip()) + r'(?!\w)', spec_lower)
+            )
             if score > best_score:
                 best_score = score
                 best = pid
