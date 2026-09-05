@@ -1520,16 +1520,6 @@ class MainWindow(QMainWindow):
             if not path:
                 return
 
-        # Архивируем текущую сессию перед загрузкой новой спецификации,
-        # чтобы предыдущая сессия не потерялась ( файл _current.json
-        # перезаписывается при автосохранении).
-        try:
-            from src.session_manager import archive_current_session, has_current_session
-            if has_current_session() and self._spec_path:
-                archive_current_session(self._spec_path)
-        except Exception:
-            pass
-
         try:
             headers, data_rows = self.excel_writer.load_spec(path)
             self._spec_path = path
