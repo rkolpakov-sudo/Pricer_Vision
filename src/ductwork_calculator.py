@@ -65,7 +65,25 @@ def fix_circle_notation(name: str) -> str:
     if any(kw in name.lower() for kw in ['воздуховод', 'круглого', 'круглый', 'отвод', 'врезк', 'заглушк']):
         name = re.sub(r'(?<!\d)0(\d{2,4})', r'Ø\1', name)
         name = re.sub(r'З(\d{2,4})', r'Ø\1', name)
+        name = re.sub(r'(?<!\w)p(\d{2,4})', r'Ø\1', name)
+        name = re.sub(r'(?<!\w)р(\d{2,4})', r'Ø\1', name)
     return name
+
+
+def normalize_diameter_symbols(text: str) -> str:
+    """Нормализация символов диаметра на входе в пайплайн.
+
+    Исправляет OCR-ошибку: шрифт PDF кодирует ⌀ (U+2300) как глиф 'p',
+    из-за чего '⌀225' превращается в 'p225'. Нормализация:
+    - Явные символы диаметра (⌀ ∅ ø) → Ø
+    - p/р + число в контексте размера → Ø (только после пробела/начала строки)
+    """
+    text = text.replace('⌀', 'Ø').replace('∅', 'Ø').replace('ø', 'Ø')
+    text = re.sub(r'(?<=\s)p(\d{2,4})(?=\s|$|[хx,;)])', r'Ø\1', text)
+    text = re.sub(r'(?<=\s)р(\d{2,4})(?=\s|$|[хx,;)])', r'Ø\1', text)
+    text = re.sub(r'(?<=^)p(\d{2,4})(?=\s|$|[хx,;)])', r'Ø\1', text)
+    text = re.sub(r'(?<=^)р(\d{2,4})(?=\s|$|[хx,;)])', r'Ø\1', text)
+    return text
 
 
 # ──────────────────────────────────────────────
@@ -546,6 +564,12 @@ def calculate_ductwork_row(spec_text: str, spec_meta: Optional[dict] = None,
     k_thick = parse_thickness_k(name, coeffs)
 
     s_area = calc_area(elem_type, name)
+    if s_area <= 0:
+        name_retry = re.sub(r'(?<!\w)[pр](\d{2,4})', r'Ø\1', name)
+        if name_retry != name:
+            s_area = calc_area(elem_type, name_retry)
+            if s_area > 0:
+                name = name_retry
     if s_area <= 0:
         return None
     s_area *= allowance

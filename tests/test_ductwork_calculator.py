@@ -10,7 +10,8 @@
 import math
 
 from src.ductwork_calculator import (
-    apply_ocr_fixes, fix_circle_notation, detect_element_type,
+    apply_ocr_fixes, fix_circle_notation, normalize_diameter_symbols,
+    detect_element_type,
     is_ductwork_row, count_ductwork_items, calculate_ductwork_row,
     calc_area, NOMENCLATURE_LENGTHS,
 )
@@ -162,3 +163,44 @@ class TestCalculateDuctwork:
     def test_nomenclature_lengths_defaults(self):
         assert NOMENCLATURE_LENGTHS["round"] == 3.0
         assert NOMENCLATURE_LENGTHS["rect"] == 1.25
+
+
+class TestNormalizeDiameterSymbols:
+    def test_explicit_symbols(self):
+        assert normalize_diameter_symbols("⌀225") == "Ø225"
+        assert normalize_diameter_symbols("∅200") == "Ø200"
+        assert normalize_diameter_symbols("ø160") == "Ø160"
+
+    def test_ocr_p_to_diameter(self):
+        assert normalize_diameter_symbols("p225") == "Ø225"
+        assert normalize_diameter_symbols("p200") == "Ø200"
+        assert normalize_diameter_symbols("р225") == "Ø225"
+
+    def test_p_in_full_spec(self):
+        result = normalize_diameter_symbols("Воздуховод из тонколистовой оцинкованной стали p225")
+        assert "Ø225" in result
+        assert "p225" not in result
+
+    def test_p_with_separator(self):
+        assert "Ø200" in normalize_diameter_symbols("Воздуховод p200, толщина 0,5мм")
+        assert "Ø200" in normalize_diameter_symbols("Воздуховод p200; длина 3м")
+
+    def test_no_false_positive(self):
+        result = normalize_diameter_symbols("Петля термоусаживаемая 100мм")
+        assert "Петля" in result
+        assert "Ø" not in result
+
+    def test_fix_circle_notation_p_in_context(self):
+        result = fix_circle_notation("Воздуховод p225")
+        assert "Ø225" in result
+        result2 = fix_circle_notation("Отвод круглого воздуховода p200")
+        assert "Ø200" in result2
+
+    def test_ductwork_with_p_dimension(self):
+        r = calculate_ductwork_row(
+            "Воздуховод из тонколистовой оцинкованной стали p225",
+            {"qty": 5, "unit": "м.п."},
+            product_type="ventilation_climate_ventilation",
+        )
+        assert r is not None
+        assert r["price"] > 0

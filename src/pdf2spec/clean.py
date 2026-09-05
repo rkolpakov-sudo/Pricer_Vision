@@ -112,7 +112,7 @@ def clean_name(s: str) -> str:
         out.append(t)
         i += 1
 
-    s2 = re.sub(r'Ø\s+(\d)', r'Ø\1', ' '.join(out)).replace('∅', 'Ø')
+    s2 = re.sub(r'Ø\s+(\d)', r'Ø\1', ' '.join(out)).replace('∅', 'Ø').replace('⌀', 'Ø')
     return re.sub(r'\s+', ' ', s2).strip()
 
 

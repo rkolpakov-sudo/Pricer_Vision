@@ -561,6 +561,9 @@ async def process_row(
         }
         return _result_to_schema(result)
 
+    from src.ductwork_calculator import normalize_diameter_symbols
+    spec_text = normalize_diameter_symbols(spec_text)
+
     product_type = graph_engine.classify_product_type(spec_text)
 
     # Воздуховоды и фасонные части: детерминированный расчёт МОДУЛЕМ, без
