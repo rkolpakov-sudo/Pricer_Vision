@@ -11,7 +11,7 @@ from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
                                     QStyleFactory, QCheckBox, QHeaderView, QDoubleSpinBox,
                                     QTabWidget, QSizePolicy, QFrame, QLayout, QGroupBox)
 from PySide6.QtCore import QObject, Signal, Qt, QTimer, QUrl, QThread, QEvent
-from PySide6.QtGui import QDesktopServices, QColor, QPainter
+from PySide6.QtGui import QDesktopServices, QColor, QPainter, QTextOption
 
 from src.theme import Theme, TOKENS, apply_theme, detect_system_theme
 from src import llm_providers
@@ -1031,6 +1031,7 @@ class MainWindow(QMainWindow):
         center_tabs.addTab(self.preview_table, "Предпросмотр")
 
         self.log_browser = QTextBrowser()
+        self.log_browser.document().setDefaultTextOption(QTextOption(Qt.AlignTop))
         center_tabs.addTab(self.log_browser, "Логи")
         center_tabs.setCurrentIndex(1)  # start on Предпросмотр
 
