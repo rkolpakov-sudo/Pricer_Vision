@@ -8,7 +8,13 @@ logger = logging.getLogger("pricer.scheduler")
 
 # Маркетплейсы-агрегаторы не выбираются целевым сайтом батча (правило 12):
 # цена не от магазина, карточки нестабильны (404). Магазин — отдельный сайт-продавец.
-_MARKETPLACE_DOMAINS = {"market.yandex.ru", "yandex.market.ru", "market.yandex.com"}
+_MARKETPLACE_DOMAINS = {
+    "market.yandex.ru", "yandex.market.ru", "yandex.market.com",
+    "ozon.ru", "www.ozon.ru",
+    "wildberries.ru", "www.wildberries.ru", "wb.ru", "www.wb.ru",
+    "megamarket.ru", "www.megamarket.ru",
+    "aliexpress.ru", "www.aliexpress.ru",
+}
 
 
 def _is_marketplace(site_id: str) -> bool:

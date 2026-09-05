@@ -2511,7 +2511,13 @@ def _is_family_page(url: str) -> bool:
 # Маркетплейсы/агрегаторы — НЕ источник цены магазина: карточка нестабильна,
 # URL с хешем магазина → 404, цена не от магазина. Исключаются из переиспользования
 # цен (rule 8), контекста «Похожие цены», подходов и сохранения (правило 12).
-_MARKETPLACE_DOMAINS = {"market.yandex.ru", "yandex.market.ru", "market.yandex.com"}
+_MARKETPLACE_DOMAINS = {
+    "market.yandex.ru", "yandex.market.ru", "yandex.market.com",
+    "ozon.ru", "www.ozon.ru",
+    "wildberries.ru", "www.wildberries.ru", "wb.ru", "www.wb.ru",
+    "megamarket.ru", "www.megamarket.ru",
+    "aliexpress.ru", "www.aliexpress.ru",
+}
 
 
 def _marketplace_site(site_or_url: str) -> bool:
