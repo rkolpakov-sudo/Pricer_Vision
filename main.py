@@ -625,10 +625,7 @@ class MainWindow(QMainWindow):
         """При запуске: показать диалог выбора сессии, если есть сохранённые."""
         from src.session_manager import (
             list_sessions, has_current_session, load_current_session, auto_save_path,
-            recover_corrupted_sessions,
         )
-        # Восстанавливаем повреждённые файлы сессий (если есть)
-        recover_corrupted_sessions()
         sessions = list_sessions()
         current_has = has_current_session()
         if not sessions and not current_has:
