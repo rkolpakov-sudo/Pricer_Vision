@@ -572,7 +572,7 @@ pdf_parser:
 
 ## Тестирование (актуально на 2026-09-03)
 
-- **1303 тестов, 10 skipped**, 0 failures. Запуск: `python -m pytest -q`.
+- **1313 тестов, 10 skipped**, 0 failures. Запуск: `python -m pytest -q`.
 - **Интеграционные** (`tests/integration/test_agent_flow.py`): полный цикл `process_row` с моками — извлечение, tool_call цикл, reuse (rule 8, включая exact-spec ≥0.6), semantic cache, ошибки LLM, max rounds, captcha, stuck recovery, флаги режима поиска, защита моделей C10/C20, кап confidence, повторный зонд, межстрочные факты, **модуль воздуховодов** (расчёт без обращения к браузеру/LLM).
 - **Критичные модули >80%**: schemas, stuck_detector, semantic_cache, context_optimizer, rate_limiter, learning_loop, smart_review, config_loader, excel_writer, session_facts, approach_relevance (model_designators/mismatch_kind), ductwork_calculator.
 - Покрытие: `python -m coverage run --source=src -m pytest tests -q && python -m coverage report` (coverage установлен в venv).

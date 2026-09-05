@@ -104,7 +104,8 @@ class MCPAgentRunner(QThread):
     def __init__(self, specs: list, llm_client, db_path: str = DB_PATH, parent=None, fresh: bool = True,
                  skip_registry=None, use_approaches: bool = True, use_site_ranking: bool = True,
                  ductwork_enabled: bool = False, restored_caches: dict | None = None,
-                 restored_results: list | None = None, spec_path: str = ""):
+                 restored_results: list | None = None, spec_path: str = "",
+                 spec_context: str | None = None):
         super().__init__(parent)
         self.specs = specs
         self.llm_client = llm_client
@@ -117,6 +118,8 @@ class MCPAgentRunner(QThread):
         self._restored_caches = restored_caches
         self._restored_results = restored_results or []
         self._spec_path = spec_path
+        self._explicit_spec_context = spec_context
+        self._spec_context = None
         self._stop_event = threading.Event()
         self._restart_bridge = threading.Event()
         self._restart_bridge_value = None
@@ -128,6 +131,27 @@ class MCPAgentRunner(QThread):
         self._processed = 0
         self._found = 0
         self.results = []
+
+    def _resolve_spec_context(self) -> str | None:
+        """Определяет контекст спецификации для детекции воздуховодов.
+
+        Приоритет: явный spec_context (из main) → имя файла («вент») →
+        мажоритарное голосование по строкам (не зависит от имени файла).
+        """
+        if self._explicit_spec_context:
+            return self._explicit_spec_context
+        if self._spec_path:
+            from pathlib import Path
+            _fname = Path(self._spec_path).name.lower()
+            if "вент" in _fname:
+                return "ventilation"
+        if self.specs:
+            from src.ductwork_calculator import infer_spec_context
+            try:
+                return infer_spec_context(self.specs)
+            except Exception:
+                return None
+        return None
 
     def _current_metrics(self) -> dict:
         return _build_metrics(
@@ -170,6 +194,10 @@ class MCPAgentRunner(QThread):
         self.status_signal.emit(("progress", 0, len(self.specs), "Загрузка графа..."))
         engine = GraphEngine(self.db_path)
         engine.build()
+        self._spec_context = self._resolve_spec_context()
+        if self._spec_context:
+            logger.info("Spec context: %s (ductwork detection enabled for ambiguous rows)",
+                        self._spec_context)
         mm = MemoryManager(engine)
         audit = AuditLogger()
         self.audit_session_id = audit.session_id
@@ -390,11 +418,8 @@ class MCPAgentRunner(QThread):
                                  "spec": getattr(spec, "spec", ""),
                                  "headers": spec.headers,
                                  "qty": getattr(spec, "qty", None)} if hasattr(spec, 'article') else None
-                    if spec_meta and self._spec_path:
-                        from pathlib import Path
-                        _fname = Path(self._spec_path).name.lower()
-                        if "вент" in _fname:
-                            spec_meta["spec_context"] = "ventilation"
+                    if spec_meta and self._spec_context:
+                        spec_meta["spec_context"] = self._spec_context
 
                     try:
                         price_candidate_holder = {}

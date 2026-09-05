@@ -1,5 +1,63 @@
 # State Log
 
+## 2026-09-05 — FIX: p125→Ø125 нормализация + надёжный spec_context (A+B2+C)
+
+### Проблема
+Прогон «Одинцово вент»: строка `Переход 300x200-p125/тип 1/l200/` уходила агенту
+и искалась на сайтах сантехники. Цепочка провала (4 слоя):
+1. `normalize_diameter_symbols` — lookbehind `(?<=\s)` требовал ПРОБЕЛ перед p,
+   а в данных `p` после `-`/`/`/`(` → p125 не нормализован.
+2. `fix_circle_notation` — p→Ø только при keywords `отвод|врезк|заглушк|...`;
+   `переход|тройник|утка` отсутствовали.
+3. fallback в `calculate_ductwork_row` конвертил p→Ø, но НЕ пере-детектил тип
+   (`transition_rect` оставался вместо `transition_mix`) → площадь 0 → None.
+4. `spec_context` терялся при загрузке из PDF (`pdf_spec_{ts}.xlsx` без «вент»).
+
+### Решения
+**A. Нормализация p/р→Ø (главное):**
+- `normalize_diameter_symbols`: `(?<![A-Za-zА-Яа-я0-9])[pр](\d{2,4})(?=\s|$|[хx,/;)])` —
+  работает после любых разделителей (-p125, /p125, (p100), =p200).
+- `fix_circle_notation`: keywords расширены (`переход|тройник|утка|кругл|прямоугольн`),
+  regex p→Ø приведён к общему виду.
+- fallback `calculate_ductwork_row`: после конвертации p→Ø пере-детектит `elem_type`
+  (transition_rect→transition_mix), потом пересчитывает площадь.
+
+**B2. Надёжный spec_context (не зависит от имени файла):**
+- `infer_spec_context(specs, min_duct_rows=3, min_share=0.15)` — мажоритарное
+  голосование: если ≥3 однозначно-воздуховодных строк и доля ≥15% → "ventilation".
+- `mcp_agent_runner`: `_resolve_spec_context()` — приоритет: явный параметр →
+  имя файла «вент» → `infer_spec_context` по строкам. Вычисляется один раз в `_run_async`.
+- `spec_meta["spec_context"]` заполняется предвычисленным значением.
+
+**C. transition_mix = воздуховод по определению:**
+- В `is_ductwork_row`: если `elem=="transition_mix"` И есть `Ø\d+` И `\d+[xх]\d+` →
+  True. Переход круглое→прямоугольное сечение существует только у листовых воздуховодов.
+
+**Гард от сантехники в вент-контексте:**
+- `_PLUMBING_OVERRIDE_RE` (канализаци|ППР|ПВХ|ПНД|полипропилен|чугун|пластик|
+  переходник|Ду\d|водопровод|отоплен) — блокирует отнесение сантехнических
+  омонимов к воздуховодам даже при spec_context="ventilation".
+
+### Результаты валидации (набор 60+ позиций)
+| Проверка | Результат |
+|----------|-----------|
+| Канализация без контекста → False | 0 FP |
+| Канализация в vent-контексте → False | 0 FP (кроме «Тройник 110x110 с Ø110» — текст неоднозначен, допустимо) |
+| Вентиляция в vent-контексте → True | 0 FN |
+| `Переход 300x200-p125/тип 1/l200/` расчёт | 445.1₽ (без контекста!) |
+| `Отвод прям. 15° 600x300-600x300/R150/5` | 791.2₽ |
+| `infer_spec_context` вент/сантех/пусто/мал | ventilation / None / None / None |
+
+### Файлы
+- `src/ductwork_calculator.py` — normalize_diameter_symbols, fix_circle_notation,
+  fallback calc, transition_mix правило, _PLUMBING_OVERRIDE_RE, infer_spec_context
+- `src/mcp_agent_runner.py` — `spec_context` param, `_resolve_spec_context()`
+- `tests/test_ductwork_calculator.py` — +10 тестов (TestInferSpecContext и др.)
+
+Тесты: **1313 passed, 10 skipped** (было 1303). Ветка `fix/revert-to-baseline`.
+
+---
+
 ## 2026-09-05 — FIX: расширение детекции воздуховодов + spec_context
 
 ### Проблема

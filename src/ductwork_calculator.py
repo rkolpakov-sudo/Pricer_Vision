@@ -62,11 +62,10 @@ def fix_circle_notation(name: str) -> str:
     """ø ⌀ ∅ ф → Ø; З<число> → Ø<число>; 0<число> → Ø<число> в контексте круглого воздуховода."""
     name = name.replace('ø', 'Ø').replace('⌀', 'Ø').replace('∅', 'Ø')
     name = re.sub(r'(?<![a-zA-Zа-яА-Я])ф(\d)', r'Ø\1', name)
-    if any(kw in name.lower() for kw in ['воздуховод', 'круглого', 'круглый', 'отвод', 'врезк', 'заглушк']):
+    if any(kw in name.lower() for kw in ['воздуховод', 'кругл', 'прямоугольн', 'отвод', 'переход', 'тройник', 'утка', 'врезк', 'заглушк']):
         name = re.sub(r'(?<!\d)0(\d{2,4})', r'Ø\1', name)
         name = re.sub(r'З(\d{2,4})', r'Ø\1', name)
-        name = re.sub(r'(?<!\w)p(\d{2,4})', r'Ø\1', name)
-        name = re.sub(r'(?<!\w)р(\d{2,4})', r'Ø\1', name)
+        name = re.sub(r'(?<![A-Za-zА-Яа-я0-9])[pр](\d{2,4})(?=\s|$|[хx,/;)])', r'Ø\1', name)
     return name
 
 
@@ -76,13 +75,13 @@ def normalize_diameter_symbols(text: str) -> str:
     Исправляет OCR-ошибку: шрифт PDF кодирует ⌀ (U+2300) как глиф 'p',
     из-за чего '⌀225' превращается в 'p225'. Нормализация:
     - Явные символы диаметра (⌀ ∅ ø) → Ø
-    - p/р + число в контексте размера → Ø (только после пробела/начала строки)
+    - p/р + число (2-4 цифры) в позиции размера → Ø. Ограничение — НЕ внутри
+      слова/числа (negative lookbehind), но ПОСЛЕ любого разделителя: '-p125',
+      '/p125', '(p100)', '=p200', ':p150', '  p125' — все нормализуются.
     """
     text = text.replace('⌀', 'Ø').replace('∅', 'Ø').replace('ø', 'Ø')
-    text = re.sub(r'(?<=\s)p(\d{2,4})(?=\s|$|[хx,;)])', r'Ø\1', text)
-    text = re.sub(r'(?<=\s)р(\d{2,4})(?=\s|$|[хx,;)])', r'Ø\1', text)
-    text = re.sub(r'(?<=^)p(\d{2,4})(?=\s|$|[хx,;)])', r'Ø\1', text)
-    text = re.sub(r'(?<=^)р(\d{2,4})(?=\s|$|[хx,;)])', r'Ø\1', text)
+    text = re.sub(r'(?<![A-Za-zА-Яа-я0-9])[pр](\d{2,4})(?=\s|$|[хx,/;)])',
+                  r'Ø\1', text)
     return text
 
 
@@ -195,6 +194,16 @@ _SPEC_CONTEXT_TYPES = {
     'duct_straight',
 }
 
+# Сантехнические маркеры, которые запрещают отнесение к воздуховодам даже в
+# spec_context="ventilation" (омонимы: отвод/тройник/заглушка канализационные,
+# ППР/ПВХ/чугун/пластик, Ду-номиналы, «переходник» — сантехнический термин).
+_PLUMBING_OVERRIDE_RE = re.compile(
+    r'канализаци|полипропилен|полипроп|полиэтилен|\bППР\b|\bПВХ\b|\bПНД\b'
+    r'|чугун|водопровод|отоплен|пластик|переходник'
+    r'|(?<![a-zа-я0-9])ду\s*\d',
+    re.IGNORECASE,
+)
+
 
 def is_ductwork_row(spec_text: str, product_type: Optional[str] = None,
                     spec_context: Optional[str] = None) -> bool:
@@ -204,7 +213,8 @@ def is_ductwork_row(spec_text: str, product_type: Optional[str] = None,
     Уровень 2: исключение сантехнических омонимов (ниппель, заглушка, отвод/переход/
     тройник без «круглого/прямоугольного» и без воздуховодного контекста).
     Уровень 3: spec_context="ventilation" — если спецификация вентиляционная,
-    все обнаруженные элементы (кроме 'other') считаются воздуховодами.
+    обнаруженные элементы считаются воздуховодами (кроме 'other' и сантехники
+    с явными маркерами _PLUMBING_OVERRIDE_RE).
     """
     if not spec_text or not str(spec_text).strip():
         return False
@@ -220,7 +230,16 @@ def is_ductwork_row(spec_text: str, product_type: Optional[str] = None,
     if elem in _DUCTWORK_UNIQUE_TYPES:
         return True
     if spec_context == "ventilation" and elem in _SPEC_CONTEXT_TYPES:
+        if _PLUMBING_OVERRIDE_RE.search(low):
+            return False
         return True
+    # Уровень 4: переход «круглое→прямоугольное сечение» существует только у
+    # листовых воздуховодов (в канализации редукторы круглые→круглые/врезки).
+    if elem == "transition_mix":
+        has_round = bool(re.search(r'Ø\s*\d+', name))
+        has_rect = bool(re.search(r'\d+\s*[xх]\s*\d+', name))
+        if has_round and has_rect:
+            return True
     return False
 
 
@@ -241,6 +260,34 @@ def count_ductwork_items(specs, product_types=None) -> int:
         if is_ductwork_row(text, pt):
             n += 1
     return n
+
+
+def infer_spec_context(specs, min_duct_rows: int = 3, min_share: float = 0.15) -> Optional[str]:
+    """Определяет контекст спецификации по доле однозначных воздуховодных строк.
+
+    Мажоритарное голосование (не зависит от имени файла): если в списке
+    достаточно строк, РАСПОЗНАННЫХ как воздуховоды БЕЗ контекста (явные
+    маркеры «воздуховод/круглого/зонт/...»), и их доля значима, спецификация
+    вентиляционная → возвращает "ventilation" (для применения spec_context
+    к неоднозначным строкам: «Переход 300x200-p125», «Заглушка 400x600»).
+
+    Возвращает None, если спецификация не вентиляционная или данных мало.
+    """
+    texts = [(s.text if hasattr(s, "text") else s) for s in specs]
+    total = len([t for t in texts if str(t).strip()])
+    if total < min_duct_rows:
+        return None
+    n_duct = 0
+    for t in texts:
+        try:
+            if is_ductwork_row(str(t)):
+                n_duct += 1
+        except Exception:
+            continue
+    if n_duct >= min_duct_rows and (n_duct / total) >= min_share:
+        return "ventilation"
+    return None
+
 
 
 # ──────────────────────────────────────────────
@@ -596,11 +643,14 @@ def calculate_ductwork_row(spec_text: str, spec_meta: Optional[dict] = None,
 
     s_area = calc_area(elem_type, name)
     if s_area <= 0:
-        name_retry = re.sub(r'(?<!\w)[pр](\d{2,4})', r'Ø\1', name)
+        name_retry = re.sub(r'(?<![A-Za-zА-Яа-я0-9])[pр](\d{2,4})(?=\s|$|[хx,/;)])',
+                            r'Ø\1', name)
         if name_retry != name:
-            s_area = calc_area(elem_type, name_retry)
+            elem_retry = detect_element_type(name_retry)
+            s_area = calc_area(elem_retry, name_retry)
             if s_area > 0:
                 name = name_retry
+                elem_type = elem_retry
     if s_area <= 0:
         return None
     s_area *= allowance

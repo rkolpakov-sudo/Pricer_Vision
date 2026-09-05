@@ -13,7 +13,7 @@ from src.ductwork_calculator import (
     apply_ocr_fixes, fix_circle_notation, normalize_diameter_symbols,
     detect_element_type,
     is_ductwork_row, count_ductwork_items, calculate_ductwork_row,
-    calc_area, NOMENCLATURE_LENGTHS,
+    calc_area, NOMENCLATURE_LENGTHS, infer_spec_context,
 )
 
 
@@ -235,3 +235,74 @@ class TestDuctContextDetection:
     def test_spec_context_none_no_change(self):
         assert not is_ductwork_row("Заглушка 400x600", spec_context=None)
         assert not is_ductwork_row("Тройник 300x200-150x100", spec_context=None)
+
+    def test_normalize_p_after_delimiters(self):
+        assert normalize_diameter_symbols("Переход 300x200-p125") == "Переход 300x200-Ø125"
+        assert normalize_diameter_symbols("Тройник 400x250-p150") == "Тройник 400x250-Ø150"
+        assert normalize_diameter_symbols("Врезка-p250") == "Врезка-Ø250"
+        assert normalize_diameter_symbols("Заглушка(p100)") == "Заглушка(Ø100)"
+        assert normalize_diameter_symbols("р200") == "Ø200"
+
+    def test_normalize_no_false_positive_words(self):
+        assert "P125" in normalize_diameter_symbols("P125 насос")
+        assert "Addap125" in normalize_diameter_symbols("Addap125 клапан")
+        assert "пункт125" in normalize_diameter_symbols("пункт125 труба")
+
+    def test_p125_transition_detected_standalone(self):
+        text = "Переход 300x200-p125/тип 1/l200/"
+        assert is_ductwork_row(text)
+        r = calculate_ductwork_row(text, {"qty": 1, "unit": "шт"})
+        assert r is not None
+        assert r["price"] > 0
+
+    def test_transition_mix_rule(self):
+        assert is_ductwork_row("Переход 300x200-Ø125")
+        assert is_ductwork_row("Переход Ø200-300x200")
+
+    def test_plumbing_override_in_vent_context(self):
+        plumbing_items = [
+            'Тройник канализационный 110x110-110',
+            'Заглушка канализационная 110',
+            'Отвод канализационный 45° Ду110',
+            'Переходник Ø110-Ø50',
+            'Отвод 45° R50 (пластик)',
+            'Переход R110 (канализация)',
+        ]
+        for item in plumbing_items:
+            assert not is_ductwork_row(item, spec_context="ventilation"), f"FP: {item}"
+
+    def test_vent_context_still_detects_ambiguous(self):
+        assert is_ductwork_row("Тройник 300x200-150x100", spec_context="ventilation")
+        assert is_ductwork_row("Заглушка 400x600", spec_context="ventilation")
+        assert is_ductwork_row("Ниппель Ø200", spec_context="ventilation")
+
+
+class TestInferSpecContext:
+    def _texts(self, items):
+        return type("Specs", (), {"__iter__": lambda self: iter(items)})()
+
+    def test_vent_spec_returns_ventilation(self):
+        specs = [
+            "Воздуховод из оцинкованной стали 300x300",
+            "Отвод круглого воздуховода 90° Ø200",
+            "Воздуховод круглый Ø200",
+            "Переход круглого сечения Ø200/Ø160",
+            "Переход 300x200-p125/тип 1/l200/",
+            "Тройник 300x200-150x100",
+        ]
+        assert infer_spec_context(self._texts(specs)) == "ventilation"
+
+    def test_plumbing_spec_returns_none(self):
+        specs = [
+            "Кран шаровой Ду15", "Клапан обратный Ду50", "Тройник ППР Ду25",
+            "Отвод канализационный 110°", "Заглушка канализационная 110",
+            "Радиатор отопления 10-М-100",
+        ]
+        assert infer_spec_context(self._texts(specs)) is None
+
+    def test_too_few_rows_returns_none(self):
+        specs = ["Воздуховод из оцинкованной стали 300x300"]
+        assert infer_spec_context(self._texts(specs)) is None
+
+    def test_empty_returns_none(self):
+        assert infer_spec_context([]) is None
