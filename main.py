@@ -625,7 +625,10 @@ class MainWindow(QMainWindow):
         """При запуске: показать диалог выбора сессии, если есть сохранённые."""
         from src.session_manager import (
             list_sessions, has_current_session, load_current_session, auto_save_path,
+            recover_corrupted_sessions,
         )
+        # Восстанавливаем повреждённые файлы сессий (если есть)
+        recover_corrupted_sessions()
         sessions = list_sessions()
         current_has = has_current_session()
         if not sessions and not current_has:
@@ -696,6 +699,39 @@ class MainWindow(QMainWindow):
                     logger.error("Session restore failed: %s", e, exc_info=True)
                     self.add_log("ERR", "session", f"Ошибка восстановления сессии: {e}")
 
+    @staticmethod
+    def _resolve_spec_path(original: str, spec_name: str) -> str | None:
+        """Ищет файл спецификации, если оригинальный путь недоступен.
+
+        Порядок поиска:
+        1. data/output/ — ищем по имени файла (стем)
+        2. data/output/ — pdf_spec_*.xlsx (PDF-конверсия)
+        3. Рядом с оригинальным путём (parent dir) —同名 файл
+        """
+        from pathlib import Path
+        stem = Path(original).stem if original else ""
+        out_dir = Path("data/output")
+
+        # 1. Точное совпадение по имени в data/output/
+        if stem and out_dir.exists():
+            for f in out_dir.glob(f"{stem}*.xlsx"):
+                return str(f)
+
+        # 2. Последний pdf_spec_*.xlsx в data/output/ (если сессия из PDF)
+        if out_dir.exists():
+            pdf_specs = sorted(out_dir.glob("pdf_spec_*.xlsx"), key=lambda f: f.stat().st_mtime, reverse=True)
+            if pdf_specs:
+                return str(pdf_specs[0])
+
+        # 3. Рядом с оригинальным путём (тот же parent, другое имя)
+        if original:
+            parent = Path(original).parent
+            if parent.exists() and stem:
+                for f in parent.glob(f"{stem}*.xlsx"):
+                    return str(f)
+
+        return None
+
     def _restore_session(self, session_path: str):
         """Восстанавливает сессию из JSON-файла."""
         from src.session_manager import load_session
@@ -706,10 +742,14 @@ class MainWindow(QMainWindow):
 
         spec_path = state.get("spec_path", "")
         if not spec_path or not Path(spec_path).exists():
-            QMessageBox.warning(self, "Ошибка",
-                                f"Файл спецификации не найден:\n{spec_path}\n\n"
-                                "Проверьте, что файл не был перемещён или удалён.")
-            return
+            # Файл спецификации перемещён/удалён — ищем по имени в data/output/
+            # и рядом с оригинальным путём.
+            spec_path = self._resolve_spec_path(spec_path, state.get("spec_name", ""))
+            if not spec_path:
+                QMessageBox.warning(self, "Ошибка",
+                                    f"Файл спецификации не найден:\n{state.get('spec_path', '?')}\n\n"
+                                    "Проверьте, что файл не был перемещён или удалён.")
+                return
 
         self.load_spec(path=spec_path)
         if not self._spec_path:
@@ -1482,6 +1522,16 @@ class MainWindow(QMainWindow):
             path, _ = QFileDialog.getOpenFileName(self, "Open spec.xlsx", input_dir, "Excel (*.xlsx)")
             if not path:
                 return
+
+        # Архивируем текущую сессию перед загрузкой новой спецификации,
+        # чтобы предыдущая сессия не потерялась ( файл _current.json
+        # перезаписывается при автосохранении).
+        try:
+            from src.session_manager import archive_current_session, has_current_session
+            if has_current_session() and self._spec_path:
+                archive_current_session(self._spec_path)
+        except Exception:
+            pass
 
         try:
             headers, data_rows = self.excel_writer.load_spec(path)
