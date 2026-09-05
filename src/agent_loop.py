@@ -977,7 +977,8 @@ async def process_row(
 
             if tool_name in GRAPH_TOOL_NAMES:
                 result = _execute_graph_tool(tool_name, tool_args, graph_engine, memory_manager,
-                                             spec_text=search_text, classified_product_type=product_type)
+                                             spec_text=search_text, classified_product_type=product_type,
+                                             last_shown_approach_id=_last_shown_approach_id)
             elif tool_name in ("browser_navigate", "navigate"):
                 new_site = tool_args.get("url", "")
                 # Жёсткий белый список сайтов: запрещаем уходить на домены вне
@@ -2125,7 +2126,8 @@ def _resolve_product_type(engine, mm, product_type: str, spec_text: str = "") ->
 
 
 def _execute_graph_tool(name: str, args: dict, engine, mm, spec_text: str = "",
-                        classified_product_type: str = "") -> str:
+                        classified_product_type: str = "",
+                        last_shown_approach_id: list | None = None) -> str:
     try:
         if name == "get_approaches":
             pt = args.get("product_type", "")
@@ -2188,8 +2190,8 @@ def _execute_graph_tool(name: str, args: dict, engine, mm, spec_text: str = "",
                     line += f" запрос={sq}"
                 lines.append(line)
             # B6: запомнить ID последнего показанного подхода
-            if approaches:
-                _last_shown_approach_id[0] = approaches[-1].get("id")
+            if approaches and last_shown_approach_id is not None:
+                last_shown_approach_id[0] = approaches[-1].get("id")
             return "\n".join(lines)
 
         elif name == "save_approach":

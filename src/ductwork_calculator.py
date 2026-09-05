@@ -50,6 +50,15 @@ OCR_FIXES = {
     'оборуЗование': 'оборудование',
 }
 
+# OCR-ошибка PDF: ⌀ (U+2300) извлекается как латинская 'p'/'р'. Паттерн
+# конвертации p+число → Ø+число. НЕ внутри слова/числа (negative lookbehind),
+# ПОСЛЕ любого разделителя. Дефис допускается только перед следующей
+# размерностью ([pр]х/цифры-маркеры) — чтобы не портить латинские модели
+# вида «Насос P125-40» (после дефиса идёт цифра, а не p/р).
+_P_OCR_DIAM_RE = re.compile(
+    r'(?<![A-Za-zА-Яа-я0-9])[pр](\d{2,4})(?=\s|$|[хx,/;)]|(?=-[pр]))',
+)
+
 
 def apply_ocr_fixes(name: str) -> str:
     for wrong, right in OCR_FIXES.items():
@@ -65,7 +74,7 @@ def fix_circle_notation(name: str) -> str:
     if any(kw in name.lower() for kw in ['воздуховод', 'кругл', 'прямоугольн', 'отвод', 'переход', 'тройник', 'утка', 'врезк', 'заглушк']):
         name = re.sub(r'(?<!\d)0(\d{2,4})', r'Ø\1', name)
         name = re.sub(r'З(\d{2,4})', r'Ø\1', name)
-        name = re.sub(r'(?<![A-Za-zА-Яа-я0-9])[pр](\d{2,4})(?=\s|$|[хx,/;)])', r'Ø\1', name)
+        name = _P_OCR_DIAM_RE.sub(r'Ø\1', name)
     return name
 
 
@@ -77,11 +86,10 @@ def normalize_diameter_symbols(text: str) -> str:
     - Явные символы диаметра (⌀ ∅ ø) → Ø
     - p/р + число (2-4 цифры) в позиции размера → Ø. Ограничение — НЕ внутри
       слова/числа (negative lookbehind), но ПОСЛЕ любого разделителя: '-p125',
-      '/p125', '(p100)', '=p200', ':p150', '  p125' — все нормализуются.
+      '/p125', '(p100)', '=p200', ':p150', '  p125', 'p125-p100' — все нормализуются.
     """
     text = text.replace('⌀', 'Ø').replace('∅', 'Ø').replace('ø', 'Ø')
-    text = re.sub(r'(?<![A-Za-zА-Яа-я0-9])[pр](\d{2,4})(?=\s|$|[хx,/;)])',
-                  r'Ø\1', text)
+    text = _P_OCR_DIAM_RE.sub(r'Ø\1', text)
     return text
 
 
@@ -643,8 +651,7 @@ def calculate_ductwork_row(spec_text: str, spec_meta: Optional[dict] = None,
 
     s_area = calc_area(elem_type, name)
     if s_area <= 0:
-        name_retry = re.sub(r'(?<![A-Za-zА-Яа-я0-9])[pр](\d{2,4})(?=\s|$|[хx,/;)])',
-                            r'Ø\1', name)
+        name_retry = _P_OCR_DIAM_RE.sub(r'Ø\1', name)
         if name_retry != name:
             elem_retry = detect_element_type(name_retry)
             s_area = calc_area(elem_retry, name_retry)

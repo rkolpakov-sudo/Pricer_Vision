@@ -1,5 +1,59 @@
 # State Log
 
+## 2026-09-05 — FIX: круглые переходы pN-pN (дефис) + NameError get_approaches
+
+### Проблема (по логу runtime.log, прогон 22:34)
+Прогон «Одинцово вент» встал на Row 183 = «Переход кругл. p160-p100/тип 1/l150/»
+(Excel 184). Строка НЕ попала в ductwork-модуль → агент завис → юзер отменил.
+Два независимых бага:
+
+**Баг 1 — частичная нормализация p→Ø в дефисных сериях:**
+«Переход кругл. p160-p100» → конвертировался только `p100` (после него `/`),
+а `p160` НЕ конвертировался: после числа шёл `-`, отсутствовавший в lookahead
+regex `[хx,/;)]`. Круглый→круглый переход требует ДВА Ø-размера; с одним
+`Ø100` calc_area(transition_round) давал 0 → строка уходила агенту.
+В спецификации таких строк 69 («Переход кругл. pN-pN», «Отвод ... pN-pN»).
+
+**Баг 2 — `NameError: _last_shown_approach_id` в get_approaches:**
+`_last_shown_approach_id = [None]` объявлен ЛОКАЛЬНО в `process_row` (стр. 813),
+а `_execute_graph_tool` (отдельная top-level функция, стр. 2127) обращался к
+нему на стр. 2192 → NameError на КАЖДОМ вызове get_approaches с непустым списком
+(в логе сотни раз с 03.09). Агент не получал подходы/сайты → терял таргетинг
+(вентиляция/канализация/сантехника). Тест не ловил: пустой список подходов не
+достигал строки записи.
+
+### Решения
+1. **`ductwork_calculator.py`**: введён общий `_P_OCR_DIAM_RE` (сложный паттерн:
+   negative lookbehind + lookahead с `\s|$|[хx,/;)]` или `(?=-[pр])`). Дефис
+   допускается только перед следующей размерностью `p/р` — латинские модели
+   «Насос P125-40» (после `-` цифра) НЕ портятся. Применён в
+   `normalize_diameter_symbols`, `fix_circle_notation`, fallback в
+   `calculate_ductwork_row`.
+2. **`agent_loop.py`**: `_execute_graph_tool(..., last_shown_approach_id=None)`;
+   запись ID только при не-None списке. Вызов из `process_row` передаёт
+   `_last_shown_approach_id`.
+
+### Результаты
+- «Переход кругл. p160-p100/тип 1/l150/» → **262.92₽** (было None).
+- Сухой прогон 446 строк спецификации: ductwork посчитал **172** строки.
+- Валидация: сантехника 0 FP (и в vent-контексте 0 FP, кроме неоднозначного
+  «Тройник 110x110 с Ø110»), вентиляция 0 FN.
+- «Насос P125-40», «P125», «Addap125-40» — не нормализуются (защита моделей).
+
+### Тесты
+- `tests/test_agent_loop.py`: `test_get_approaches_with_stored_hook_no_crash`
+  (регрессия NameError — фейковый подход, monkeypatch approach_relevant).
+- `tests/test_ductwork_calculator.py`: `test_normalize_hyphenated_round_transition`,
+  `test_round_round_transition_calc_standalone`, `test_round_elbow_hyphenated_calc`.
+- Полный сьют: **1317 passed, 10 skipped**.
+
+### Файлы
+- `src/ductwork_calculator.py`, `src/agent_loop.py`,
+  `tests/test_agent_loop.py`, `tests/test_ductwork_calculator.py`
+- Ветка `fix/revert-to-baseline`.
+
+---
+
 ## 2026-09-05 — FIX: p125→Ø125 нормализация + надёжный spec_context (A+B2+C)
 
 ### Проблема

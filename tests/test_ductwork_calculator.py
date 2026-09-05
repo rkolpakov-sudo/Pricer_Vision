@@ -248,6 +248,28 @@ class TestDuctContextDetection:
         assert "Addap125" in normalize_diameter_symbols("Addap125 клапан")
         assert "пункт125" in normalize_diameter_symbols("пункт125 труба")
 
+    def test_normalize_hyphenated_round_transition(self):
+        # Регрессия: "p160-p100" конвертировался частично (p160 не ловился —
+        # после числа шёл дефис, отсутствующий в lookahead regex).
+        assert normalize_diameter_symbols("Переход кругл. p160-p100") == "Переход кругл. Ø160-Ø100"
+        assert normalize_diameter_symbols("p125-p125") == "Ø125-Ø125"
+        assert normalize_diameter_symbols("Отвод круглого воздуховода 45° p160-p160") == "Отвод круглого воздуховода 45° Ø160-Ø160"
+
+    def test_round_round_transition_calc_standalone(self):
+        text = "Переход кругл. p160-p100/тип 1/l150/"
+        r = calculate_ductwork_row(text, {"qty": 1, "unit": "шт"})
+        assert r is not None
+        assert r["price"] > 0
+        assert is_ductwork_row(text)
+
+    def test_round_elbow_hyphenated_calc(self):
+        r = calculate_ductwork_row(
+            "Отвод круглого воздуховода 45° p160-p160",
+            {"qty": 1, "unit": "шт"},
+        )
+        assert r is not None
+        assert r["price"] > 0
+
     def test_p125_transition_detected_standalone(self):
         text = "Переход 300x200-p125/тип 1/l200/"
         assert is_ductwork_row(text)

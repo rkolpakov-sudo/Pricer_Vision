@@ -652,6 +652,30 @@ class TestExecuteGraphTool:
         result = _execute_graph_tool("get_approaches", {"product_type": "cables"}, graph_engine, mm)
         assert "Нет" in result
 
+    def test_get_approaches_with_stored_hook_no_crash(self, graph_engine, monkeypatch):
+        """Регрессия: _execute_graph_tool обращался к _last_shown_approach_id
+        (локальной переменной process_row), вызывая NameError на каждом вызове
+        get_approaches с непустым списком подходов."""
+        import src.agent_loop as al
+        from src.memory_manager import MemoryManager
+        mm = MemoryManager(graph_engine)
+        fake_approach = {
+            "id": 4242, "site_id": "test-site.ru", "success_count": 5,
+            "search_query": "тест", "pattern": [], "concrete": [],
+            "notes": "",
+        }
+        monkeypatch.setattr(mm, "get_all_approaches", lambda pt: [fake_approach])
+        monkeypatch.setattr(al, "approach_relevant", lambda a, s, product_type=None: True)
+        last_shown = [None]
+        result = _execute_graph_tool(
+            "get_approaches", {"product_type": "cables"}, graph_engine, mm,
+            spec_text="Тест Ду15", classified_product_type="cables",
+            last_shown_approach_id=last_shown,
+        )
+        assert "test-site.ru" in result
+        assert "Подходов:" in result
+        assert last_shown[0] == 4242
+
     def test_search_sites_empty(self, graph_engine):
         from src.memory_manager import MemoryManager
         mm = MemoryManager(graph_engine)
