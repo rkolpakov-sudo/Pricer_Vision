@@ -472,7 +472,7 @@ def calc_area(element_type: str, name: str) -> float:
         if not a or not b:
             return 0.0
         h_val = parse_length(name, 0.1)
-        return 2 * (a + b) / 1000 * h_val / 1000
+        return 2 * (a + b) / 1000 * h_val
 
     return 0.0
 
