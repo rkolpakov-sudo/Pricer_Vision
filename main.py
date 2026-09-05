@@ -1058,10 +1058,10 @@ class MainWindow(QMainWindow):
         monitor_layout.setContentsMargins(0, 0, 0, 0)
         monitor_layout.setSpacing(4)
         self.monitor_panel = AgentMonitorPanel()
-        monitor_layout.addWidget(self.monitor_panel, 2)
+        monitor_layout.addWidget(self.monitor_panel, 1)
         self.metrics_panel = MetricsPanel()
-        # Плитки метрик фиксированной высоты — не растягиваются, растёт монитор.
-        monitor_layout.addWidget(self.metrics_panel, 0, Qt.AlignTop)
+        # Плитки метрик фиксированной высоты — прижаты к низу, не сжимают монитор.
+        monitor_layout.addWidget(self.metrics_panel, 0)
         right_tabs.addTab(monitor_widget, "Мониторинг")
         # По умолчанию правая панель открывается на «Мониторинге»
         right_tabs.setCurrentIndex(right_tabs.count() - 1)

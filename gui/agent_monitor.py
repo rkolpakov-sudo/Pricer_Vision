@@ -75,7 +75,7 @@ class AgentMonitorPanel(QWidget):
     def _init_ui(self):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(10, 8, 10, 10)
-        layout.setSpacing(6)
+        layout.setSpacing(4)
 
         header = QHBoxLayout()
         title = QLabel("Мониторинг агента")
@@ -90,23 +90,24 @@ class AgentMonitorPanel(QWidget):
 
         self.row_label = QLabel("Строка: — / —")
         self.row_label.setStyleSheet("font-size: 12px; font-weight: 600;")
-        layout.addWidget(self.row_label)
+        layout.addWidget(self.row_label, 0)
 
         self.position_label = QLabel("Позиция: —")
         self.position_label.setWordWrap(True)
-        self.position_label.setMaximumHeight(60)
+        self.position_label.setMaximumHeight(40)
         self.position_label.setStyleSheet("font-size: 12px; font-weight: 600; color: #a6e3a1;")
-        layout.addWidget(self.position_label)
+        layout.addWidget(self.position_label, 0)
 
         self.progress_bar = QProgressBar()
         self.progress_bar.setRange(0, 100)
         self.progress_bar.setValue(0)
-        layout.addWidget(self.progress_bar)
+        self.progress_bar.setFixedHeight(18)
+        layout.addWidget(self.progress_bar, 0)
 
         self.action_label = QLabel("Ожидание запуска...")
         self.action_label.setWordWrap(True)
         self.action_label.setStyleSheet("font-size: 13px; font-weight: 600; color: #89b4fa;")
-        layout.addWidget(self.action_label)
+        layout.addWidget(self.action_label, 0)
 
         history_row = QHBoxLayout()
         history_row.addWidget(QLabel("История действий"))
@@ -118,8 +119,6 @@ class AgentMonitorPanel(QWidget):
         layout.addLayout(history_row)
 
         self.history_list = QListWidget()
-        self.history_list.setMaximumHeight(180)
-        # Делегат для рендера HTML (иконки Material Symbols) вместо плоского текста
         self.history_list.setItemDelegate(_RichTextDelegate(self.history_list))
         layout.addWidget(self.history_list, 1)
 
