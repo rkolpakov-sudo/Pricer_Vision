@@ -9,7 +9,7 @@ from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
                                     QComboBox, QLineEdit, QTextBrowser,
                                     QDialog, QDialogButtonBox, QMessageBox, QMenu,
                                     QStyleFactory, QCheckBox, QHeaderView, QDoubleSpinBox,
-                                    QTabWidget, QSizePolicy, QFrame, QLayout, QGroupBox)
+                                    QSpinBox, QTabWidget, QSizePolicy, QFrame, QLayout, QGroupBox)
 from PySide6.QtCore import QObject, Signal, Qt, QTimer, QUrl, QThread, QEvent
 from PySide6.QtGui import QDesktopServices, QColor, QPainter, QTextOption
 
@@ -958,6 +958,16 @@ class MainWindow(QMainWindow):
         self.ductwork_cb.toggled.connect(self._on_run_mode_toggle)
         run_checks.addWidget(self.ductwork_cb)
         run_checks.addSpacing(8)
+        _start_lbl = QLabel("Старт с:")
+        _start_lbl.setToolTip("Номер строки (1-based), с которой начать поиск. Строки до этой будут пропущены.")
+        run_checks.addWidget(_start_lbl)
+        self._start_row_spin = QSpinBox()
+        self._start_row_spin.setRange(1, 9999)
+        self._start_row_spin.setValue(1)
+        self._start_row_spin.setFixedWidth(60)
+        self._start_row_spin.setToolTip("Номер строки (1-based), с которой начать поиск.\nПолезно после фиксов: запустите с позиции pierwszej ненайденной строки.")
+        run_checks.addWidget(self._start_row_spin)
+        run_checks.addSpacing(8)
         run_hint = QLabel("ⓘ Чистый поиск: снять все три флажка")
         run_hint.setProperty("muted", True)
         run_checks.addWidget(run_hint)
@@ -1754,6 +1764,7 @@ class MainWindow(QMainWindow):
             restored_caches=self._restored_caches,
             restored_results=self._original_restored_results,
             spec_path=self._spec_path or "",
+            start_row=self._start_row_spin.value() - 1,
         )
         mode_str = (
             f"цены={'вкл' if self.reuse_price_cb.isChecked() else 'выкл'}, "
@@ -1761,6 +1772,9 @@ class MainWindow(QMainWindow):
             f"рейтинг={'вкл' if self.use_site_ranking_cb.isChecked() else 'выкл'}, "
             f"воздуховоды={'вкл' if self.ductwork_cb.isChecked() else 'выкл'}"
         )
+        _sr = self._start_row_spin.value()
+        if _sr > 1:
+            mode_str += f", старт со строки {_sr}"
         self.add_log("INFO", "init", f"Режим поиска: {mode_str}")
         self.monitor_panel.reset()
         self.metrics_panel.reset()

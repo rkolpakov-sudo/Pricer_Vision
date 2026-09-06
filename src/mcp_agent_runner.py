@@ -105,7 +105,7 @@ class MCPAgentRunner(QThread):
                  skip_registry=None, use_approaches: bool = True, use_site_ranking: bool = True,
                  ductwork_enabled: bool = False, restored_caches: dict | None = None,
                  restored_results: list | None = None, spec_path: str = "",
-                 spec_context: str | None = None):
+                 spec_context: str | None = None, start_row: int = 0):
         super().__init__(parent)
         self.specs = specs
         self.llm_client = llm_client
@@ -120,6 +120,7 @@ class MCPAgentRunner(QThread):
         self._spec_path = spec_path
         self._explicit_spec_context = spec_context
         self._spec_context = None
+        self._start_row = max(0, start_row)
         self._stop_event = threading.Event()
         self._restart_bridge = threading.Event()
         self._restart_bridge_value = None
@@ -303,6 +304,19 @@ class MCPAgentRunner(QThread):
                     self.status_signal.emit("stop")
                     self.monitor_signal.emit({"type": "stop"})
                     break
+                # Старт с позиции: пропускаем строки до start_row (1-based в UI, 0-based здесь)
+                if i < self._start_row:
+                    result = {"spec_text": spec_text, "price": None, "confidence": 0.0,
+                              "reason": f"пропуск: старт с позиции {self._start_row + 1}",
+                              "requires_review": False, "error": "skipped_start_row", "elapsed": 0.0}
+                    result["excel_row"] = getattr(spec, "row", 0) or (original_index.get(id(spec), i) + 2)
+                    self.results.append(result)
+                    self._processed += 1
+                    self.status_signal.emit(("progress", i + 1, total,
+                                            f"Пропуск (старт с {self._start_row + 1}): {spec_text[:50]}..."))
+                    self.monitor_signal.emit({"type": "row_done", "idx": i + 1, "total": total})
+                    self.row_done_signal.emit(original_index.get(id(spec), i), result)
+                    continue
                 result = None
                 retries = 0
                 spec_text = spec.text if hasattr(spec, 'text') else str(spec)
