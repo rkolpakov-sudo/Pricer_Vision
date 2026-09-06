@@ -1885,6 +1885,58 @@ async def process_row(
         except Exception as e:
             logger.warning("Radiator section calculation failed: %s", e)
 
+    # Автосохранение: агент обнаружил цену на карточке товара (price_candidate),
+    # но не успел вызвать save_confirmed_price до лимита раундов. Сохраняем
+    # лучшего кандидата с пониженным confidence — ревью подтвердит/отклонит.
+    if facts is not None:
+        best_cand = facts.best_candidate_price()
+        if best_cand and best_cand.get("price", 0) > 0:
+            cand_price = float(best_cand["price"])
+            cand_site = best_cand.get("site", "")
+            cand_url = current_site or ""
+            try:
+                validated = validate_result({
+                    "price": cand_price,
+                    "confidence": 0.4,
+                    "url": cand_url,
+                    "site": cand_site,
+                    "reason": "автосохранение: цена найдена на карточке, агент не успел сохранить",
+                    "requires_review": True,
+                }, spec_text)
+                if validated.get("price") is not None:
+                    memory_manager.save_price(
+                        spec_text=spec_text, product_type=product_type,
+                        site=cand_site, price=cand_price,
+                        url=cand_url, confidence=0.4,
+                        reason="автосохранение: агент нашёл цену на карточке, "
+                               "но не вызвал save_confirmed_price (лимит раундов)",
+                    )
+                    try:
+                        memory_manager.record_soldat(product_type, cand_site)
+                    except Exception:
+                        pass
+                    _session_success(cand_site, url=cand_url, query=search_text)
+                    _store_semantic_cache(semantic_cache, spec_text, {
+                        "spec_text": spec_text, "product_type": product_type,
+                        "price": cand_price, "confidence": 0.4,
+                        "url": cand_url, "site": cand_site,
+                        "found": True, "requires_review": True,
+                    })
+                    logger.info("Row: auto-saved price candidate %.2f on %s in %.1fs (agent ran out of rounds)",
+                                cand_price, cand_site, elapsed)
+                    final = {
+                        "spec_text": spec_text, "product_type": product_type,
+                        "price": cand_price, "confidence": 0.4,
+                        "url": cand_url, "site": cand_site,
+                        "found": True, "requires_review": True,
+                        "reason": "автосохранение: агент нашёл цену на карточке, "
+                                  "но не успел вызвать save_confirmed_price",
+                        "elapsed": elapsed,
+                    }
+                    return _result_to_schema(final)
+            except Exception as e:
+                logger.warning("Auto-save of price candidate failed: %s", e)
+
     logger.info("Row: max rounds reached in %.1fs", elapsed)
     return _error_result(spec_text, f"Max rounds ({MAX_ROUNDS}) reached", elapsed=elapsed)
 

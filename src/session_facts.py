@@ -223,6 +223,14 @@ class RowFacts:
     def price_candidate_seen(self) -> bool:
         return self._price_candidate_seen
 
+    def best_candidate_price(self) -> dict | None:
+        """Лучший кандидат из обнаруженных цен (макс. цена). Используется для
+        автосохранения при достижении лимита раундов — агент нашёл цену на карточке,
+        но не успел вызвать save_confirmed_price."""
+        if not self._candidate_prices:
+            return None
+        return max(self._candidate_prices, key=lambda c: c["price"])
+
     @property
     def price_candidate_hint(self) -> str:
         return self._price_candidate_hint

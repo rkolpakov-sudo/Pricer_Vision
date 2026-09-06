@@ -1085,3 +1085,32 @@ class TestExtractSearchUrl:
 
     def test_site_search_url_unknown_site_empty(self):
         assert _site_search_url([], "santech.ru") == ""
+
+
+class TestBestCandidatePrice:
+    """best_candidate_price — автосохранение при лимите раундов."""
+
+    def test_returns_highest_price(self):
+        from src.session_facts import RowFacts
+        f = RowFacts(spec_text="test")
+        f.record_candidate_price(100.0, "site1.ru")
+        f.record_candidate_price(500.0, "site2.ru")
+        f.record_candidate_price(250.0, "site3.ru")
+        best = f.best_candidate_price()
+        assert best is not None
+        assert best["price"] == 500.0
+        assert best["site"] == "site2.ru"
+
+    def test_returns_none_when_empty(self):
+        from src.session_facts import RowFacts
+        f = RowFacts(spec_text="test")
+        assert f.best_candidate_price() is None
+
+    def test_single_candidate(self):
+        from src.session_facts import RowFacts
+        f = RowFacts(spec_text="test")
+        f.record_candidate_price(4230.96, "dn.ru")
+        best = f.best_candidate_price()
+        assert best is not None
+        assert best["price"] == 4230.96
+        assert best["site"] == "dn.ru"
