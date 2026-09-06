@@ -530,6 +530,7 @@ class MainWindow(QMainWindow):
         self._restored_caches = None
         self._restored_audit_id = ""
         self._original_restored_results = []
+        self._pending_start_row = 0
         self._session_log_entries = []
         from src.approach_relevance import load_rules
         load_rules()
@@ -958,16 +959,6 @@ class MainWindow(QMainWindow):
         self.ductwork_cb.toggled.connect(self._on_run_mode_toggle)
         run_checks.addWidget(self.ductwork_cb)
         run_checks.addSpacing(8)
-        _start_lbl = QLabel("Старт с:")
-        _start_lbl.setToolTip("Номер строки (1-based), с которой начать поиск. Строки до этой будут пропущены.")
-        run_checks.addWidget(_start_lbl)
-        self._start_row_spin = QSpinBox()
-        self._start_row_spin.setRange(1, 9999)
-        self._start_row_spin.setValue(1)
-        self._start_row_spin.setFixedWidth(60)
-        self._start_row_spin.setToolTip("Номер строки (1-based), с которой начать поиск.\nПолезно после фиксов: запустите с позиции pierwszej ненайденной строки.")
-        run_checks.addWidget(self._start_row_spin)
-        run_checks.addSpacing(8)
         run_hint = QLabel("ⓘ Чистый поиск: снять все три флажка")
         run_hint.setProperty("muted", True)
         run_checks.addWidget(run_hint)
@@ -1147,6 +1138,13 @@ class MainWindow(QMainWindow):
         action_type.setEnabled(can_edit)
         action_type.triggered.connect(lambda: self._fix_row_type(row, spec_text))
 
+        menu.addSeparator()
+
+        action_resume = menu.addAction("Продолжить поиск с этой позиции")
+        action_resume.setIcon(ui_icons.icon("play_arrow", _rt["text-primary"], 16))
+        action_resume.setEnabled(can_edit)
+        action_resume.triggered.connect(lambda: self._start_from_row(row))
+
         menu.exec(self.results_table.viewport().mapToGlobal(pos))
 
     def _confirm_and_retry_row(self, table_row: int, spec_text: str):
@@ -1162,6 +1160,23 @@ class MainWindow(QMainWindow):
             return
         self._purge_row_memory(spec_text)
         self._retry_single_row(table_row)
+
+    def _start_from_row(self, table_row: int):
+        """Начать поиск с выбранной позиции (все строки до неё будут пропущены)."""
+        if self._processing_active:
+            return
+        total = self.results_table.rowCount()
+        skip_count = table_row
+        ret = QMessageBox.question(
+            self, "Продолжить поиск",
+            f"Начать поиск со строки {table_row + 1}?\n"
+            f"Строки 1–{table_row} будут пропущены.\n"
+            f"Всего строк: {total}, к обработке: {total - table_row}",
+            QMessageBox.Yes | QMessageBox.No)
+        if ret != QMessageBox.Yes:
+            return
+        self._pending_start_row = table_row
+        self.start_processing()
 
     def _delete_row_result(self, table_row: int, spec_text: str):
         """Полное удаление результата строки: таблица, граф, кэши, Excel."""
@@ -1764,7 +1779,7 @@ class MainWindow(QMainWindow):
             restored_caches=self._restored_caches,
             restored_results=self._original_restored_results,
             spec_path=self._spec_path or "",
-            start_row=self._start_row_spin.value() - 1,
+            start_row=self._pending_start_row,
         )
         mode_str = (
             f"цены={'вкл' if self.reuse_price_cb.isChecked() else 'выкл'}, "
@@ -1772,7 +1787,7 @@ class MainWindow(QMainWindow):
             f"рейтинг={'вкл' if self.use_site_ranking_cb.isChecked() else 'выкл'}, "
             f"воздуховоды={'вкл' if self.ductwork_cb.isChecked() else 'выкл'}"
         )
-        _sr = self._start_row_spin.value()
+        _sr = self._pending_start_row + 1
         if _sr > 1:
             mode_str += f", старт со строки {_sr}"
         self.add_log("INFO", "init", f"Режим поиска: {mode_str}")
@@ -2105,6 +2120,7 @@ class MainWindow(QMainWindow):
         self.start_btn.setEnabled(True)
         self.stop_btn.setEnabled(False)
         self._processing_active = False
+        self._pending_start_row = 0
 
         total = spec_result.get("total", 0)
         found = spec_result.get("found_count", 0)
