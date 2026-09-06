@@ -304,23 +304,19 @@ class MCPAgentRunner(QThread):
                     self.status_signal.emit("stop")
                     self.monitor_signal.emit({"type": "stop"})
                     break
-                # Старт с позиции: пропускаем строки до start_row (1-based в UI, 0-based здесь)
-                if i < self._start_row:
-                    result = {"spec_text": spec_text, "price": None, "confidence": 0.0,
-                              "reason": f"пропуск: старт с позиции {self._start_row + 1}",
-                              "requires_review": False, "error": "skipped_start_row", "elapsed": 0.0}
-                    result["excel_row"] = getattr(spec, "row", 0) or (original_index.get(id(spec), i) + 2)
-                    self.results.append(result)
-                    self._processed += 1
-                    self.status_signal.emit(("progress", i + 1, total,
-                                            f"Пропуск (старт с {self._start_row + 1}): {spec_text[:50]}..."))
-                    self.monitor_signal.emit({"type": "row_done", "idx": i + 1, "total": total})
-                    self.row_done_signal.emit(original_index.get(id(spec), i), result)
-                    continue
                 result = None
                 retries = 0
                 spec_text = spec.text if hasattr(spec, 'text') else str(spec)
                 spec_brand = spec.brand if hasattr(spec, 'brand') else ""
+                # Старт с позиции: пропускаем спецификации с позицией < start_row
+                # (позиция = индекс в исходном списке спецификации).
+                _spec_pos = original_index.get(id(spec), i)
+                if _spec_pos < self._start_row:
+                    self._processed += 1
+                    self.status_signal.emit(("progress", i + 1, total,
+                                            f"Пропуск (старт с {self._start_row + 1}): {spec_text[:50]}..."))
+                    self.monitor_signal.emit({"type": "row_done", "idx": i + 1, "total": total})
+                    continue
                 # Пользователь отметил позицию (или её полный аналог) в предпросмотре
                 if self._skip_registry and self._skip_registry.is_skipped(spec_text, spec_brand):
                     matched = self._skip_registry.matches(spec_text, spec_brand) or spec_text

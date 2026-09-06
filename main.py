@@ -531,6 +531,8 @@ class MainWindow(QMainWindow):
         self._restored_audit_id = ""
         self._original_restored_results = []
         self._pending_start_row = 0
+        self._pre_run_backup = []
+        self._run_failed = False
         self._session_log_entries = []
         from src.approach_relevance import load_rules
         load_rules()
@@ -572,7 +574,9 @@ class MainWindow(QMainWindow):
         if self._processing_active and hasattr(self, '_runner') and self._runner:
             self._runner.stop()
             self._runner.wait(3000)
-        self._auto_save_session()
+            self._auto_save_session()
+        elif self._restored_results:
+            self._auto_save_session()
         if hasattr(self, 'graph_widget'):
             self.graph_widget._physics.stop()
         super().closeEvent(event)
@@ -582,7 +586,25 @@ class MainWindow(QMainWindow):
         from src.session_manager import save_session, auto_save_path
         if not self._spec_path:
             return
+        # Если прогон упал (0 результатов) — восстанавливаем предыдущую сессию
+        results = self._restored_results
+        if not results and self._run_failed and self._pre_run_backup:
+            results = self._pre_run_backup
+            logger.info("Auto-save: restoring %d results from pre-run backup (crash guard)",
+                        len(results))
+        # Жёсткая дедупликация по excel_row перед сохранением
+        _seen = set()
+        _deduped = []
+        for r in results:
+            er = r.get("excel_row") or 0
+            if er and er in _seen:
+                continue
+            if er:
+                _seen.add(er)
+            _deduped.append(r)
+        results = _deduped
         state = self._build_session_state()
+        state["results"] = results
         if state["results"] or state["negative_cache"] or state["skip_registry"].get("marked"):
             try:
                 save_session(auto_save_path(), state)
@@ -755,22 +777,25 @@ class MainWindow(QMainWindow):
 
         self._skip_registry.from_dict(state.get("skip_registry", {}))
 
-        self._restored_results = state.get("results", [])
-        # Дедупликация: артефакт предыдущих багов — в файле могли оказаться
-        # дублирующиеся записи. Оставляем первый экземпляр каждого spec_text
-        # (с ценой приоритетнее, но порядок в JSON и так ставит их раньше).
-        _seen_specs = set()
+        # Строгий дедуп по excel_row (одна позиция = одна запись). Дедуп по
+        # spec_text ЗАПРЕЩЁН: в спецификации могут повторяться тексты разных
+        # позиций (решетки/отводы одного типоразмера) — их нельзя схлопывать.
+        _seen_excel = set()
         _deduped = []
-        for r in self._restored_results:
-            st = r.get("spec_text", "")
-            if st and st in _seen_specs:
+        for r in state.get("results", []):
+            er = r.get("excel_row") or 0
+            if er and er in _seen_excel:
                 continue
-            _seen_specs.add(st)
+            if er:
+                _seen_excel.add(er)
             _deduped.append(r)
-        self._restored_results = _deduped
-        self._original_restored_results = list(self._restored_results)
+        self._original_restored_results = list(_deduped)
+        # _restored_results заполняется НЕ предзагрузкой, а в _populate через
+        # _on_row_done (как при живом прогоне) — чтобы таблица и список всегда
+        # шли 1:1 и upsert не считал строку «уже показанной».
+        self._restored_results = []
         self._restored_row_indices = set()
-        for result in self._restored_results:
+        for result in _deduped:
             excel_row = result.get("excel_row", 0)
             if excel_row >= 2:
                 self._restored_row_indices.add(excel_row - 2)
@@ -798,16 +823,17 @@ class MainWindow(QMainWindow):
         # event loop). При старте окно ещё в процессе раскладки — синхронный
         # _on_row_done → results_table.scrollToBottom() в QTimer-колбэке вызывает
         # re-entrancy deadlock (UI «не отвечает»).
-        _pending = [r for r in self._restored_results if (r.get("excel_row") or 0) >= 2]
+        _pending = [(i, r) for i, r in enumerate(self._original_restored_results)
+                    if (r.get("excel_row") or 0) >= 2]
 
         def _populate():
             if not _pending:
                 self._finish_restore()
                 return
-            result = _pending.pop(0)
+            i, result = _pending.pop(0)
             try:
                 result["restored"] = True
-                self._on_row_done((result.get("excel_row") or 0) - 2, result)
+                self._on_row_done(i, result)
             except Exception as e:
                 logger.error("Session restore row failed: %s", e, exc_info=True)
             QTimer.singleShot(0, _populate)
@@ -822,6 +848,62 @@ class MainWindow(QMainWindow):
             self.toast_manager.success(f"Сессия восстановлена ({len(self._restored_results)} результатов)")
         except Exception:
             pass
+
+    def _repopulate_table(self):
+        """Перерисовывает таблицу результатов из _restored_results (без записи в Excel)."""
+        # Дедупликация по excel_row: на случай если в список попали дубли.
+        _seen_excel = set()
+        _deduped = []
+        for r in self._restored_results:
+            er = r.get("excel_row") or 0
+            if er and er in _seen_excel:
+                continue
+            if er:
+                _seen_excel.add(er)
+            _deduped.append(r)
+        self._restored_results = _deduped
+        self.results_table.setRowCount(0)
+        t = TOKENS.get(self._current_theme, TOKENS[Theme.DARK])
+        for idx, result in enumerate(self._restored_results):
+            row = self.results_table.rowCount()
+            self.results_table.insertRow(row)
+            price = result.get("price")
+            conf = result.get("confidence", 0)
+            price_text = f"{price:,.2f}" if price is not None else "—"
+            conf_text = f"{conf:.0%}" if conf else "—"
+            elapsed = result.get("elapsed")
+            elapsed_text = f"{elapsed:.0f}с" if elapsed is not None else "—"
+            site = result.get("site", "")
+            url = result.get("url", "")
+            spec = result.get("spec_text", "")
+            pt = result.get("product_type", "")
+            error = result.get("error", "")
+            brand_mismatch = result.get("brand_mismatch", False)
+            items = [
+                str(idx + 1), spec, pt, price_text, conf_text, elapsed_text,
+                site if site else "", url if url else ""
+            ]
+            for c, text in enumerate(items):
+                item = QTableWidgetItem(text)
+                if c == 7 and url:
+                    item.setToolTip(url)
+                    item.setData(Qt.UserRole, url)
+                if c == 1 and spec:
+                    item.setToolTip(spec)
+                if error:
+                    item.setForeground(QColor(t["danger"]))
+                elif brand_mismatch:
+                    item.setForeground(QColor(t["warning"]))
+                elif price is not None:
+                    item.setForeground(QColor(t["success"]))
+                else:
+                    item.setForeground(QColor(t["warning"]))
+                self.results_table.setItem(row, c, item)
+        self._restored_row_indices = set()
+        for result in self._restored_results:
+            excel_row = result.get("excel_row", 0)
+            if excel_row >= 2:
+                self._restored_row_indices.add(excel_row - 2)
 
     def _load_config(self):
         config_path = Path(__file__).parent / "config" / "settings.yaml"
@@ -1162,22 +1244,42 @@ class MainWindow(QMainWindow):
         self._retry_single_row(table_row)
 
     def _start_from_row(self, table_row: int):
-        """Начать полный поиск с выбранной позиции (все строки до неё будут пропущены)."""
+        """Пометить позицию, с которой продолжится поиск по кнопке «Старт».
+
+        table_row — 0-based индекс строки таблицы = позиция в списке спецификации.
+        Сам поиск НЕ запускается здесь — он стартует кнопкой «Старт» с этой позиции.
+        """
         if self._processing_active:
             return
         total = self.results_table.rowCount()
-        remaining = total - table_row
+        specs = self.excel_writer.get_specs()
+        # Позиция продолжения = индекс выбранной строки в списке спецификации.
+        # Таблица может быть разрежена (частичный прогон), поэтому ищем точную
+        # позицию по spec_text, а не по номеру строки таблицы.
+        start = min(max(table_row, 0), max(len(specs) - 1, 0))
+        spec_item = self.results_table.item(table_row, 1)
+        spec_text = spec_item.text() if spec_item else ""
+        if spec_text:
+            for i, s in enumerate(specs):
+                if s.text == spec_text:
+                    start = i
+                    break
+
         ret = QMessageBox.question(
             self, "Продолжить поиск",
-            f"Запустить полный поиск со строки {table_row + 1}?\n\n"
-            f"Строки 1–{table_row} будут пропущены.\n"
-            f"Останется: {remaining} из {total} строк.\n\n"
+            f"Отметить позицию {start + 1} как точку продолжения?\n\n"
+            f"При нажатии «Старт» поиск начнётся со строки {start + 1}.\n"
+            f"Результаты выше неё сохраняются; строки с {start + 1} и ниже:\n"
+            f"— найденные цены останутся,\n"
+            f"— ненайденные будут искаться заново.\n\n"
             f"Настройки поиска (цены, подходы, сайты) — как при обычном запуске.",
             QMessageBox.Yes | QMessageBox.No)
         if ret != QMessageBox.Yes:
             return
-        self._pending_start_row = table_row
-        self.start_processing()
+        self._pending_start_row = start
+        self.add_log("INFO", "control",
+                     f"Отмечена позиция продолжения: строка {start + 1} (нажмите «Старт»)")
+        self.status_label.setText(f"Продолжить со строки {start + 1} — нажмите «Старт»")
 
     def _delete_row_result(self, table_row: int, spec_text: str):
         """Полное удаление результата строки: таблица, граф, кэши, Excel."""
@@ -1558,6 +1660,7 @@ class MainWindow(QMainWindow):
             self._restored_caches = None
             self._restored_audit_id = ""
             self._original_restored_results = []
+            self._pending_start_row = 0
             self._session_log_entries = []
             self.start_btn.setEnabled(True)
             self._show_preview()
@@ -1758,8 +1861,38 @@ class MainWindow(QMainWindow):
 
         self.config = self._load_config()
         self._processing_active = True
-        self.results_table.setRowCount(0)
-        self._restored_results = []
+        self._run_failed = False
+        # Бэкап предыдущей сессии: если прогон упадёт (0 результатов),
+        # восстановим данные, а не перезапишем _current.json пустотой.
+        self._pre_run_backup = list(self._restored_results) if self._restored_results else []
+
+        # Продолжение с помеченной позиции: строки ВЫШЕ не трогаем (остаются в
+        # таблице и в _restored_results), найденные цены НИЖЕ сохраняются (runner
+        # восстановит их по позиции без поиска), а ненайденные позиции от выбранной
+        # вниз — ищутся заново.
+        _start = self._pending_start_row
+        _resume_restored = None
+        if _start > 0 and self._restored_results:
+            _prior_full = list(self._restored_results)
+            _specs = self.excel_writer.get_specs()
+            _start = min(_start, max(len(_specs) - 1, 0))
+            _start_excel = getattr(_specs[_start], "row", 0) if _specs else 0
+            # Результаты выше выбранной позиции (их excel_row < стартовой) — остаются.
+            _above = [r for r in _prior_full
+                      if (r.get("excel_row") or 0) < _start_excel]
+            self._restored_results = list(_above)
+            # Для слияния при завершении/сбое сохраняем ПОЛНЫЙ исходный список —
+            # чтобы ничего ниже выбранной позиции не потерялось.
+            self._original_restored_results = list(_prior_full)
+            # Runner получает только найденные результаты: они восстановятся
+            # мгновенно (без поиска), ненайденные — будут искаться заново.
+            _resume_restored = [r for r in _prior_full if r.get("price") is not None]
+            self._repopulate_table()
+        else:
+            self._restored_results = []
+            self._original_restored_results = []
+            self.results_table.setRowCount(0)
+
         self.log_browser.clear()
         self.progress_bar.setValue(0)
         self._center_tabs.setCurrentIndex(0)  # switch to Результаты
@@ -1778,7 +1911,7 @@ class MainWindow(QMainWindow):
             ductwork_enabled=self.ductwork_cb.isChecked(),
             skip_registry=self._skip_registry,
             restored_caches=self._restored_caches,
-            restored_results=self._original_restored_results,
+            restored_results=_resume_restored if _resume_restored is not None else self._original_restored_results,
             spec_path=self._spec_path or "",
             start_row=self._pending_start_row,
         )
@@ -1788,7 +1921,7 @@ class MainWindow(QMainWindow):
             f"рейтинг={'вкл' if self.use_site_ranking_cb.isChecked() else 'выкл'}, "
             f"воздуховоды={'вкл' if self.ductwork_cb.isChecked() else 'выкл'}"
         )
-        _sr = self._pending_start_row + 1
+        _sr = self._pending_start_row
         if _sr > 1:
             mode_str += f", старт со строки {_sr}"
         self.add_log("INFO", "init", f"Режим поиска: {mode_str}")
@@ -1838,10 +1971,31 @@ class MainWindow(QMainWindow):
     def _on_metrics(self, stats):
         self.metrics_panel.update_metrics(stats)
 
+    def _existing_row_by_excel(self, excel_row: int) -> int:
+        """Индекс строки таблицы, уже показывающей этот excel_row (или -1)."""
+        for r in range(self.results_table.rowCount()):
+            it = self.results_table.item(r, 0)
+            if it is None:
+                continue
+            # номер строки (col 0) не равен excel_row; ищем по сохранённому маппингу
+        # fallback через _restored_results (таблица построена из него 1:1)
+        for i, res in enumerate(self._restored_results):
+            if (res.get("excel_row") or 0) == excel_row:
+                return i
+        return -1
+
     def _on_row_done(self, idx, result):
-        self._restored_results.append(result)
-        row = self.results_table.rowCount()
-        self.results_table.insertRow(row)
+        excel_row = result.get("excel_row") or 0
+        # Upsert: результат по позиции (excel_row) может прийти повторно
+        # (restored + live) — заменяем существующую строку, а не добавляем дубль.
+        replaced_at = self._existing_row_by_excel(excel_row)
+        if replaced_at >= 0:
+            self._restored_results[replaced_at] = result
+            row = replaced_at
+        else:
+            self._restored_results.append(result)
+            row = self.results_table.rowCount()
+            self.results_table.insertRow(row)
 
         price = result.get("price")
         conf = result.get("confidence", 0)
@@ -1896,9 +2050,12 @@ class MainWindow(QMainWindow):
         hm = self.excel_writer.header_map
         if ws and hm:
             excel_row = result.get("excel_row") or (idx + 2)
-            ws.cell(excel_row, hm["price"], price)
-            ws.cell(excel_row, hm["url"], url or "")
-            ws.cell(excel_row, hm["category"], pt or "")
+            if price is not None:
+                ws.cell(excel_row, hm["price"], price)
+            if url:
+                ws.cell(excel_row, hm["url"], url)
+            if pt:
+                ws.cell(excel_row, hm["category"], pt)
             if brand_mismatch and "note" in hm:
                 ws.cell(excel_row, hm["note"], "не совпадает бренд")
             elif result.get("ductwork_breakdown") and "note" in hm:
@@ -2113,7 +2270,17 @@ class MainWindow(QMainWindow):
             st = r.get("spec_text", "")
             if st and st not in _old_specs and self._norm(st) not in _old_norms:
                 _new_results.append(r)
-        return _new_results
+        # 3. Жёсткая дедупликация по excel_row: одна строка = одна позиция.
+        _seen = set()
+        _out = []
+        for r in _new_results:
+            er = r.get("excel_row") or 0
+            if er and er in _seen:
+                continue
+            if er:
+                _seen.add(er)
+            _out.append(r)
+        return _out
 
     def _on_all_done(self, success, spec_result):
         self._spinner_timer.stop()
@@ -2130,6 +2297,9 @@ class MainWindow(QMainWindow):
         if hasattr(self, '_runner') and self._runner and self._runner.results:
             _new_results = self._merge_session_results(self._runner.results)
             self._restored_results = _new_results
+
+        # Перерисовка таблицы: показываем ВСЕ результаты (старые + новые)
+        self._repopulate_table()
 
         self.add_log("INFO", "complete",
             f"Готово: {found}/{total} найдено, {errs} ошибок")
@@ -2156,6 +2326,14 @@ class MainWindow(QMainWindow):
         if hasattr(self, '_runner') and self._runner and self._runner.results:
             _new_results = self._merge_session_results(self._runner.results)
             self._restored_results = _new_results
+        else:
+            # Прогон упал до обработки строк — восстанавливаем предыдущую сессию
+            self._run_failed = True
+            if self._pre_run_backup:
+                self._restored_results = self._pre_run_backup
+                self.add_log("WARN", "runner",
+                             f"Восстановлена предыдущая сессия ({len(self._pre_run_backup)} результатов)")
+        self._repopulate_table()
         self.start_btn.setEnabled(True)
         self.stop_btn.setEnabled(False)
         self._processing_active = False
