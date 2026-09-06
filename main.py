@@ -1162,16 +1162,17 @@ class MainWindow(QMainWindow):
         self._retry_single_row(table_row)
 
     def _start_from_row(self, table_row: int):
-        """Начать поиск с выбранной позиции (все строки до неё будут пропущены)."""
+        """Начать полный поиск с выбранной позиции (все строки до неё будут пропущены)."""
         if self._processing_active:
             return
         total = self.results_table.rowCount()
-        skip_count = table_row
+        remaining = total - table_row
         ret = QMessageBox.question(
             self, "Продолжить поиск",
-            f"Начать поиск со строки {table_row + 1}?\n"
+            f"Запустить полный поиск со строки {table_row + 1}?\n\n"
             f"Строки 1–{table_row} будут пропущены.\n"
-            f"Всего строк: {total}, к обработке: {total - table_row}",
+            f"Останется: {remaining} из {total} строк.\n\n"
+            f"Настройки поиска (цены, подходы, сайты) — как при обычном запуске.",
             QMessageBox.Yes | QMessageBox.No)
         if ret != QMessageBox.Yes:
             return
