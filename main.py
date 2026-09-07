@@ -602,7 +602,10 @@ class MainWindow(QMainWindow):
             if er:
                 _seen.add(er)
             _deduped.append(r)
-        results = _deduped
+        # Канонический порядок по excel_row — сессия должна храниться в порядке
+        # спецификации (иначе при следующей загрузке позиции «переставляются»).
+        results = self._sort_by_excel(_deduped)
+        self._restored_results = results
         state = self._build_session_state()
         state["results"] = results
         if state["results"] or state["negative_cache"] or state["skip_registry"].get("marked"):
@@ -906,6 +909,8 @@ class MainWindow(QMainWindow):
             if er:
                 _seen_excel.add(er)
             _deduped.append(r)
+        # Канонический порядок — позиции в таблице должны идти как в спецификации.
+        _deduped = self._sort_by_excel(_deduped)
         self._restored_results = _deduped
         self.results_table.setRowCount(0)
         t = TOKENS.get(self._current_theme, TOKENS[Theme.DARK])
@@ -1531,7 +1536,16 @@ class MainWindow(QMainWindow):
         """Обновляет строку результата НА МЕСТЕ после повторного поиска."""
         if row >= self.results_table.rowCount():
             self.results_table.insertRow(self.results_table.rowCount())
-        self._restored_results.append(result)
+        excel_row = result.get("excel_row") or 0
+        # Вставляем в _restored_results по позиции excel_row (список всегда
+        # отсортирован по excel_row) — иначе повторный поиск «переставляет»
+        # позицию в конец списка. Таблица при этом обновляется по месту (row).
+        pos = len(self._restored_results)
+        for i, r in enumerate(self._restored_results):
+            if (r.get("excel_row") or 0) > excel_row:
+                pos = i
+                break
+        self._restored_results.insert(pos, result)
         price = result.get("price")
         conf = result.get("confidence", 0)
         price_text = f"₽{price:,.2f}" if price is not None else "—"
@@ -2050,8 +2064,16 @@ class MainWindow(QMainWindow):
             self._restored_results[replaced_at] = result
             row = replaced_at
         else:
-            self._restored_results.append(result)
-            row = self.results_table.rowCount()
+            # Новая строка — ВСТАВЛЯЕМ по позиции excel_row (список и таблица
+            # всегда отсортированы по excel_row), а НЕ append в конец. Иначе
+            # результаты «переставляют позиции» (например, найденная живьём
+            # дыра 78 вставала в конец таблицы вместо своей позиции).
+            row = len(self._restored_results)
+            for i, r in enumerate(self._restored_results):
+                if (r.get("excel_row") or 0) > excel_row:
+                    row = i
+                    break
+            self._restored_results.insert(row, result)
             self.results_table.insertRow(row)
 
         price = result.get("price")
@@ -2281,6 +2303,15 @@ class MainWindow(QMainWindow):
         """Нормализация для сравнения: lowercase + схлопывание пробелов."""
         return " ".join((text or "").lower().split())
 
+    @staticmethod
+    def _sort_by_excel(results: list) -> list:
+        """Канонический порядок результатов — по возрастанию excel_row.
+
+        Гарантирует, что таблица/сессия всегда идут в порядке спецификации,
+        независимо от порядка поступления результатов (restored/live/остановка).
+        """
+        return sorted(results, key=lambda r: (r.get("excel_row") or 0) or 10 ** 9)
+
     def _fill_session_gaps(self, results: list) -> list:
         """Заполняет дыры в восстановленной сессии пустыми placeholder-записями.
 
@@ -2295,7 +2326,7 @@ class MainWindow(QMainWindow):
         (позиции НИЖЕ неё ещё не обрабатывались — их не трогаем).
         """
         if not results or not self.excel_writer.get_specs():
-            return results
+            return self._sort_by_excel(results) if results else results
         _max_excel = max((r.get("excel_row") or 0) for r in results)
         if _max_excel < 2:
             return results
@@ -2322,12 +2353,11 @@ class MainWindow(QMainWindow):
                 "requires_review": True,
             })
         if not _added:
-            return results
+            return self._sort_by_excel(results)
         logger.warning("Session gap-fill: added %d missing placeholders in range 2..%d",
                        len(_added), _max_excel)
         _merged = list(results) + _added
-        _merged.sort(key=lambda r: (r.get("excel_row") or 0) or 10 ** 9)
-        return _merged
+        return self._sort_by_excel(_merged)
 
     def _merge_session_results(self, runner_results: list) -> list:
         """Merge runner results with original restored results.
@@ -2385,7 +2415,9 @@ class MainWindow(QMainWindow):
             if er:
                 _seen.add(er)
             _out.append(r)
-        return _out
+        # 4. Канонический порядок по excel_row — результаты должны идти в
+        # порядке спецификации (иначе таблица/сессия «переставляют» позиции).
+        return self._sort_by_excel(_out)
 
     def _on_all_done(self, success, spec_result):
         self._spinner_timer.stop()

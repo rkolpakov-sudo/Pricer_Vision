@@ -241,3 +241,56 @@ def test_fill_session_gaps_empty_no_crash(qapp, monkeypatch, tmp_path):
         assert win._fill_session_gaps(None) is None
     finally:
         win.close()
+
+
+def test_sort_by_excel_orders_out_of_order_session(qapp, monkeypatch, tmp_path):
+    """Сессия, сохранённая в беспорядочном виде (84 перед 79), при сортировке
+    приводится к порядку спецификации — позиции не «переставляются»."""
+    win = _monkey_window(monkeypatch, tmp_path, "run: {}\n")
+    try:
+        results = [
+            {"excel_row": 84, "spec_text": "A84", "price": 1.0},
+            {"excel_row": 79, "spec_text": "A79", "price": 2.0},
+            {"excel_row": 151, "spec_text": "A151", "price": 3.0},
+            {"excel_row": 140, "spec_text": "A140", "price": 4.0},
+        ]
+        s = win._sort_by_excel(results)
+        assert [r["excel_row"] for r in s] == [79, 84, 140, 151]
+    finally:
+        win.close()
+
+
+def test_on_row_done_inserts_new_row_at_correct_position(qapp, monkeypatch, tmp_path):
+    """Новый результат (найденный живьём) вставляется по своей позиции
+    excel_row, а НЕ в конец списка (регрессия «переставленных позиций»)."""
+    win = _monkey_window(monkeypatch, tmp_path, "run: {}\n")
+    try:
+        win._restored_results = [
+            {"excel_row": 2, "spec_text": "Т2", "price": 1.0},
+            {"excel_row": 3, "spec_text": "Т3", "price": 2.0},
+            {"excel_row": 79, "spec_text": "Т79", "price": 3.0},
+            {"excel_row": 80, "spec_text": "Т80", "price": 4.0},
+        ]
+        # Найденная «дыра» excel_row 78 должна встать МЕЖДУ 3 и 79, а не в конец
+        win._on_row_done(77, {"excel_row": 78, "spec_text": "Т78", "price": 5.0})
+        rows = [r.get("excel_row") for r in win._restored_results]
+        assert rows == [2, 3, 78, 79, 80], rows
+    finally:
+        win.close()
+
+
+def test_on_row_done_upsert_replaces_in_place(qapp, monkeypatch, tmp_path):
+    """Повторный результат той же позиции (restored + live) заменяется на
+    месте, а не добавляет дубль."""
+    win = _monkey_window(monkeypatch, tmp_path, "run: {}\n")
+    try:
+        win._restored_results = [
+            {"excel_row": 2, "spec_text": "Т2", "price": 1.0},
+            {"excel_row": 3, "spec_text": "Т3", "price": None},
+        ]
+        win._on_row_done(2, {"excel_row": 3, "spec_text": "Т3", "price": 300.0})
+        rows = [r.get("excel_row") for r in win._restored_results]
+        assert rows == [2, 3]
+        assert win._restored_results[1]["price"] == 300.0
+    finally:
+        win.close()
