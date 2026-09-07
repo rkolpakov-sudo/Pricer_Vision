@@ -1888,6 +1888,16 @@ class MainWindow(QMainWindow):
             # мгновенно (без поиска), ненайденные — будут искаться заново.
             _resume_restored = [r for r in _prior_full if r.get("price") is not None]
             self._repopulate_table()
+        elif self._restored_results:
+            # Загруженная сессия + «Старт» = ПРОДОЛЖЕНИЕ, а не прогон с нуля:
+            # найденные цены остаются (восстанавливаются по позиции без поиска),
+            # ищутся заново только позиции БЕЗ цены. Таблица не очищается.
+            _prior_full = list(self._restored_results)
+            self._original_restored_results = list(_prior_full)
+            _resume_restored = [r for r in _prior_full if r.get("price") is not None]
+            self.add_log("INFO", "control",
+                         f"Продолжение сессии: найдено {len(_resume_restored)}, "
+                         f"ищутся ненайденные ({len(_prior_full) - len(_resume_restored)})")
         else:
             self._restored_results = []
             self._original_restored_results = []
