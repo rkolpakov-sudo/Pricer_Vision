@@ -39,6 +39,10 @@ class _FakeExcelWriter:
     def __init__(self, cfg):
         self.ws = None
         self.header_map = None
+        self._specs = []
+
+    def get_specs(self):
+        return self._specs
 
 
 def _monkey_window(monkeypatch, tmp_path, cfg_text):
@@ -169,5 +173,71 @@ def test_row_done_url_col_doubleclick_uses_full_url(qapp, monkeypatch, tmp_path)
             assert opened and opened[0] == full_url
         finally:
             main_mod.QDesktopServices.openUrl = orig
+    finally:
+        win.close()
+
+
+class _Spec:
+    def __init__(self, row, text):
+        self.row = row
+        self.text = text
+        self.brand = ""
+
+
+def _window_with_specs(win, row_texts):
+    """Заполняет excel_writer спеками: row → text."""
+    win.excel_writer._specs = [_Spec(r, t) for r, t in row_texts]
+    return win
+
+
+def test_fill_session_gaps_restores_missing_middle_rows(qapp, monkeypatch, tmp_path):
+    """Сессия покрывает excel_row 2..10, но 5,7,8 отсутствуют — gap-fill должен
+    добавить пустые placeholder-записи для них, а не оставить «новые» позиции."""
+    win = _monkey_window(monkeypatch, tmp_path, "run: {}\n")
+    try:
+        win.excel_writer._specs = [_Spec(r, f"Товар {r}") for r in range(2, 11)]
+        results = [
+            {"excel_row": 2, "spec_text": "Товар 2", "price": 100.0},
+            {"excel_row": 3, "spec_text": "Товар 3", "price": None},
+            {"excel_row": 4, "spec_text": "Товар 4", "price": 400.0},
+            {"excel_row": 6, "spec_text": "Товар 6", "price": 600.0},
+            {"excel_row": 9, "spec_text": "Товар 9", "price": None},
+            {"excel_row": 10, "spec_text": "Товар 10", "price": 1000.0},
+        ]
+        filled = win._fill_session_gaps(results)
+        rows = sorted(r.get("excel_row") for r in filled)
+        assert rows == [2, 3, 4, 5, 6, 7, 8, 9, 10], rows
+        # Заглушки с price None
+        for r in filled:
+            if r.get("excel_row") in (5, 7, 8):
+                assert r.get("price") is None
+                assert r.get("restored") is True
+    finally:
+        win.close()
+
+
+def test_fill_session_gaps_does_not_add_beyond_max(qapp, monkeypatch, tmp_path):
+    """Позиции выше максимального excel_row в сессии не заполняются — они
+    ещё не обрабатывались и должны искаться живьём."""
+    win = _monkey_window(monkeypatch, tmp_path, "run: {}\n")
+    try:
+        win.excel_writer._specs = [_Spec(r, f"Товар {r}") for r in range(2, 14)]
+        results = [
+            {"excel_row": 2, "spec_text": "Товар 2", "price": 100.0},
+            {"excel_row": 4, "spec_text": "Товар 4", "price": 400.0},
+        ]
+        filled = win._fill_session_gaps(results)
+        rows = sorted(r.get("excel_row") for r in filled)
+        # Максимум = 4 → заполняем только 3, позиции 5+ не трогаем
+        assert rows == [2, 3, 4], rows
+    finally:
+        win.close()
+
+
+def test_fill_session_gaps_empty_no_crash(qapp, monkeypatch, tmp_path):
+    win = _monkey_window(monkeypatch, tmp_path, "run: {}\n")
+    try:
+        assert win._fill_session_gaps([]) == []
+        assert win._fill_session_gaps(None) is None
     finally:
         win.close()

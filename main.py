@@ -789,11 +789,19 @@ class MainWindow(QMainWindow):
             if er:
                 _seen_excel.add(er)
             _deduped.append(r)
+        # Gap-fill: если сессия покрывает диапазон позиций (excel_row до
+        # максимального), а часть строк внутри него ОТСУТСТВУЕТ (потерянные
+        # заглушки «не найдено» из-за остановки/краха прошлого прогона) —
+        # добавляем пустые placeholder-записи для ВСЕХ недостающих позиций.
+        # Без этого runner считает такие строки «новыми» и ищет их живьём
+        # заново (и добавляет в конец таблицы не в свою позицию), вместо того
+        # чтобы продолжить сессию с первой НЕ обработанной позиции.
+        _deduped = self._fill_session_gaps(_deduped)
         self._original_restored_results = list(_deduped)
-        # _restored_results заполняется НЕ предзагрузкой, а в _populate через
-        # _on_row_done (как при живом прогоне) — чтобы таблица и список всегда
-        # шли 1:1 и upsert не считал строку «уже показанной».
-        self._restored_results = []
+        # _restored_results заполняется СИНХРОННО, чтобы start_processing
+        # видел непустой список и заходил в ветку «продолжение сессии».
+        # Таблица отрисовывается отложенно (_populate) — это UI-only.
+        self._restored_results = list(_deduped)
         self._restored_row_indices = set()
         for result in _deduped:
             excel_row = result.get("excel_row", 0)
@@ -819,11 +827,11 @@ class MainWindow(QMainWindow):
             self.add_log(entry.get("level", "INFO"), entry.get("phase", "session"),
                          entry.get("msg", ""))
 
-        # Заполнение таблицы результатов ОТЛОЖЕННО (по одной строке на итерацию
-        # event loop). При старте окно ещё в процессе раскладки — синхронный
-        # _on_row_done → results_table.scrollToBottom() в QTimer-колбэке вызывает
-        # re-entrancy deadlock (UI «не отвечает»).
-        _pending = [(i, r) for i, r in enumerate(self._original_restored_results)
+        # Отрисовка таблицы ОТЛОЖЕННА (по одной строке на итерацию event loop).
+        # _restored_results уже заполнен синхронно — таблица просто рендерит
+        # его содержимое. _on_row_done НЕ вызывается (иначе upsert не вставит
+        # строку — запись уже есть в списке).
+        _pending = [(i, r) for i, r in enumerate(self._restored_results)
                     if (r.get("excel_row") or 0) >= 2]
 
         def _populate():
@@ -832,8 +840,7 @@ class MainWindow(QMainWindow):
                 return
             i, result = _pending.pop(0)
             try:
-                result["restored"] = True
-                self._on_row_done(i, result)
+                self._render_restored_row(i, result)
             except Exception as e:
                 logger.error("Session restore row failed: %s", e, exc_info=True)
             QTimer.singleShot(0, _populate)
@@ -848,6 +855,44 @@ class MainWindow(QMainWindow):
             self.toast_manager.success(f"Сессия восстановлена ({len(self._restored_results)} результатов)")
         except Exception:
             pass
+
+    def _render_restored_row(self, idx, result):
+        """Отрисовка строки восстановленной сессии в таблице (read-only)."""
+        row = self.results_table.rowCount()
+        self.results_table.insertRow(row)
+        price = result.get("price")
+        conf = result.get("confidence", 0)
+        price_text = f"₽{price:,.2f}" if price is not None else "—"
+        conf_text = f"{conf:.0%}" if conf else "—"
+        elapsed = result.get("elapsed")
+        elapsed_text = f"{elapsed:.0f}с" if elapsed is not None else "—"
+        site = result.get("site", "")
+        url = result.get("url", "")
+        spec = result.get("spec_text", "")
+        pt = result.get("product_type", "")
+        error = result.get("error", "")
+        brand_mismatch = result.get("brand_mismatch", False)
+        items = [
+            str(idx + 1), spec, pt, price_text, conf_text, elapsed_text,
+            site if site else "", url if url else ""
+        ]
+        t = TOKENS.get(self._current_theme, TOKENS[Theme.DARK])
+        for c, text in enumerate(items):
+            item = QTableWidgetItem(text)
+            if c == 7 and url:
+                item.setToolTip(url)
+                item.setData(Qt.UserRole, url)
+            if c == 1 and spec:
+                item.setToolTip(spec)
+            if error:
+                item.setForeground(QColor(t["danger"]))
+            elif brand_mismatch:
+                item.setForeground(QColor(t["warning"]))
+            elif price is not None:
+                item.setForeground(QColor(t["success"]))
+            else:
+                item.setForeground(QColor(t["warning"]))
+            self.results_table.setItem(row, c, item)
 
     def _repopulate_table(self):
         """Перерисовывает таблицу результатов из _restored_results (без записи в Excel)."""
@@ -1884,20 +1929,22 @@ class MainWindow(QMainWindow):
             # Для слияния при завершении/сбое сохраняем ПОЛНЫЙ исходный список —
             # чтобы ничего ниже выбранной позиции не потерялось.
             self._original_restored_results = list(_prior_full)
-            # Runner получает только найденные результаты: они восстановятся
-            # мгновенно (без поиска), ненайденные — будут искаться заново.
-            _resume_restored = [r for r in _prior_full if r.get("price") is not None]
+            # Runner получает ВСЕ результаты сессии (включая unpriced):
+            # они все восстанавливаются мгновенно (без поиска). Искаться
+            # будут ТОЛЬКО строки, которых не было в сессии (новые позиции).
+            _resume_restored = list(_prior_full)
             self._repopulate_table()
         elif self._restored_results:
             # Загруженная сессия + «Старт» = ПРОДОЛЖЕНИЕ, а не прогон с нуля:
-            # найденные цены остаются (восстанавливаются по позиции без поиска),
-            # ищутся заново только позиции БЕЗ цены. Таблица не очищается.
+            # ВСЕ ранее обработанные строки восстанавливаются (без поиска),
+            # ищутся ТОЛЬКО новые позиции (которых не было в сессии).
             _prior_full = list(self._restored_results)
             self._original_restored_results = list(_prior_full)
-            _resume_restored = [r for r in _prior_full if r.get("price") is not None]
+            _resume_restored = list(_prior_full)
+            _priced = sum(1 for r in _prior_full if r.get("price") is not None)
             self.add_log("INFO", "control",
-                         f"Продолжение сессии: найдено {len(_resume_restored)}, "
-                         f"ищутся ненайденные ({len(_prior_full) - len(_resume_restored)})")
+                         f"Продолжение сессии: восстановлено {len(_resume_restored)} "
+                         f"(с ценой {_priced}), ищутся только новые позиции")
         else:
             self._restored_results = []
             self._original_restored_results = []
@@ -2233,6 +2280,54 @@ class MainWindow(QMainWindow):
     def _norm(text: str) -> str:
         """Нормализация для сравнения: lowercase + схлопывание пробелов."""
         return " ".join((text or "").lower().split())
+
+    def _fill_session_gaps(self, results: list) -> list:
+        """Заполняет дыры в восстановленной сессии пустыми placeholder-записями.
+
+        Если сессия содержит результаты с excel_row вплоть до N (позиции ниже
+        последней обработанной), но ВНУТРИ этого диапазона есть позиции БЕЗ
+        записи — они добавляются с price=None. Причина: при остановке/крахе
+        прошлого прогона строки «не найдено» могли не сохраниться в сессию.
+        Без gap-fill runner считает такие позиции «новыми» и ищет их заново,
+        начиная с середины диапазона вместо продолжения с конца.
+
+        Диапазон заполнения ограничен сверху максимальным excel_row в сессии
+        (позиции НИЖЕ неё ещё не обрабатывались — их не трогаем).
+        """
+        if not results or not self.excel_writer.get_specs():
+            return results
+        _max_excel = max((r.get("excel_row") or 0) for r in results)
+        if _max_excel < 2:
+            return results
+        _present = {(r.get("excel_row") or 0) for r in results}
+        _by_row = {}
+        for s in self.excel_writer.get_specs():
+            if s.row:
+                _by_row[s.row] = s
+        _added = []
+        for er in range(2, _max_excel + 1):
+            if er in _present or er not in _by_row:
+                continue
+            _added.append({
+                "excel_row": er,
+                "spec_text": _by_row[er].text,
+                "spec_brand": getattr(_by_row[er], "brand", "") or "",
+                "price": None,
+                "url": None,
+                "category": None,
+                "found": False,
+                "confidence": 0.0,
+                "reason": "gap-fill: не найден в прошлой сессии",
+                "restored": True,
+                "requires_review": True,
+            })
+        if not _added:
+            return results
+        logger.warning("Session gap-fill: added %d missing placeholders in range 2..%d",
+                       len(_added), _max_excel)
+        _merged = list(results) + _added
+        _merged.sort(key=lambda r: (r.get("excel_row") or 0) or 10 ** 9)
+        return _merged
 
     def _merge_session_results(self, runner_results: list) -> list:
         """Merge runner results with original restored results.
