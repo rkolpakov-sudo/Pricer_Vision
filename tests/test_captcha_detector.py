@@ -51,8 +51,10 @@ def test_case_insensitive():
 def test_recommendations():
     assert CaptchaDetector.get_recommendation(CaptchaType.NONE) == "PROCEED"
     assert CaptchaDetector.get_recommendation(CaptchaType.RECAPTCHA_V2) == "SWITCH_SITE"
-    assert CaptchaDetector.get_recommendation(CaptchaType.RECAPTCHA_V3) == "WAIT_AND_RETRY"
+    # Капча/челлендж НЕ решается ожиданием (30-60с на странице = потеря времени и
+    # «зависание» агента). Все виды ведут к переключению сайта.
+    assert CaptchaDetector.get_recommendation(CaptchaType.RECAPTCHA_V3) == "SWITCH_SITE"
     assert CaptchaDetector.get_recommendation(CaptchaType.HCAPTCHA) == "SWITCH_SITE"
-    assert CaptchaDetector.get_recommendation(CaptchaType.CLOUDFLARE) == "WAIT_60S_AND_RETRY"
+    assert CaptchaDetector.get_recommendation(CaptchaType.CLOUDFLARE) == "SWITCH_SITE"
     assert CaptchaDetector.get_recommendation(CaptchaType.IMAGE) == "ASK_USER"
     assert CaptchaDetector.get_recommendation(CaptchaType.UNKNOWN) == "SWITCH_SITE"

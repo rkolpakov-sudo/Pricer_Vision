@@ -79,9 +79,14 @@ class CaptchaDetector:
         recommendations = {
             CaptchaType.NONE: "PROCEED",
             CaptchaType.RECAPTCHA_V2: "SWITCH_SITE",
-            CaptchaType.RECAPTCHA_V3: "WAIT_AND_RETRY",
+            CaptchaType.RECAPTCHA_V3: "SWITCH_SITE",
             CaptchaType.HCAPTCHA: "SWITCH_SITE",
-            CaptchaType.CLOUDFLARE: "WAIT_60S_AND_RETRY",
+            # Cloudflare challenge НЕ решается ожиданием: это интерактивная
+            # проверка. Ждать 30-60с на странице бесполезно (тратит раунды и
+            # время) — нужно уйти на другой сайт. Регрессия: рекомендация
+            # WAIT_60S_AND_RETRY заставляла агента вызывать browser_wait_for
+            # на 30с+ и «висеть» на заблокированном сайте.
+            CaptchaType.CLOUDFLARE: "SWITCH_SITE",
             CaptchaType.IMAGE: "ASK_USER",
             CaptchaType.UNKNOWN: "SWITCH_SITE",
         }

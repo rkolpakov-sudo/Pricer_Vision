@@ -187,7 +187,7 @@ TOOL_DEFS = [
                inputSchema={"type": "object", "properties": {"target": {"type": "string"}, "text": {"type": "string"}}, "required": ["target", "text"]}),
     types.Tool(name="browser_press_key", description="Press keyboard key: Enter, Escape, ArrowDown, ArrowUp, Tab, Backspace.",
                inputSchema={"type": "object", "properties": {"key": {"type": "string"}}, "required": ["key"]}),
-    types.Tool(name="browser_wait_for", description="Wait for ms milliseconds.",
+    types.Tool(name="browser_wait_for", description="Wait for ms milliseconds. Short waits only (page load/SPA render): use 500-3000ms. Do NOT use >10s — if a page is not loading after a short wait, treat it as broken/blocked and switch site.",
                inputSchema={"type": "object", "properties": {"ms": {"type": "integer", "default": 1000}}}),
     types.Tool(name="browser_evaluate", description="Execute JavaScript in page context. Code MUST be an arrow function: () => expr or async () => expr. Do NOT use return statement. Example: () => document.title",
                inputSchema={"type": "object", "properties": {"function": {"type": "string"}}, "required": ["function"]}),
@@ -1293,7 +1293,11 @@ async def _dispatch(name: str, args: dict) -> str:
         elif name == "browser_press_key":
             return await _driver.press_key(page, args.get("key", ""))
         elif name == "browser_wait_for":
-            ms = max(100, min(int(args.get("ms", 1000)), 30000))
+            # Кап: 30с ожидания никогда не нужны для «загрузки страницы». Если
+            # страница не загрузилась за 10с — это блокировка/captcha/битый сайт,
+            # а не медленная загрузка. Регрессия: агент ждал 30с на заблокированном
+            # cloudflare-сайте (рекомендация WAIT_60S_AND_RETRY).
+            ms = max(100, min(int(args.get("ms", 1000)), 10000))
             await asyncio.sleep(ms / 1000)
             return f"Waited for {ms//1000}"
         elif name in ("browser_evaluate", "browser_run_code_unsafe"):

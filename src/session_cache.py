@@ -87,7 +87,7 @@ class SiteBlacklist:
     """
 
     MAX_STRIKES = 2
-    REASON_LABELS = ("timeout", "force_switch", "max_rounds", "stuck")
+    REASON_LABELS = ("timeout", "force_switch", "max_rounds", "stuck", "captcha")
 
     def __init__(self, limit: int | None = None):
         self._limit = limit or self.MAX_STRIKES
@@ -107,21 +107,30 @@ class SiteBlacklist:
                 key = key[len(prefix):]
         return key
 
-    def strike(self, site_id: str, reason: str | None = None) -> int:
+    def strike(self, site_id: str, reason: str | None = None, ignore_success: bool = False) -> int:
         """Зафиксировать неудачу на сайте. Возвращает новый счётчик.
 
         Причина (timeout/force_switch/max_rounds/stuck) хранится для диагностики.
         Сайт, на котором в этом прогоне УЖЕ найдена цена (mark_success),
         не штрафуется и не блокируется — иначе выбиваем единственный сайт
-        с товаром (случай mircli в прогоне 26.08).
+        с товаром (случай mircli в прогоне 26.08). Исключение — ignore_success
+        (captcha/бан): сайт, который АКТИВНО блокирует запросы, должен уходить
+        в чёрный список независимо от прошлых успехов, иначе агент бесконечно
+        возвращается на него и «виснет» (регрессия: 3 капчи cloudflare на
+        vseinstrumenti.ru, а blacklist показывал 0/2).
         """
         key = self._normalize(site_id)
         if not key:
             return 0
-        if key in self._successful:
+        if key in self._successful and not ignore_success:
             return self._strikes.get(key, 0)
         count = self._strikes.get(key, 0) + 1
         self._strikes[key] = count
+        # Сайт, который дошёл до лимита штрафов через ignore_success (captcha/бан),
+        # больше не считается «успешным» — иначе is_blocked всегда возвращал бы
+        # False из-за проверки _successful, и возврат на сайт не блокировался.
+        if count >= self._limit and key in self._successful:
+            self._successful.discard(key)
         if reason in self.REASON_LABELS:
             reasons = self._reasons.setdefault(key, {})
             reasons[reason] = reasons.get(reason, 0) + 1

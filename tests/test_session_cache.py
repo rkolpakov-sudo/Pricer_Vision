@@ -170,7 +170,33 @@ class TestSiteBlacklist:
         bl.strike("santech.ru", reason="timeout")
         bl.strike("santech.ru", reason="max_rounds")
         assert bl.reasons("santech.ru") == {"timeout": 1, "max_rounds": 1}
-        assert bl.is_blocked("santech.ru") is True
+
+    def test_captcha_reason_recorded(self):
+        bl = SiteBlacklist()
+        bl.strike("santech.ru", reason="captcha")
+        assert bl.reasons("santech.ru") == {"captcha": 1}
+
+    def test_strike_ignore_success_blocks_captcha_site(self):
+        """captcha/бан штрафует даже сайт, где ранее найдена цена: иначе агент
+        бесконечно возвращается на активно блокирующий сайт (3 капчи cloudflare
+        на vseinstrumenti, а blacklist показывал 0/2)."""
+        bl = SiteBlacklist()
+        bl.mark_success("vseinstrumenti.ru")
+        assert bl.strike("vseinstrumenti.ru", reason="captcha") == 0  # успешный не штрафуется
+        assert bl.is_blocked("vseinstrumenti.ru") is False
+        # С ignore_success=True — капча всё же штрафует
+        assert bl.strike("vseinstrumenti.ru", reason="captcha", ignore_success=True) == 1
+        assert bl.strike("vseinstrumenti.ru", reason="captcha", ignore_success=True) == 2
+        assert bl.is_blocked("vseinstrumenti.ru") is True
+        assert bl.reasons("vseinstrumenti.ru") == {"captcha": 2}
+
+    def test_strike_ignore_success_false_keeps_success_protection(self):
+        bl = SiteBlacklist()
+        bl.mark_success("mircli.ru")
+        # обычный штраф на успешный сайт — no-op (защита от выбивания)
+        assert bl.strike("mircli.ru", reason="timeout", ignore_success=False) == 0
+        assert bl.is_blocked("mircli.ru") is False
+        assert "mircli.ru" in bl.successful_sites()
 
     def test_reset_clears_success_and_reasons(self):
         bl = SiteBlacklist()

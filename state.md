@@ -1,5 +1,53 @@
 # State Log
 
+## 2026-09-07 — FIX: captcha/cloudflare → «зависание» агента на минуты + бессмысленное ожидание 30с
+
+### Симптом (лог 18:00-18:25)
+1. Cloudflare-captcha на vseinstrumenti.ru (3 раза за строку: 18:09, 18:15, 18:20).
+2. После капчи агент сам решал ВЕРНУТЬСЯ на заблокированный сайт (в графе был
+   «проверенный подход») и «висел» без действий 180с → idle-timeout убивал строку
+   (Row 380/381 timed out, «несколько минут без действий»).
+3. «Waited for 30» — агент вызывал browser_wait_for на 30с (рекомендация капчи
+   WAIT_60S_AND_RETRY), сервер резал до 30000мс.
+
+### Корень (4 дефекта)
+1. **Captcha не блокировала возврат**: `site_blacklist.strike(domain, "captcha")`
+   был no-op для «успешного» сайта (vseinstrumenti ранее дал цену → mark_success
+   → strike возвращал 0; в логе «struck 0/2»). 3 капчи не блокировали домен.
+2. **cooldown rate-limiter не проверялся при navigate**: агент мог навигировать
+   на домен в cooldown, после чего КАЖДОЕ browser-действие уходило в молчаливый
+   `asyncio.sleep` до конца паузы (до 300с) — без статуса/лога; idle-timeout
+   (180с) убивал строку раньше.
+3. **Рекомендация Cloudflare = WAIT_60S_AND_RETRY** подталкивала агента ждать
+   30-60с на странице капчи (ожидание не решает challenge — трата раундов).
+4. **browser_wait_for позволял до 30с** — для «загрузки страницы» никогда не
+   нужно >10с; 30с = признак блокировки, а не медленной загрузки.
+
+### Фикс
+- `session_cache.py`: `SiteBlacklist.strike(..., ignore_success=False)` — новый
+  параметр; captcha штрафует даже успешный сайт; при достижении лимита сайт
+  снимается из `_successful` (иначе is_blocked всегда False). `"captcha"` добавлен
+  в `REASON_LABELS`. `agent_loop` вызывает `strike(domain, "captcha",
+  ignore_success=True)`.
+- `rate_limiter.py`: метод `cooldown_remaining(url)`.
+- `agent_loop.py`: (а) в `browser_navigate` — гейт: домен в cooldown → error
+  «не заходи, переключись на другой сайт»; (б) для не-navigate browser-действий
+  на сайте в cooldown — блокировка с сообщением вместо молчаливого sleep;
+  (в) cooldown-retry reminder не предлагает возврат, если сайт уже в blacklist;
+  (г) текст после капчи жёстче: «возвращаться нельзя, НЕ жди, переключись».
+- `captcha_detector.py`: Cloudflare и recaptcha_v3 → `SWITCH_SITE` (не
+  WAIT_60S_AND_RETRY / WAIT_AND_RETRY).
+- `browser_server.py`: `browser_wait_for` кап до 10с; описание инструмента —
+  «только короткие ожидания 0.5-3с».
+
+### Тесты
+`test_session_cache` (+3), `test_rate_limiter` (+2), `test_captcha_detector`
+(обновлены рекомендации).
+
+**271 passed** в затронутых файлах.
+
+---
+
 ## 2026-09-07 — FIX: сессия/таблица хранили результаты НЕ в порядке excel_row → «переставленные позиции» при каждом продолжении
 
 ### Симптом (повторный, после gap-fill)

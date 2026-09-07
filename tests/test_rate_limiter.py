@@ -107,6 +107,22 @@ def test_record_block_sets_cooldown():
     assert len(rl.request_history["vseinstrumenti.ru"]) == 0
 
 
+def test_cooldown_remaining_positive_after_block():
+    rl = DomainRateLimiter(min_interval=0.0, jitter=0.0, cooldown_seconds=60)
+    rl.record_block("https://vseinstrumenti.ru/x", cooldown_seconds=60)
+    rem = rl.cooldown_remaining("https://www.vseinstrumenti.ru/y")
+    assert 59.0 < rem <= 60.0
+    # другой домен не в cooldown
+    assert rl.cooldown_remaining("https://dn.ru/") == 0.0
+
+
+def test_cooldown_remaining_zero_after_expiry():
+    rl = DomainRateLimiter(min_interval=0.0, jitter=0.0, cooldown_seconds=0.1)
+    rl.record_block("https://vseinstrumenti.ru/x", cooldown_seconds=0.1)
+    time.sleep(0.2)
+    assert rl.cooldown_remaining("https://vseinstrumenti.ru/x") == 0.0
+
+
 def test_wait_respects_cooldown():
     rl = DomainRateLimiter(min_interval=0.0, jitter=0.0, cooldown_seconds=0.3)
     rl.record_block("https://vseinstrumenti.ru/x", cooldown_seconds=0.3)

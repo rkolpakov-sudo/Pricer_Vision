@@ -868,7 +868,10 @@ async def process_row(
             if _now >= _expiry and _dom not in _cooldown_retried:
                 _cooldown_retried.add(_dom)
                 _cooldown_retry_queue.pop(_dom, None)
-                if not price_confirmed and rounds > 3:
+                # Не предлагать возврат, если сайт уже в чёрном списке сессии
+                # (несколько captcha/бан) — повторные попытки бесполезны.
+                _bl = site_blacklist is not None and site_blacklist.is_blocked(_dom)
+                if not price_confirmed and rounds > 3 and not _bl:
                     messages.append({
                         "role": "user",
                         "content": (
@@ -1037,6 +1040,26 @@ async def process_row(
                                     "(много неудач). Ищи на другом сайте из списка.")
                     })
                     continue
+                # Cooldown после captcha/бана: если на целевой домен установлен
+                # cooldown rate-limiter'ом, возвращаться на него НЕЛЬЗЯ до его
+                # истечения (иначе каждое browser-действие молча спит до конца
+                # паузы — «несколько минут без действий», idle-timeout убивает
+                # строку). Регрессия: после cloudflare-captcha на vseinstrumenti
+                # агент сам решал вернуться и висел 180+ секунд.
+                if (new_domain and rate_limiter is not None):
+                    _cd_remaining = rate_limiter.cooldown_remaining(new_site)
+                    if _cd_remaining > 0:
+                        logger.warning("🚫 Navigate blocked: %s in cooldown (%.0fs left)",
+                                       new_domain, _cd_remaining)
+                        messages.append({
+                            "role": "tool",
+                            "tool_call_id": tc.get("id", ""),
+                            "content": (f"error: сайт {new_domain} в cooldown после captcha/бана "
+                                        f"(ещё {_cd_remaining:.0f}с). НЕ заходи на него сейчас — "
+                                        "он не отвечает. Переключись на ДРУГОЙ сайт из списка "
+                                        "или заверши строку. Вернуться можно будет после паузы."),
+                        })
+                        continue
                 # Жёсткий гейт: если на текущем сайте УЖЕ найдена цена-кандидат
                 # (товар выявлен в результатах/карточке), уходить на ДРУГОЙ домен запрещено,
                 # пока цена не сохранена через save_confirmed_price. Это защита от потери
@@ -1190,6 +1213,22 @@ async def process_row(
                 # evaluate, снапшоты идут на тот же домен и тоже ловят бан при частых
                 # запросах. Для per-site сайтов (vseinstrumenti) интервал больше.
                 if rate_limiter is not None and current_site:
+                    # Если текущий сайт в cooldown (captcha/бан) — НЕ ждать молча
+                    # до конца паузы (это «висение» на минуты и idle-timeout).
+                    # Блокируем действие сразу и просим агента уйти с сайта.
+                    _cur_rem = rate_limiter.cooldown_remaining(current_site)
+                    if _cur_rem > 0:
+                        logger.warning("⛔ Action %s skipped on %s — site in cooldown (%.0fs left)",
+                                       tool_name, _extract_domain(current_site), _cur_rem)
+                        messages.append({
+                            "role": "tool",
+                            "tool_call_id": tc.get("id", ""),
+                            "content": (f"error: текущий сайт {_extract_domain(current_site)} в cooldown "
+                                        f"после captcha/бана (ещё {_cur_rem:.0f}с) — он НЕ отвечает. "
+                                        "НЕ выполняй действия на нём. Немедленно переключись на ДРУГОЙ "
+                                        "сайт через browser_navigate или заверши строку."),
+                        })
+                        continue
                     await rate_limiter.wait_if_needed(current_site)
                 # Совет-предупреждения по вводу запроса (система-советник, не блокировка
                 # решений): дубли запроса, «монстр»-вставка spec_text, деградация с потерей
@@ -1511,13 +1550,22 @@ async def process_row(
                             _cooldown_retry_queue[failed_domain] = (
                                 time.time() + rate_limiter.cooldown_seconds
                             )
-                    # Blacklist site for this session to prevent retrying same blocked site
+                    # Blacklist site for this session to prevent retrying same blocked site.
+                    # ignore_success=True: captcha/бан — сайт АКТИВНО блокирует запросы,
+                    # поэтому штрафуем даже «успешный» сайт (иначе агент бесконечно
+                    # возвращается на заблокированный vseinstrumenti — 3 капчи подряд,
+                    # а blacklist показывал 0/2).
                     if site_blacklist is not None:
-                        site_blacklist.strike(failed_domain, "captcha")
+                        site_blacklist.strike(failed_domain, "captcha", ignore_success=True)
                     _deprecate_site_approaches(memory_manager, product_type, failed_domain, "🚫 Captcha:")
                 except Exception as e:
                     logger.warning("Captcha deprecation failed: %s", e)
-                tool_content = f"Сайт заблокирован captcha/проверкой бота ({captcha_type.value}). Рекомендация: {recommendation}. Домену установлен cooldown — вернёшься к нему позже в этой сессии через паузу (rate limiter сам выдержит ожидание). НЕ пытайся обойти captcha сейчас, переключись на другой сайт."
+                tool_content = (f"🚫 Сайт {failed_domain} заблокирован captcha/проверкой бота "
+                                f"({captcha_type.value}). Домену установлен cooldown "
+                                f"{rate_limiter.cooldown_seconds:.0f}с — возвращаться на него "
+                                "в этой строке НЕЛЬЗЯ (navigate будет отклонён системой). "
+                                "НЕ жди на странице и НЕ пытайся обойти captcha. "
+                                "Переключись на ДРУГОЙ сайт из списка или заверши строку.")
                 messages.append({
                     "role": "tool",
                     "tool_call_id": tc.get("id", ""),

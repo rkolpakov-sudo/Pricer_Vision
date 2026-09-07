@@ -107,6 +107,11 @@ class DomainRateLimiter:
             ts for ts in self.request_history[domain] if ts > cutoff
         ]
 
+    def cooldown_remaining(self, url: str) -> float:
+        """Сколько секунд осталось до конца cooldown домена (0 — не в cooldown)."""
+        domain = _normalize_domain(url)
+        return max(0.0, self._blocked_until.get(domain, 0.0) - time.time())
+
     def get_stats(self, domain: str) -> dict:
         self._cleanup_old_requests(domain)
         last = self.last_request.get(domain, 0)
