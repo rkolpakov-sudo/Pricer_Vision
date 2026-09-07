@@ -47,6 +47,12 @@ SITE_SEARCH_HINTS: dict[str, str] = {
         "запрос в появившееся поле input.search_input и НАЖМИ кнопку/Enter. Не путай "
         "с выбором города."
     ),
+    "rusklimat.ru": (
+        "rusklimat.ru: поле поиска (placeholder «Поиск») может НЕ реагировать на Enter. "
+        "Вводи запрос через browser_type → затем КЛИКНИ кнопку поиска (лупу/кнопку рядом "
+        "с полем) через browser_click. Если Enter не сработал — URL останется на главной. "
+        "Используй прямой URL поиска: https://www.rusklimat.ru/search/?q=ЗАПРОС"
+    ),
 }
 
 SUMMARIZE_MAX_CHARS = get_run_config("summarize_max_chars", 8000)
@@ -834,6 +840,8 @@ async def process_row(
     _global_empty_probes: int = 0
     _global_empty_sites: set[str] = set()
     _global_empty_guidance_sent: bool = False
+    _url_before_enter: str = ""  # URL до нажатия Enter — для детекта «поиск не сработал»
+    _enter_url_unchanged_streak: int = 0  # сколько раз подряд URL не менялся после Enter
     fallback_candidates: list[dict] = []
     rate_limiter = DomainRateLimiter(
         min_interval=get_antidetect_config("rate_limit_min_interval", 1.5),
@@ -1095,6 +1103,8 @@ async def process_row(
                         price_candidate_seen = False
                         recent_errors = []
                         empty_probe_streak.clear()
+                        _url_before_enter = ""
+                        _enter_url_unchanged_streak = 0
                         facts.set_current_site(_extract_domain(new_site), 0)
                         if facts.seen_site(_extract_domain(new_site)):
                             _nav_hint = (f"⚠️ Ты УЖЕ посещал сайт {_extract_domain(new_site)} в этой строке. "
@@ -1112,6 +1122,10 @@ async def process_row(
                         steps = []
                 if rate_limiter is not None:
                     await rate_limiter.wait_if_needed(current_site or "")
+                # Запоминаем URL перед Enter для детекта «поиск не сработал»
+                if (tool_name == "browser_press_key"
+                        and tool_args.get("key", "").lower() in ("enter", "return")):
+                    _url_before_enter = current_site or ""
                 result = await mcp_bridge.call_tool(tool_name, tool_args)
                 facts.record_site_visit(_extract_domain(current_site))
                 if new_site:
@@ -1399,6 +1413,45 @@ async def process_row(
                             if _is_product_card_url(current_site):
                                 facts.record_card_open()
                         break
+                # Детект «поиск не сработал»: после Enter URL не изменился →
+                # форма не сабмитится через Enter, нужен клик по кнопке поиска
+                if (_url_before_enter
+                        and current_site
+                        and _extract_domain(current_site) == _extract_domain(_url_before_enter)
+                        and current_site.rstrip("/") == _url_before_enter.rstrip("/")):
+                    _enter_url_unchanged_streak += 1
+                    if _enter_url_unchanged_streak <= 2:
+                        logger.warning("⚠️ URL unchanged after Enter on %s (streak=%d)",
+                                       _extract_domain(current_site), _enter_url_unchanged_streak)
+                        messages.append({
+                            "role": "user",
+                            "tool_call_id": tc.get("id", ""),
+                            "content": (
+                                f"⚠️ URL не изменился после Enter — поиск по форме НЕ сработал "
+                                f"(страница осталась {current_site}). "
+                                "Возможные причины: (1) поле поиска — НЕ товарный поиск, "
+                                "(2) сайт требует клик по кнопке/лупе вместо Enter, "
+                                "(3) нужен прямой URL поиска. "
+                                "Попробуй: browser_click по кнопке поиска рядом с полем, "
+                                "либо открой прямой URL: https://домен/search/?q=ЗАПРОС. "
+                                "НЕ повторяй Enter — он не сработает."
+                            ),
+                        })
+                    elif _enter_url_unchanged_streak == 3:
+                        messages.append({
+                            "role": "user",
+                            "tool_call_id": tc.get("id", ""),
+                            "content": (
+                                f"🔴 { _enter_url_unchanged_streak} раз подряд URL не изменился после Enter "
+                                f"на {_extract_domain(current_site)} — поиск на этом сайте НЕ работает "
+                                "через форму. Переключись на другой сайт или используй "
+                                "browser_navigate на прямой URL поиска."
+                            ),
+                        })
+                    _url_before_enter = ""
+                else:
+                    _enter_url_unchanged_streak = 0
+                    _url_before_enter = ""
                 # Детект 404 страницы: если агент открыл подсказанную карточку
                 # и страница содержит признаки 404 — помечаем URL как битый.
                 if (_last_hinted_url and current_site == _last_hinted_url
