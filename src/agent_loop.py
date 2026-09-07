@@ -599,6 +599,11 @@ async def process_row(
     if fresh:
         confirmed_prices = [p for p in memory_manager.get_relevant_prices(spec_text, strict_sizes=True)
                             if (p.get("confidence") or 0) >= 0.9]
+        # B4: fallback — если строгий размер ничего не дал, пробуем без strict_sizes
+        # (размер мог быть нормализован иначе при сохранении)./conf >= 0.9.
+        if not confirmed_prices:
+            confirmed_prices = [p for p in memory_manager.get_relevant_prices(spec_text, strict_sizes=False)
+                                if (p.get("confidence") or 0) >= 0.9]
     else:
         confirmed_prices = memory_manager.get_relevant_prices(spec_text, strict_sizes=True)
 
@@ -742,9 +747,14 @@ async def process_row(
         pass
     # When fresh=True, hide cached prices from the LLM entirely
     if fresh:
-        all_tools = mcp_tools + [t for t in GRAPH_TOOL_DEFS if t["function"]["name"] != "get_confirmed_prices"]
+        # B5: оставляем get_confirmed_prices доступным — если code-level rule 8
+        # не сработал (strict_sizes mismatch), агент может запросить цену вручную.
+        all_tools = mcp_tools + GRAPH_TOOL_DEFS
         system_prompt = SYSTEM_PROMPT.replace(
-            "\n8. Если get_confirmed_prices вернул цену с confidence >= 0.9 — используй её как финальную, НЕ проверяй в браузере. Сразу вызови save_confirmed_price.\n", "\n"
+            "\n8. Если get_confirmed_prices вернул цену с confidence >= 0.9 — используй её как финальную, НЕ проверяй в браузере. Сразу вызови save_confirmed_price.\n",
+            "\n8. Режим fresh: ищи в браузере в первую очередь. Но если get_confirmed_prices "
+            "вернул цену с confidence >= 0.9 — можно использовать её как финальную "
+            "(вызови save_confirmed_price без проверки в браузере).\n"
         )
     else:
         all_tools = mcp_tools + GRAPH_TOOL_DEFS
@@ -1007,6 +1017,18 @@ async def process_row(
                                         "результатов, ИЛИ добавь сайт через save_discovered_site.")
                         })
                         continue
+                # B1: блэклист — запрещаем заходить на заблокированные сайты
+                if (new_domain and site_blacklist is not None
+                        and site_blacklist.is_blocked(new_domain)):
+                    logger.warning("🚫 Navigate blocked: domain %s is blacklisted in this session",
+                                   new_domain)
+                    messages.append({
+                        "role": "tool",
+                        "tool_call_id": tc.get("id", ""),
+                        "content": (f"error: сайт {new_domain} заблокирован в этой сессии "
+                                    "(много неудач). Ищи на другом сайте из списка.")
+                    })
+                    continue
                 # Жёсткий гейт: если на текущем сайте УЖЕ найдена цена-кандидат
                 # (товар выявлен в результатах/карточке), уходить на ДРУГОЙ домен запрещено,
                 # пока цена не сохранена через save_confirmed_price. Это защита от потери
@@ -1816,6 +1838,9 @@ async def process_row(
             })
             rounds_on_site = 0
             current_site = ""
+            # B3: сброс price_candidate_seen — агент не должен быть "заперт" на
+            # следующем сайте из-за кандидата, увиденного на предыдущем.
+            price_candidate_seen = False
             _stop_check()
             response = await _llm_call(messages, TEMP_RECOVERY)
             if "error" in response:
@@ -1845,7 +1870,10 @@ async def process_row(
                 # Товар на сайте есть (видели цену) — строка не успела. Подходы НЕ штрафуем.
                 logger.info("Max rounds: price candidate seen on %s — approaches preserved", failed_domain)
             else:
-                _penalize_approaches(memory_manager, _shown_approach_ids(failed_domain), "📉 Max rounds:")
+                # B2: штрафуем ТОЛЬКО последний показанный подход (не все для сайта)
+                _penalize_approaches(memory_manager,
+                                     [_last_shown_approach_id[0]] if _last_shown_approach_id[0] else [],
+                                     "📉 Max rounds:")
         except Exception as e:
             logger.warning("Max rounds deprecation failed: %s", e)
     if fallback_candidates:
