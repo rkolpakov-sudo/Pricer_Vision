@@ -22,7 +22,7 @@ logger = logging.getLogger("pricer.study")
 
 STUDY_PROMPT = """Ты — аналитик по настройке поиска цен на сайтах поставщиков.
 
-Тебе дали URL товара на КОНКРЕТНОМ САЙТЕ. Твоя задача — создать ИНФРАСТРУКТУРУ, чтобы система находила ЛЮБОЙ товар этого типа на этом сайте.
+Тебе дали URL товара на КОНКРЕТНОМ САЙТЕ. Твоя задача — создать ИНФРАСТРУКТУРУ, чтобы система находила ТОВАРЫ ЭТОГО ЖЕ ВИДА (ближайшие аналоги заданного товара) на этом сайте. Заданный товар — ЭТАЛОН. Не переключайся на другие виды товаров.
 
 ПЛАН РАБОТЫ:
 1. Открой URL → изучи карточку товара (цену, название, атрибуты). НЕ сохраняй цену сразу.
@@ -38,7 +38,12 @@ STUDY_PROMPT = """Ты — аналитик по настройке поиска
 7. Сохрани 2+ хинта через save_hint (селекторы, структура страниц, нюансы поиска).
 8. Сохрани концепт (save_concept): тип товара SOLD_AT site.
 
-ВАЖНО: НЕ переходи на другие сайты. Работай ТОЛЬКО с сайтом из URL.
+ВАЖНО — ГРАНИЦЫ РАБОТЫ:
+- НЕ переходи на другие сайты. Работай ТОЛЬКО с сайтом из URL.
+- Работай ТОЛЬКО с ЗАДАННЫМ товаром и его прямыми аналогами из поиска. НЕ исследуй другие категории/товары сайта (не открывай каталоги «краны», «радиаторы», «насосы» и т.п., не ищи через поиск другие товары). Это выходит за рамки задачи и портит обучение.
+- НЕ сохраняй цену, найденную на карточке ДРУГОГО товара (другая модель/артикул), как цену заданного. Если модель на сайте отличается — это сигнал проверить: возможно, это другой товар. Сомневаешься — сохрани цену только если заданный товар действительно найден.
+- ЗАВЕРШЕНИЕ: как только цена сохранена и сохранено ≥3 подходов и ≥2 хинтов — ЗАВЕРШИ работу: напиши итог и слово «завершено». НЕ продолжай обогащать граф без необходимости.
+
 КЛЮЧЕВОЕ: Обязательно протестируй ПОИСК на сайте — это главная цель обучения."""
 
 GRAPH_TOOL_DEFS = [
@@ -233,6 +238,11 @@ class StudyRunner(QThread):
         self._proposed_concepts: list[dict] = []
         self._proposed_sites: list[dict] = []
         self._log_buffer: list[str] = []
+        self._price_saved = False
+        self._stop_after_goals = False
+        self._goals_met_at: int = 0
+        self._study_done = False
+        self._browser_blocked_after_goals = 0
 
     def log(self, msg: str):
         logger.info(msg)
@@ -429,6 +439,12 @@ class StudyRunner(QThread):
             if self._stop_event.is_set():
                 return
 
+            # Жёсткое завершение: цели достигнуты и browser-действия уже
+            # блокировались — не даём агенту продолжать блуждать по сайту.
+            if self._study_done:
+                self.log("⏹ Обучение завершено по достижении целей.")
+                break
+
             response = await llm.chat(messages, all_tools)
             if "error" in response:
                 self.log(f"❌ LLM ошибка: {response['error']}")
@@ -456,21 +472,38 @@ class StudyRunner(QThread):
                     self.log(f"💰 Цена: {validated['price']} (conf: {validated.get('confidence', 0):.0%})")
 
             if not tool_calls:
+                _goals_met = self._goals_met()
                 if content and "заверш" in content.lower():
-                    if len(self._proposed_approaches) >= 3 and len(self._proposed_hints) >= 2:
+                    if _goals_met:
                         break
                     if len(self._proposed_approaches) < 3:
                         force_msg = f"Нужно МИНИМУМ 3 подхода. Сейчас {len(self._proposed_approaches)}. Создай через save_approach с param_slots."
                     elif len(self._proposed_hints) < 2:
                         force_msg = f"Нужно МИНИМУМ 2 хинта. Сейчас {len(self._proposed_hints)}. Создай через save_hint — опиши КАК искать цену на этом сайте (селекторы, метод поиска)."
+                    elif not self._price_saved:
+                        force_msg = "Ты ещё НЕ сохранил цену товара через save_confirmed_price. Сделай это до завершения."
                     else:
                         force_msg = "Продолжай анализ. Обогащай граф: подходы, хинты, концепты."
                     self.log(f"⚠️ {force_msg}")
                     messages.append({"role": "assistant", "content": content or ""})
                     messages.append({"role": "user", "content": force_msg})
                     continue
+                # Агент закончил (написал итог), но не сказал «завершено»:
+                # если цели достигнуты — завершаем; если нет — просим доделать.
+                if _goals_met:
+                    self.log("🏁 Цели достигнуты — завершаю обучение.")
+                    break
                 messages.append({"role": "assistant", "content": content or ""})
-                messages.append({"role": "user", "content": "Продолжай анализ. Обогащай граф: подходы, хинты, концепты."})
+                if not self._price_saved:
+                    force_msg = "Ты НЕ сохранил цену товара через save_confirmed_price. Сначала сохрани цену."
+                elif len(self._proposed_approaches) < 3:
+                    force_msg = f"Нужно МИНИМУМ 3 подхода. Сейчас {len(self._proposed_approaches)}. Создай через save_approach с param_slots."
+                elif len(self._proposed_hints) < 2:
+                    force_msg = f"Нужно МИНИМУМ 2 хинта. Сейчас {len(self._proposed_hints)}. Создай через save_hint — опиши КАК искать цену на этом сайте (селекторы, метод поиска)."
+                else:
+                    force_msg = "Продолжай анализ. Обогащай граф: подходы, хинты, концепты."
+                self.log(f"⚠️ {force_msg}")
+                messages.append({"role": "user", "content": force_msg})
                 continue
 
             msg = (response.get("choices") or [{}])[0].get("message", {})
@@ -479,6 +512,27 @@ class StudyRunner(QThread):
             for tc in tool_calls:
                 tool_name = tc.get("name", "")
                 tool_args = tc.get("arguments", {})
+
+                # Жёсткий стоп после достижения целей: цена + ≥3 подхода + ≥2
+                # хинта сохранены — дальнейшие browser-действия НЕ нужны. Без
+                # этого агент продолжал бродить по каталогу и искать ДРУГИЕ
+                # товары (регрессия: после сифона HL138 начал искать «кран
+                # шаровой»), засоряя граф и тратя раунды.
+                if self._browser_block_allowed(tool_name):
+                    self._browser_blocked_after_goals += 1
+                    self.log(f"⛔ Цель достигнута — browser-действие {tool_name} заблокировано. Заверши работу.")
+                    messages.append({
+                        "role": "tool",
+                        "tool_call_id": tc.get("id", ""),
+                        "content": ("⛔ Цель обучения ДОСТИГНУТА: цена сохранена, подходы и хинты "
+                                    "готовы. Дальнейшие действия в браузере не нужны. "
+                                    "ЗАВЕРШИ работу: напиши итог и слово «завершено»."),
+                    })
+                    if self._browser_blocked_after_goals >= 2:
+                        self.log("⏹ Цель достигнута и browser-действия заблокированы дважды — завершаю.")
+                        self._study_done = True
+                        break
+                    continue
 
                 if tool_name == "ask_user":
                     question = tool_args.get("question", "")
@@ -564,6 +618,24 @@ class StudyRunner(QThread):
                 messages.append({"role": "tool", "tool_call_id": tc.get("id", ""), "content": result_str})
 
         self.log(f"⏱ Анализ завершён. Подходов: {len(self._proposed_approaches)}")
+
+    def _goals_met(self) -> bool:
+        """Все цели обучения достигнуты: цена + ≥3 подхода + ≥2 хинта."""
+        return (self._price_saved
+                and len(self._proposed_approaches) >= 3
+                and len(self._proposed_hints) >= 2)
+
+    def _browser_block_allowed(self, tool_name: str) -> bool:
+        """Нужно ли заблокировать browser-действие, т.к. обучение завершено.
+
+        После достижения целей дальнейшие действия в браузере не нужны —
+        агент не должен блуждать по каталогу и исследовать ДРУГИЕ товары
+        (регрессия: после сифона HL138 агент уходил искать «кран шаровой»).
+        """
+        if not self._goals_met():
+            return False
+        return (tool_name not in GRAPH_TOOL_NAMES
+                and tool_name not in ("ask_user",))
 
     def _proposal_key(self, proposal: dict) -> str:
         site = proposal.get("site", "")
@@ -689,6 +761,7 @@ class StudyRunner(QThread):
                     reason=args.get("reason", "study"),
                 )
                 if pid:
+                    self._price_saved = True
                     mm.record_soldat(args.get("product_type", self._pt), site_id)
                     existing_sites = {s["id"] for s in mm.get_sites(self._pt)}
                     if site_id and site_id not in existing_sites:
