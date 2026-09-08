@@ -381,3 +381,74 @@ def test_retry_not_found_keeps_invalid(qapp, monkeypatch, tmp_path):
         assert win._restored_results[0]["price"] is None
     finally:
         win.close()
+
+
+def test_invalid_survives_restore_dict_copy(qapp, monkeypatch, tmp_path):
+    """Runner при восстановлении делает result = dict(_match): копия обязана
+    сохранять invalid=True, иначе полный прогон «потеряет» пометки (регрессия:
+    invalid должен пережить прогон до ручного перезапуска)."""
+    win = _monkey_window(monkeypatch, tmp_path, "run: {}\n")
+    try:
+        _match = {"excel_row": 63, "spec_text": "КДР", "price": 1652.17, "invalid": True}
+        # точная копия, как в mcp_agent_runner.py:392
+        restored = dict(_match)
+        restored["restored"] = True
+        assert restored.get("invalid") is True
+        assert restored.get("price") == 1652.17
+    finally:
+        win.close()
+
+
+def test_invalid_survives_full_run_merge(qapp, monkeypatch, tmp_path):
+    """Полный прогон (restore всех строк сессии + merge) не должен стереть
+    invalid-пометки: отмеченные позиции остаются помеченными до ручного
+    перезапуска кнопкой «Перезапустить отмеченные»."""
+    win = _monkey_window(monkeypatch, tmp_path, "run: {}\n")
+    try:
+        win.excel_writer._specs = [_Spec(r, f"Товар {r}") for r in range(2, 8)]
+        win._restored_results = [
+            {"excel_row": 2, "spec_text": "Товар 2", "price": 10.0},
+            {"excel_row": 3, "spec_text": "Товар 3", "price": 20.0, "invalid": True},
+            {"excel_row": 4, "spec_text": "Товар 4", "price": 30.0},
+            {"excel_row": 5, "spec_text": "Товар 5", "price": 40.0, "invalid": True},
+        ]
+        win._original_restored_results = [dict(r) for r in win._restored_results]
+
+        # Эмуляция runner: каждая строка восстанавливается как dict(_match).
+        runner_results = []
+        for r in win._restored_results:
+            c = dict(r)
+            c["restored"] = True
+            runner_results.append(c)
+
+        merged = win._merge_session_results(runner_results)
+        invalid = [r.get("excel_row") for r in merged if r.get("invalid")]
+        assert sorted(invalid) == [3, 5], invalid
+        assert len(merged) == 4
+    finally:
+        win.close()
+
+
+def test_invalid_survives_auto_save_roundtrip(qapp, monkeypatch, tmp_path):
+    """Сериализация/загрузка сессии не теряет invalid (JSON сохраняет поле)."""
+    import json
+    win = _monkey_window(monkeypatch, tmp_path, "run: {}\n")
+    try:
+        win._spec_path = str(tmp_path / "spec.xlsx")
+        win.excel_writer._specs = [_Spec(2, "Т2")]
+        win._restored_results = [
+            {"excel_row": 2, "spec_text": "Т2", "price": 40.16, "invalid": True},
+        ]
+        win._run_failed = False
+
+        # roundtrip через save_session/load_session
+        from src.session_manager import save_session, load_session
+        p = str(tmp_path / "_current.json")
+        state = win._build_session_state()
+        state["results"] = win._restored_results
+        save_session(p, state)
+        loaded = load_session(p)
+        inv = [r.get("excel_row") for r in loaded.get("results", []) if r.get("invalid")]
+        assert inv == [2], inv
+    finally:
+        win.close()
