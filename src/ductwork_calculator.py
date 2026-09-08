@@ -206,10 +206,30 @@ _SPEC_CONTEXT_TYPES = {
 # Сантехнические маркеры, которые запрещают отнесение к воздуховодам даже в
 # spec_context="ventilation" (омонимы: отвод/тройник/заглушка канализационные,
 # ППР/ПВХ/чугун/пластик, Ду-номиналы, «переходник» — сантехнический термин).
+# Расширен материалами и типом соединения: латунь/медь/никелир/сталь-труба с
+# резьбой, НР/ВР/дюйм-кавычка «"» (в воздуховодах размеры ТОЛЬКО в мм — кавычка
+# однозначно выдаёт сантехнику), под пайку, приварной (трубный фитинг), артикулы
+# VALTEC (VT./VTr.) — сантехнические фитинги.
 _PLUMBING_OVERRIDE_RE = re.compile(
     r'канализаци|полипропилен|полипроп|полиэтилен|\bППР\b|\bПВХ\b|\bПНД\b'
-    r'|чугун|водопровод|отоплен|пластик|переходник'
-    r'|(?<![a-zа-я0-9])ду\s*\d',
+    r'|\bPPR\b|из\s+ПП[\s,;]|чугун|водопровод|отоплен|пластик|переходник'
+    r'|латунн|медн|никелир|резьбов|резьб[аы]\b|под\s+пайку|приварн'
+    r'|\bНР\b|\bВР\b|\bВН\b|["“”]|сгон|футорк|американк|разъемн'
+    r'|\bVTr?\.|\bVT\.\s*\d|балансировочн'
+    r'|(?<![a-zа-я0-9])ду\s*\d|\bDN\s*\d|\bG1/|\bG3/',
+    re.IGNORECASE,
+)
+
+# Готовые изделия вентиляции (воздухораспределители/диффузоры/решётки/клапаны),
+# которые ПРОДАЮТСЯ как готовые устройства и НЕ рассчитываются модулем листовых
+# воздуховодов. Их цена — рыночная (агент ищет на сайте), а не формула по стали.
+# Омонимы внутри названий (например, диффузор «с регулируемым дефлектором» или
+# «воздухораспределитель для воздуховода КДР») не должны перехватываться модулем.
+# «Дефлектор» как самостоятельный элемент (Дефлектор Ø200) остаётся duct —
+# поэтому его здесь нет: диффузор с «регулируемым дефлектором» ловится словом
+# «диффузор», а не «дефлектор».
+_FINISHED_DEVICE_RE = re.compile(
+    r'воздухораспределител|диффузор|решётк|решетк|клапан|заслонк|воздухоотводчик',
     re.IGNORECASE,
 )
 
@@ -218,20 +238,27 @@ def is_ductwork_row(spec_text: str, product_type: Optional[str] = None,
                     spec_context: Optional[str] = None) -> bool:
     """True, если строка — воздуховод или фасонная часть (а не сантехника).
 
+    Уровень 0 (жёсткие стопы, применяются на ВСЕХ уровнях):
+      - готовые изделия (_FINISHED_DEVICE_RE): диффузоры/распределители/решётки/
+        клапаны/воздухоотводчики — продаются как устройства, модуль их НЕ считает;
+      - сантехника (_PLUMBING_OVERRIDE_RE): материал/резьба/дюйм/ПП/латунь и т.п.
     Уровень 1: узкий детектор 20 типов (иначе 'other' — не вентиляция).
-    Уровень 2: исключение сантехнических омонимов (ниппель, заглушка, отвод/переход/
-    тройник без «круглого/прямоугольного» и без воздуховодного контекста).
+    Уровень 2: исключение сантехнических омонимов.
     Уровень 3: spec_context="ventilation" — если спецификация вентиляционная,
-    обнаруженные элементы считаются воздуховодами (кроме 'other' и сантехники
-    с явными маркерами _PLUMBING_OVERRIDE_RE).
+    обнаруженные элементы считаются воздуховодами (кроме стопов выше).
     """
     if not spec_text or not str(spec_text).strip():
         return False
     name = fix_circle_notation(apply_ocr_fixes(str(spec_text)))
+    low = name.lower()
+    # Уровень 0: жёсткие стопы ДО детектора — они перекрывают любой контекст.
+    if _FINISHED_DEVICE_RE.search(low):
+        return False
+    if _PLUMBING_OVERRIDE_RE.search(low):
+        return False
     elem = detect_element_type(name)
     if elem == "other":
         return False
-    low = name.lower()
     if _DUCT_CONTEXT_RE.search(low):
         return True
     if product_type in _VENTILATION_TYPES:
@@ -239,8 +266,6 @@ def is_ductwork_row(spec_text: str, product_type: Optional[str] = None,
     if elem in _DUCTWORK_UNIQUE_TYPES:
         return True
     if spec_context == "ventilation" and elem in _SPEC_CONTEXT_TYPES:
-        if _PLUMBING_OVERRIDE_RE.search(low):
-            return False
         return True
     # Уровень 4: переход «круглое→прямоугольное сечение» существует только у
     # листовых воздуховодов (в канализации редукторы круглые→круглые/врезки).
@@ -296,6 +321,132 @@ def infer_spec_context(specs, min_duct_rows: int = 3, min_share: float = 0.15) -
     if n_duct >= min_duct_rows and (n_duct / total) >= min_share:
         return "ventilation"
     return None
+
+
+# Максимальный разрыв excel_row между двумя «явными» воздуховодными строками,
+# при котором они считаются одним вент-сегментом.
+_VENT_SEGMENT_GAP = 12
+
+
+def ventilation_segments(specs) -> list[tuple[int, int]]:
+    """Определяет диапазоны excel_row вентиляционных сегментов смешанной спецификации.
+
+    Проблема: файл может содержать и вентиляцию, и сантехнику/отопление
+    (например «Одинцово вент17.07» — excel 2..~366 вентиляция, ~367..447
+    сантехника). spec_context по имени файла («вент») применялся ко ВСЕМ строкам,
+    из-за чего сантехнические ниппели/тройники/отводы в хвосте файла ошибочно
+    попадали в duct calculator.
+
+    Решение: находим строки, ОДНОЗНАЧНО распознаваемые как воздуховоды БЕЗ
+    контекста (явные маркеры «воздуховод/круглого/огнезащита...»), кластеризуем
+    их по близости excel_row, затем РАСШИРЯЕМ каждый сегмент на соседние строки,
+    которые распознаются ПРИ spec_context="ventilation" (неоднозначные фасонные
+    части — «Врезка (Пр)...огнезащита», «Заглушка 400x600» — лежащие сразу за
+    явной воздуховодной строкой). Расширение останавливается на строках, которые
+    НЕ воздуховоды даже с контекстом (сантехника отсекается стопами A).
+
+    Возвращает список (start_excel, end_excel) вент-сегментов (включительно).
+    """
+    by_row: dict[int, object] = {}
+    for s in specs:
+        row = getattr(s, "row", 0)
+        if row:
+            by_row[row] = s
+
+    def _text(s) -> str:
+        return s.text if hasattr(s, "text") else str(s)
+
+    # 1. Явные строки (без контекста) — ядра сегментов.
+    explicit: list[int] = []
+    for row, s in sorted(by_row.items()):
+        try:
+            if is_ductwork_row(_text(s)):
+                explicit.append(row)
+        except Exception:
+            continue
+    if not explicit:
+        return []
+
+    # 2. Кластеризация ядер по близости excel_row.
+    segments: list[tuple[int, int]] = []
+    seg_start = seg_end = explicit[0]
+    for row in explicit[1:]:
+        if row - seg_end <= _VENT_SEGMENT_GAP:
+            seg_end = row
+        else:
+            segments.append((seg_start, seg_end))
+            seg_start = seg_end = row
+    segments.append((seg_start, seg_end))
+
+    # 3. Расширение вправо/влево на неоднозначные строки, распознающиеся с
+    #    вент-контекстом. Допускаются «дыры» (строки вне 20 типов — например
+    #    крестовина, не имеющая своего типа) размером до _VENT_SEGMENT_GAP:
+    #    если за дырой снова идёт duct-строка — вся дыра принадлежит сегменту.
+    def _duct_with_ctx(row: int) -> bool:
+        s = by_row.get(row)
+        if s is None:
+            return False
+        try:
+            return is_ductwork_row(_text(s), spec_context="ventilation")
+        except Exception:
+            return False
+
+    def _rows_in_range(a: int, b: int) -> list[int]:
+        return [r for r in range(a, b + 1) if r in by_row]
+
+    # Продлеваем границу границы вперёд, пока за дырой (≤ gap) снова duct.
+    def _extend_forward(end_row: int) -> int:
+        look = end_row + 1
+        while look - end_row <= _VENT_SEGMENT_GAP:
+            if _duct_with_ctx(look):
+                return look  # нашли следующую duct-строку
+            look += 1
+        return end_row  # duct-строки нет в пределах gap — граница
+
+    def _extend_backward(start_row: int) -> int:
+        look = start_row - 1
+        while start_row - look <= _VENT_SEGMENT_GAP:
+            if _duct_with_ctx(look):
+                return look
+            look -= 1
+        return start_row
+
+    changed = True
+    while changed:
+        changed = False
+        out: list[tuple[int, int]] = []
+        for a, b in segments:
+            # вправо: шагаем по всем строкам, включая «дыры» внутри gap
+            probe = b
+            while True:
+                nxt = _extend_forward(probe)
+                if nxt > probe:
+                    probe = nxt
+                    changed = True
+                else:
+                    break
+            b = probe
+            # влево
+            probe = a
+            while True:
+                prv = _extend_backward(probe)
+                if prv < probe:
+                    probe = prv
+                    changed = True
+                else:
+                    break
+            a = probe
+            if out and a <= out[-1][1] + 1:
+                out[-1] = (out[-1][0], max(out[-1][1], b))
+            else:
+                out.append((a, b))
+        segments = out
+    return segments
+
+
+def excel_in_ventilation(excel_row: int, segments: list[tuple[int, int]]) -> bool:
+    """True, если excel_row попадает внутрь одного из вент-сегментов."""
+    return any(start <= excel_row <= end for start, end in segments)
 
 
 
@@ -505,7 +656,12 @@ def calc_area(element_type: str, name: str) -> float:
         return s_side + s_top
 
     if element_type == 'deflector':
-        d = parse_round_dims(name) or 200
+        # Без Ø-размера расчёт невозможен: возвращаем 0 (а не подставляем Ø200
+        # «по умолчанию»). Иначе любой дефлектор-омоним (диффузор с регулируемым
+        # дефлектором) получает фейковую цену листового дефлектора Ø200.
+        d = parse_round_dims(name)
+        if not d:
+            return 0.0
         d_m = d / 1000
         h_glass = d_m
         d_diff = 1.5 * d_m
@@ -519,8 +675,15 @@ def calc_area(element_type: str, name: str) -> float:
         return s_glass + s_diff + s_cone
 
     if element_type == 'nipple':
+        # Без распознанных Ø-размеров — НЕ считаем: возвращаем 0, а не
+        # подставляем Ø100/0.05м «по умолчанию». Иначе сантехнические ниппели
+        # (латунные резьбовые/приварные/переходные «1" x 3/4"») получали фейковую
+        # цену 40.16₽ листового ниппеля. Размер «5200-5200» неоднозначен —
+        # тоже не угадываем (возврат 0 → строка уходит обычному агенту).
         dims = re.findall(r'Ø\s*(\d+)', name)
-        d1 = float(dims[0]) if dims else 100
+        if len(dims) < 1:
+            return 0.0
+        d1 = float(dims[0])
         d2 = float(dims[1]) if len(dims) > 1 else d1
         l_val = parse_length(name, 0.05)
         return math.pi * (d1 + d2) / 2 / 1000 * l_val
@@ -543,8 +706,12 @@ def calc_area(element_type: str, name: str) -> float:
         return p * math.sqrt(l_val**2 + c_val**2)
 
     if element_type == 'tee_round':
+        # Без Ø-размеров расчёт невозможен — возвращаем 0 (не подставляем
+        # Ø100/0.5м по умолчанию).
         dims = re.findall(r'Ø\s*(\d+)', name)
-        d1 = float(dims[0]) / 1000 if dims else 0.1
+        if not dims:
+            return 0.0
+        d1 = float(dims[0]) / 1000
         d2 = float(dims[1]) / 1000 if len(dims) > 1 else d1
         l1 = parse_length(name, 0.5)
         l2 = 0.25

@@ -120,6 +120,7 @@ class MCPAgentRunner(QThread):
         self._spec_path = spec_path
         self._explicit_spec_context = spec_context
         self._spec_context = None
+        self._vent_segments: list = []
         self._start_row = max(0, start_row)
         self._stop_event = threading.Event()
         self._restart_bridge = threading.Event()
@@ -138,6 +139,13 @@ class MCPAgentRunner(QThread):
 
         Приоритет: явный spec_context (из main) → имя файла («вент») →
         мажоритарное голосование по строкам (не зависит от имени файла).
+
+        ВАЖНО: сам по себе контекст возвращает "ventilation" для файла целиком,
+        но duct calculator применяет его ПОСТРОЧНО через _vent_segments —
+        см. _spec_context_for_row(). Смешанная спецификация (вент + сантехника
+        в одном файле) получает вент-контекст ТОЛЬКО для строк внутри
+        вентиляционных сегментов (иначе сантех-ниппели/тройники в хвосте файла
+        ошибочно уходят в расчёт воздуховодов).
         """
         if self._explicit_spec_context:
             return self._explicit_spec_context
@@ -153,6 +161,25 @@ class MCPAgentRunner(QThread):
             except Exception:
                 return None
         return None
+
+    def _spec_context_for_row(self, spec) -> str | None:
+        """Построчный spec_context: "ventilation" только внутри вент-сегмента.
+
+        Глобальный _spec_context ("ventilation" по имени файла) в смешанной
+        спецификации применялся ко ВСЕМ строкам — включая сантехнический блок
+        (ниппели/тройники латунные/отводы медные в конце файла). Это вызывало
+        ложное отнесение сантехники к воздуховодам. Теперь контекст действует
+        только для строк, лежащих в диапазоне вент-сегмента.
+        """
+        if not self._spec_context:
+            return None
+        row = getattr(spec, "row", 0)
+        if not row or not self._vent_segments:
+            # Нет сегментации (мало данных/вся спецификация однородна) —
+            # возвращаем глобальный контекст (прежнее поведение).
+            return self._spec_context
+        from src.ductwork_calculator import excel_in_ventilation
+        return "ventilation" if excel_in_ventilation(row, self._vent_segments) else None
 
     def _current_metrics(self) -> dict:
         return _build_metrics(
@@ -199,6 +226,17 @@ class MCPAgentRunner(QThread):
         if self._spec_context:
             logger.info("Spec context: %s (ductwork detection enabled for ambiguous rows)",
                         self._spec_context)
+        # Сегментация смешанной спецификации: вент-контекст применяется только к
+        # строкам внутри вентиляционных сегментов (защита от ложного отнесения
+        # сантехники в хвосте файла к воздуховодам).
+        try:
+            from src.ductwork_calculator import ventilation_segments
+            self._vent_segments = ventilation_segments(self.specs)
+            if self._vent_segments:
+                logger.info("Ventilation segments (excel_row): %s", self._vent_segments)
+        except Exception as e:
+            logger.warning("Ventilation segmentation failed: %s", e)
+            self._vent_segments = []
         mm = MemoryManager(engine)
         audit = AuditLogger()
         self.audit_session_id = audit.session_id
@@ -429,7 +467,11 @@ class MCPAgentRunner(QThread):
                                  "headers": spec.headers,
                                  "qty": getattr(spec, "qty", None)} if hasattr(spec, 'article') else None
                     if spec_meta and self._spec_context:
-                        spec_meta["spec_context"] = self._spec_context
+                        # Построчный контекст: в смешанной спецификации (вент +
+                        # сантех) вент-контекст получают только строки внутри
+                        # вент-сегмента. Иначе сантех-ниппели/тройники в хвосте
+                        # файла ошибочно попадали в duct calculator.
+                        spec_meta["spec_context"] = self._spec_context_for_row(spec)
 
                     try:
                         price_candidate_holder = {}

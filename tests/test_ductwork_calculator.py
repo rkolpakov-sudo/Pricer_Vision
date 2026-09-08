@@ -14,6 +14,7 @@ from src.ductwork_calculator import (
     detect_element_type,
     is_ductwork_row, count_ductwork_items, calculate_ductwork_row,
     calc_area, NOMENCLATURE_LENGTHS, infer_spec_context,
+    ventilation_segments, excel_in_ventilation,
 )
 
 
@@ -353,3 +354,120 @@ class TestInferSpecContext:
 
     def test_empty_returns_none(self):
         assert infer_spec_context([]) is None
+
+
+class TestFinishedDevicesNotDuct:
+    """Вариант A: готовые изделия (распределители/диффузоры/решётки/клапаны) не
+    считаются модулем — их цена рыночная, ищется агентом на сайте."""
+
+    def test_air_distributor_not_duct(self):
+        assert not is_ductwork_row("Воздухораспределитель для воздуховода КДР 200х100мм",
+                                   spec_context="ventilation")
+        assert not is_ductwork_row("Воздухораспределитель для воздуховода КДР 400х200мм")
+
+    def test_diffuser_with_deflector_not_duct(self):
+        # «дефлектор» внутри диффузора — регулируемая лопатка, а не крышный дефлектор
+        assert not is_ductwork_row(
+            "Щелевой диффузор линейный серии PV c регулируемым дефлектором, "
+            "С клапаном расхода воздуха F2-PV-20-3", spec_context="ventilation")
+
+    def test_grille_valve_not_duct(self):
+        assert not is_ductwork_row("Воздушный клапан круглого сечения: Ø200",
+                                   spec_context="ventilation")
+        assert not is_ductwork_row("Решётка вентиляционная 400x200")
+
+    def test_deflector_standalone_still_duct(self):
+        # настоящий крышный дефлектор остаётся duct
+        assert is_ductwork_row("Дефлектор Ø200")
+
+
+class TestPlumbingOverrideExpanded:
+    """Вариант A: расширенный сантех-оверрайд (материал/резьба/дюйм/ПП) применяется
+    на ВСЕХ уровнях, даже в spec_context=ventilation."""
+
+    def test_brass_threaded_nipples(self):
+        items = [
+            'Ниппель латунный резьбовой НР 1" VTr.582.N.0006',
+            'Ниппель латунный резьбовой НР 3/4" VTr.582.N.0005',
+            'Ниппель переходной 1" x 3/4"',
+            'Ниппель приварной 1"',
+        ]
+        for item in items:
+            assert not is_ductwork_row(item, spec_context="ventilation"), f"FP: {item}"
+            assert calculate_ductwork_row(item, {"qty": 1, "uom": "шт"},
+                                          spec_context="ventilation") is None
+
+    def test_brass_tee_fittings(self):
+        assert not is_ductwork_row('Тройник латунный резьбовой ВР 1"x1/2"x1"',
+                                   spec_context="ventilation")
+
+    def test_copper_solder_elbow(self):
+        assert not is_ductwork_row('Отвод медный под пайку двухраструбный 3/4" 90°',
+                                   spec_context="ventilation")
+
+    def test_pp_ppr_fittings(self):
+        assert not is_ductwork_row('Муфта переходная наружная из ПП, 25x20 PPR',
+                                   spec_context="ventilation")
+        assert not is_ductwork_row('Тройник переходной из ПП, 25x20x25 PPR',
+                                   spec_context="ventilation")
+        assert not is_ductwork_row('Тройник равнопроходной из ПП, 20 PPR',
+                                   spec_context="ventilation")
+
+    def test_automatic_air_vents_not_duct(self):
+        # сантехнические клапаны спуска воздуха из радиаторов — НЕ воздуховоды
+        assert not is_ductwork_row(
+            'Воздухоотводчик автоматический пружинный, с нижним подключением и '
+            'боковым выпуском, НР 1/2"', spec_context="ventilation")
+
+    def test_real_duct_nipple_kept(self):
+        # настоящий ниппель круглого воздуховода остаётся duct
+        assert is_ductwork_row("Ниппель круглого воздуховода Ø200-Ø200")
+
+
+class TestCalcAreaNoSilentFallback:
+    """Вариант D: без распознанных размеров calc_area возвращает 0, а НЕ молча
+    подставляет дефолтные Ø/длину (иначе сантех-ниппель получал фейковую 40.16₽)."""
+
+    def test_nipple_without_dims_returns_zero(self):
+        assert calc_area("nipple", 'Ниппель латунный резьбовой НР 1" VTr.582.N.0006') == 0.0
+        assert calc_area("nipple", "Ниппель переходной 1\" x 3/4\"") == 0.0
+
+    def test_nipple_with_dims_still_calculates(self):
+        assert calc_area("nipple", "Ниппель Ø200") > 0
+
+    def test_deflector_without_dims_returns_zero(self):
+        assert calc_area("deflector", "Щелевой диффузор линейный") == 0.0
+
+    def test_tee_round_without_dims_returns_zero(self):
+        assert calc_area("tee_round", "Тройник круглый") == 0.0
+
+
+class TestVentilationSegments:
+    """Вариант C: смешанная спецификация (вент + сантех) сегментируется — вент-контекст
+    применяется только к строкам внутри вентиляционных сегментов."""
+
+    class _S:
+        def __init__(self, row, text):
+            self.row = row
+            self.text = text
+
+    def _specs(self):
+        return [
+            self._S(34, "Гибкая вставка прямоугольная ГВ 500x300"),
+            self._S(35, "Гибкая вставка круглая ГВ 160"),
+            # сантех-блок без воздуховодов
+            self._S(421, 'Ниппель латунный резьбовой НР 1" VTr.582.N.0006'),
+            self._S(422, 'Ниппель переходной 1" x 3/4"'),
+            self._S(423, "Ниппель приварной 1\""),
+        ]
+
+    def test_segments_cover_only_vent(self):
+        segs = ventilation_segments(self._specs())
+        assert segs  # гибкие вставки — вент-сегмент
+        assert excel_in_ventilation(34, segs) is True
+        assert excel_in_ventilation(35, segs) is True
+        assert excel_in_ventilation(421, segs) is False
+        assert excel_in_ventilation(422, segs) is False
+
+    def test_empty_no_segments(self):
+        assert ventilation_segments([]) == []
