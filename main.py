@@ -1573,6 +1573,14 @@ class MainWindow(QMainWindow):
         self._spinner.setFixedSize(20, 20)
         self._spinner.tick()
         self._spinner_timer.start()
+        # Показываем текущее действие в статусной строке (пакетный перезапуск).
+        _remaining = len(self._retry_queue)
+        _batch = getattr(self, "_retry_batch_mode", False)
+        if _batch:
+            self.status_label.setText(
+                f"Перезапуск отмеченных: «{spec_text[:45]}…» (осталось {_remaining})")
+        else:
+            self.status_label.setText(f"Повтор: «{spec_text[:60]}»")
         llm_client = llm_providers.create_llm_client(self.config)
         self._retry_row = table_row  # строка, которую сейчас повторяем (для сброса при ошибке)
         # Свежая попытка: снимаем negative-блокировку строки, чтобы runner не
@@ -1609,8 +1617,22 @@ class MainWindow(QMainWindow):
         )
         self._retry_runner.done_signal.connect(self._on_retry_done)
         self._retry_runner.error_signal.connect(self._on_retry_error)
+        self._retry_runner.status_signal.connect(self._on_retry_status)
         self._retry_runner.start()
         self.add_log("INFO", "retry", f"Повтор поиска: {spec_text[:60]}")
+
+    def _on_retry_status(self, status):
+        """Отображает статус retry-runner в строке состояния (живой прогресс)."""
+        try:
+            if isinstance(status, tuple):
+                _, _done, _total, msg = status
+                self.status_label.setText(f"⟳ {str(msg)[:90]}")
+            elif status == "start":
+                self.status_label.setText("Перезапуск…")
+            elif status == "stop":
+                self.status_label.setText("Остановлен")
+        except Exception:
+            pass
 
     def _on_retry_row_done(self, row, result):
         """Обновляет строку результата НА МЕСТЕ после повторного поиска.
@@ -1697,6 +1719,10 @@ class MainWindow(QMainWindow):
     def _on_retry_done(self, ok, results):
         """Одиночный retry-runner завершён. Если в очереди ещё есть отмеченные
         позиции — запускаем следующую; иначе завершаем пакет."""
+        # Сбрасываем активность ПЕРЕД запуском следующей строки: guard в
+        # _retry_single_row (if self._processing_active: return) иначе заблокирует
+        # запуск следующей позиции очереди — пакет зависал после первой строки.
+        self._processing_active = False
         # Если результат строки так и не пришёл (ранний стоп/сбой до row_done),
         # снимаем маркер «поиск…» и возвращаем строку в состояние «не найдено».
         if self._retry_row is not None:

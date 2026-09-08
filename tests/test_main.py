@@ -452,3 +452,50 @@ def test_invalid_survives_auto_save_roundtrip(qapp, monkeypatch, tmp_path):
         assert inv == [2], inv
     finally:
         win.close()
+
+
+def test_batch_queue_advances_after_row_done(qapp, monkeypatch, tmp_path):
+    """Регрессия: пакетный перезапуск зависал после первой строки. Причина —
+    _on_retry_done не сбрасывал _processing_active, и guard в _retry_single_row
+    (if self._processing_active: return) блокировал запуск следующей строки.
+
+    Проверяем: очередь полностью доливается (каждая строка запускается, guard
+    пропускает после сброса флага в _on_retry_done)."""
+    win = _monkey_window(monkeypatch, tmp_path, "run: {}\n")
+    try:
+        win.excel_writer._specs = [_Spec(2, "Т2"), _Spec(3, "Т3")]
+        win._restored_results = [
+            {"excel_row": 2, "spec_text": "Т2", "price": 100.0, "invalid": True},
+            {"excel_row": 3, "spec_text": "Т3", "price": 200.0, "invalid": True},
+        ]
+        win._repopulate_table()
+        win._retry_batch_mode = True
+
+        # Заглушка: запуск строки НЕ стартует реальный runner, а синхронно
+        # завершает её (row_done → done), как сделал бы реальный одиночный retry.
+        calls = []
+        orig = win._retry_single_row
+        def spy(table_row, display_type=""):
+            assert win._processing_active is False, "guard не должен блокировать"
+            calls.append(table_row)
+            spec_item = win.results_table.item(table_row, 1)
+            er = None
+            for r in win._restored_results:
+                if r.get("spec_text") == spec_item.text():
+                    er = r.get("excel_row"); break
+            # сигналим завершение строки (как row_done → done_signal реального runner)
+            win._processing_active = True
+            win._on_retry_row_done(table_row,
+                                   {"excel_row": er, "spec_text": spec_item.text(), "price": 999.0})
+            win._on_retry_done(True, [])
+        win._retry_single_row = spy
+
+        win._retry_queue = [2, 3]
+        win._launch_next_queued_retry()
+
+        assert calls == [0, 1], f"обе строки должны быть запущены, было: {calls}"
+        assert win._retry_queue == []
+        assert win._processing_active is False
+        assert all(not r.get("invalid") for r in win._restored_results)
+    finally:
+        win.close()
