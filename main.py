@@ -527,6 +527,8 @@ class MainWindow(QMainWindow):
         self._restored_results = []
         self._restored_row_indices = set()
         self._retry_row = None
+        self._retry_queue: list[int] = []  # очередь пакетного перезапуска (excel_row)
+        self._retry_batch_mode = False  # идёт ли пакетный перезапуск отмеченных
         self._restored_caches = None
         self._restored_audit_id = ""
         self._original_restored_results = []
@@ -854,6 +856,7 @@ class MainWindow(QMainWindow):
         self.add_log("INFO", "session",
                      f"Сессия восстановлена: {len(self._restored_results)} результатов, "
                      f"{len(self._restored_row_indices)} строк обработано")
+        self._retry_btn_enabled()
         try:
             self.toast_manager.success(f"Сессия восстановлена ({len(self._restored_results)} результатов)")
         except Exception:
@@ -876,7 +879,9 @@ class MainWindow(QMainWindow):
         error = result.get("error", "")
         brand_mismatch = result.get("brand_mismatch", False)
         items = [
-            str(idx + 1), spec, pt, price_text, conf_text, elapsed_text,
+            str(idx + 1), spec, pt,
+            self._invalid_price_text(result, price_text),
+            conf_text, elapsed_text,
             site if site else "", url if url else ""
         ]
         t = TOKENS.get(self._current_theme, TOKENS[Theme.DARK])
@@ -887,14 +892,9 @@ class MainWindow(QMainWindow):
                 item.setData(Qt.UserRole, url)
             if c == 1 and spec:
                 item.setToolTip(spec)
-            if error:
-                item.setForeground(QColor(t["danger"]))
-            elif brand_mismatch:
-                item.setForeground(QColor(t["warning"]))
-            elif price is not None:
-                item.setForeground(QColor(t["success"]))
-            else:
-                item.setForeground(QColor(t["warning"]))
+            item.setForeground(self._result_color(result, t, price, error, brand_mismatch))
+            if result.get("invalid"):
+                item.setToolTip("Помечена невалидной — будет переискана при «Перезапустить отмеченные»")
             self.results_table.setItem(row, c, item)
 
     def _repopulate_table(self):
@@ -930,7 +930,9 @@ class MainWindow(QMainWindow):
             error = result.get("error", "")
             brand_mismatch = result.get("brand_mismatch", False)
             items = [
-                str(idx + 1), spec, pt, price_text, conf_text, elapsed_text,
+                str(idx + 1), spec, pt,
+                self._invalid_price_text(result, price_text),
+                conf_text, elapsed_text,
                 site if site else "", url if url else ""
             ]
             for c, text in enumerate(items):
@@ -940,15 +942,11 @@ class MainWindow(QMainWindow):
                     item.setData(Qt.UserRole, url)
                 if c == 1 and spec:
                     item.setToolTip(spec)
-                if error:
-                    item.setForeground(QColor(t["danger"]))
-                elif brand_mismatch:
-                    item.setForeground(QColor(t["warning"]))
-                elif price is not None:
-                    item.setForeground(QColor(t["success"]))
-                else:
-                    item.setForeground(QColor(t["warning"]))
+                item.setForeground(self._result_color(result, t, price, error, brand_mismatch))
+                if result.get("invalid"):
+                    item.setToolTip("Помечена невалидной — будет переискана при «Перезапустить отмеченные»")
                 self.results_table.setItem(row, c, item)
+        self._retry_btn_enabled()
         self._restored_row_indices = set()
         for result in self._restored_results:
             excel_row = result.get("excel_row", 0)
@@ -1000,6 +998,14 @@ class MainWindow(QMainWindow):
         self.stop_btn.clicked.connect(self.stop_processing)
         self.stop_btn.setEnabled(False)
         top_bar.addWidget(self.stop_btn)
+
+        self.retry_marked_btn = QPushButton("⟳ Перезапустить отмеченные")
+        self.retry_marked_btn.setToolTip(
+            "Перезапустить поиск только для позиций, помеченных как невалидные "
+            "(ПКМ по строке → «Пометить невалидной»)")
+        self.retry_marked_btn.setEnabled(False)
+        self.retry_marked_btn.clicked.connect(self._confirm_and_retry_marked)
+        top_bar.addWidget(self.retry_marked_btn)
 
         self.study_btn = _icon(QPushButton("Обучение"), "menu_book", 18)
         self.study_btn.clicked.connect(self._open_study_tool)
@@ -1259,6 +1265,15 @@ class MainWindow(QMainWindow):
         action_delete.setEnabled(can_edit)
         action_delete.triggered.connect(lambda: self._delete_row_result(row, spec_text))
 
+        # Пометка невалидности: позиция будет переискана кнопкой «Перезапустить
+        # отмеченные». Метка — только GUI-признак, runner её не читает.
+        is_invalid = bool(result.get("invalid"))
+        action_invalid = menu.addAction("Снять пометку «невалидна»" if is_invalid
+                                        else "Пометить невалидной (переискать)")
+        action_invalid.setIcon(ui_icons.icon("block" if not is_invalid else "check", _rt["warning"], 16))
+        action_invalid.setEnabled(can_edit)
+        action_invalid.triggered.connect(lambda: self._toggle_invalid_row(row, spec_text))
+
         action_study = menu.addAction("Обучить агента на этой позиции")
         action_study.setIcon(ui_icons.icon("smart_toy", _rt["text-primary"], 16))
         pt = result.get("product_type", "")
@@ -1291,7 +1306,74 @@ class MainWindow(QMainWindow):
         if ret != QMessageBox.Yes:
             return
         self._purge_row_memory(spec_text)
+        self._retry_queue = []
+        self._retry_batch_mode = False
         self._retry_single_row(table_row)
+
+    def _toggle_invalid_row(self, table_row: int, spec_text: str):
+        """Пометить/снять пометку «невалидна» для строки результата.
+
+        Метка хранится в _restored_results (поле invalid=True) — runner её не
+        читает (это только GUI-признак для пакетного перезапуска). Строка не
+        удаляется и не меняет позицию; сессия сохраняется с меткой.
+        """
+        if self._processing_active:
+            return
+        result = None
+        for r in self._restored_results:
+            if r.get("spec_text") == spec_text:
+                result = r
+                break
+        if result is None:
+            return
+        result["invalid"] = not result.get("invalid")
+        # Перерисовываем только строку, не трогая порядок/структуру.
+        self._repopulate_table()
+        self.add_log("INFO", "user",
+                     f"{'Помечена невалидной' if result['invalid'] else 'Снята пометка невалидности'}: {spec_text[:60]}")
+        self._auto_save_session()
+
+    def _confirm_and_retry_marked(self):
+        """Пакетный перезапуск всех помеченных невалидными позиций.
+
+        Не новый механизм: та же _retry_single_row (fresh-поиск одной строки),
+        но строки ставятся в очередь и запускаются последовательно. Итог —
+        пользовательские отметки «невалидна» просто планируют перепоиск.
+        """
+        if self._processing_active:
+            return
+        marked_excel = []
+        # Собираем excel_row отмеченных позиций (не индексы таблицы — таблица
+        # может перестраиваться; excel_row стабилен и однозначен).
+        for r in self._restored_results:
+            if r.get("invalid"):
+                marked_excel.append(r.get("excel_row") or 0)
+        marked_excel = [er for er in marked_excel if er]
+        if not marked_excel:
+            self.add_log("INFO", "retry", "Нет отмеченных невалидных позиций")
+            return
+        ret = QMessageBox.question(
+            self, "Перезапустить отмеченные",
+            f"Будет повторно выполнен поиск {len(marked_excel)} позиций, "
+            "помеченных как невалидные.\n\n"
+            "Для каждой очищается сохранённая цена и запускается поиск с нуля "
+            "(как «Повторить поиск (с нуля)»).\n\nПродолжить?",
+            QMessageBox.Yes | QMessageBox.No)
+        if ret != QMessageBox.Yes:
+            return
+        # Очищаем память отмеченных строк (чтобы reuse не вернул старую цену).
+        for r in self._restored_results:
+            if r.get("invalid"):
+                try:
+                    self._purge_row_memory(r.get("spec_text", ""))
+                except Exception:
+                    pass
+        self._retry_queue = marked_excel
+        self._retry_batch_mode = True
+        self._retry_btn_enabled()
+        self.add_log("INFO", "retry",
+                     f"Пакетный перезапуск: {len(marked_excel)} отмеченных позиций")
+        self._launch_next_queued_retry()
 
     def _start_from_row(self, table_row: int):
         """Пометить позицию, с которой продолжится поиск по кнопке «Старт».
@@ -1465,11 +1547,6 @@ class MainWindow(QMainWindow):
         if not original_spec:
             self.add_log("WARN", "retry", f"Не найден SpecItem для: {spec_text[:60]}")
             return
-        # Сброс результата в памяти строки (правило reuse не вернёт старую цену)
-        self._restored_results = [
-            r for r in self._restored_results
-            if r.get("spec_text") != spec_text
-        ]
         # Помечаем строку как «идёт повторный поиск» — пользователь видит работу.
         t = TOKENS.get(self._current_theme, TOKENS[Theme.DARK])
         status = "поиск…"
@@ -1490,6 +1567,9 @@ class MainWindow(QMainWindow):
         self.results_table.scrollToItem(self.results_table.item(table_row, 1))
         self.config = self._load_config()
         self._processing_active = True
+        self.start_btn.setEnabled(False)
+        self.stop_btn.setEnabled(True)
+        self._retry_btn_enabled()
         self._spinner.setFixedSize(20, 20)
         self._spinner.tick()
         self._spinner_timer.start()
@@ -1533,19 +1613,37 @@ class MainWindow(QMainWindow):
         self.add_log("INFO", "retry", f"Повтор поиска: {spec_text[:60]}")
 
     def _on_retry_row_done(self, row, result):
-        """Обновляет строку результата НА МЕСТЕ после повторного поиска."""
+        """Обновляет строку результата НА МЕСТЕ после повторного поиска.
+
+        Upsert по excel_row: если запись уже есть в _restored_results (строка
+        помечена invalid / перезапускается повторно) — заменяем её на месте,
+        а не добавляем дубль. Если записи нет — вставляем по позиции excel_row
+        (список всегда отсортирован по excel_row), чтобы повторный поиск не
+        «переставлял» позицию в конец списка.
+        """
         if row >= self.results_table.rowCount():
             self.results_table.insertRow(self.results_table.rowCount())
         excel_row = result.get("excel_row") or 0
-        # Вставляем в _restored_results по позиции excel_row (список всегда
-        # отсортирован по excel_row) — иначе повторный поиск «переставляет»
-        # позицию в конец списка. Таблица при этом обновляется по месту (row).
-        pos = len(self._restored_results)
-        for i, r in enumerate(self._restored_results):
-            if (r.get("excel_row") or 0) > excel_row:
-                pos = i
-                break
-        self._restored_results.insert(pos, result)
+        # Прежний флаг invalid (если строка уже была помечена) — при «не найдено»
+        # метка сохраняется, чтобы позиция оставалась видимой как нерешённая.
+        _was_invalid = False
+        replaced_at = self._existing_row_by_excel(excel_row)
+        if replaced_at >= 0:
+            _was_invalid = bool(self._restored_results[replaced_at].get("invalid"))
+            self._restored_results[replaced_at] = result
+        else:
+            pos = len(self._restored_results)
+            for i, r in enumerate(self._restored_results):
+                if (r.get("excel_row") or 0) > excel_row:
+                    pos = i
+                    break
+            self._restored_results.insert(pos, result)
+        # Перепоиск завершён: найденная цена снимает пометку «невалидна»;
+        # «не найдено» — метка остаётся (позиция всё ещё требует решения).
+        if result.get("price") is not None:
+            result["invalid"] = False
+        else:
+            result["invalid"] = bool(_was_invalid)
         price = result.get("price")
         conf = result.get("confidence", 0)
         price_text = f"₽{price:,.2f}" if price is not None else "—"
@@ -1562,7 +1660,9 @@ class MainWindow(QMainWindow):
         old_num = self.results_table.item(row, 0)
         num = old_num.text() if old_num is not None else str(row + 1)
         items = [
-            num, spec, pt, price_text, conf_text, elapsed_text,
+            num, spec, pt,
+            self._invalid_price_text(result, price_text),
+            conf_text, elapsed_text,
             site if site else "", url if url else ""
         ]
         t = TOKENS.get(self._current_theme, TOKENS[Theme.DARK])
@@ -1573,15 +1673,11 @@ class MainWindow(QMainWindow):
                 item.setData(Qt.UserRole, url)
             if c == 1 and spec:
                 item.setToolTip(spec)
-            if error:
-                item.setForeground(QColor(t["danger"]))
-            elif brand_mismatch:
-                item.setForeground(QColor(t["warning"]))
-            elif price is not None:
-                item.setForeground(QColor(t["success"]))
-            else:
-                item.setForeground(QColor(t["warning"]))
+            item.setForeground(self._result_color(result, t, price, error, brand_mismatch))
+            if result.get("invalid"):
+                item.setToolTip("Помечена невалидной — будет переискана при «Перезапустить отмеченные»")
             self.results_table.setItem(row, c, item)
+        self._retry_btn_enabled()
         # Действия — в контекстном меню строки (ПКМ), кнопок нет.
         self.results_table.scrollToBottom()
         self._retry_row = None
@@ -1599,10 +1695,8 @@ class MainWindow(QMainWindow):
             self.add_log("INFO", "retry", f"Row {row+1}: {price_text} ({conf_text}) on {site}")
 
     def _on_retry_done(self, ok, results):
-        """Retry runner finished."""
-        self._processing_active = False
-        self._spinner_timer.stop()
-        self._spinner.setFixedSize(0, 0)
+        """Одиночный retry-runner завершён. Если в очереди ещё есть отмеченные
+        позиции — запускаем следующую; иначе завершаем пакет."""
         # Если результат строки так и не пришёл (ранний стоп/сбой до row_done),
         # снимаем маркер «поиск…» и возвращаем строку в состояние «не найдено».
         if self._retry_row is not None:
@@ -1614,7 +1708,49 @@ class MainWindow(QMainWindow):
                     cell_item = QTableWidgetItem(text)
                     cell_item.setForeground(QColor(t["warning"]))
                     self.results_table.setItem(row, c, cell_item)
-        self.add_log("INFO", "retry", "Повтор завершён")
+        if self._retry_queue:
+            self._launch_next_queued_retry()
+        else:
+            _batch = getattr(self, "_retry_batch_mode", False)
+            self._finish_retry_batch("Перезапуск отмеченных завершён" if _batch else "Повтор завершён")
+
+    def _finish_retry_batch(self, msg: str):
+        """Сброс UI после завершения пакета перезапуска отмеченных позиций."""
+        self._processing_active = False
+        self._spinner_timer.stop()
+        self._spinner.setFixedSize(0, 0)
+        self.start_btn.setEnabled(True)
+        self.stop_btn.setEnabled(False)
+        self._retry_btn_enabled()
+        self.add_log("INFO", "retry", msg)
+        self.status_label.setText(msg)
+
+    def _launch_next_queued_retry(self):
+        """Берёт следующую отмеченную позицию из очереди и запускает её повтор.
+
+        Очередь хранит excel_row (стабильные ключи); для запуска резолвим их в
+        строку таблицы по spec_text.
+        """
+        if not self._retry_queue:
+            self._retry_batch_mode = False
+            self._finish_retry_batch("Перезапуск отмеченных завершён")
+            return
+        excel_row = self._retry_queue.pop(0)
+        spec_text = ""
+        for r in self._restored_results:
+            if (r.get("excel_row") or 0) == excel_row:
+                spec_text = r.get("spec_text", "")
+                break
+        if not spec_text:
+            self._launch_next_queued_retry()  # позиция исчезла — пропускаем
+            return
+        # Ищем строку таблицы по spec_text (колонка 1).
+        for table_row in range(self.results_table.rowCount()):
+            it = self.results_table.item(table_row, 1)
+            if it is not None and it.text() == spec_text:
+                self._retry_single_row(table_row)
+                return
+        self._launch_next_queued_retry()  # строка не в таблице — пропускаем
 
     def _on_retry_error(self, msg):
         """Ошибка retry-runner: сбрасываем маркер «поиск…» строки."""
@@ -1631,9 +1767,14 @@ class MainWindow(QMainWindow):
                     cell_item = QTableWidgetItem(text)
                     cell_item.setForeground(QColor(t["warning"]))
                     self.results_table.setItem(row, c, cell_item)
+        # Ошибка пакета: прерываем оставшуюся очередь (сообщаем, сколько осталось).
+        remaining = len(self._retry_queue)
+        self._retry_queue = []
+        self._retry_btn_enabled()
         self.start_btn.setEnabled(True)
         self.stop_btn.setEnabled(False)
-        self.status_label.setText(f"Ошибка повтора: {msg[:60]}")
+        suffix = f" (не перезапущено: {remaining})" if remaining else ""
+        self.status_label.setText(f"Ошибка повтора: {msg[:60]}{suffix}")
 
     def add_log(self, level, phase, message):
         entry = {
@@ -1921,6 +2062,7 @@ class MainWindow(QMainWindow):
         self.config = self._load_config()
         self._processing_active = True
         self._run_failed = False
+        self._retry_btn_enabled()
         # Бэкап предыдущей сессии: если прогон упадёт (0 результатов),
         # восстановим данные, а не перезапишем _current.json пустотой.
         self._pre_run_backup = list(self._restored_results) if self._restored_results else []
@@ -2018,11 +2160,20 @@ class MainWindow(QMainWindow):
             return
         if hasattr(self, '_runner') and self._runner:
             self._runner.stop()
+        # Пакетный перезапуск отмеченных тоже останавливается кнопкой «Стоп».
+        if hasattr(self, '_retry_runner') and self._retry_runner:
+            try:
+                self._retry_runner.stop()
+            except Exception:
+                pass
+        self._retry_queue = []
+        self._retry_batch_mode = False
         self._spinner_timer.stop()
         self._spinner.setFixedSize(0, 0)
         self.start_btn.setEnabled(True)
         self.stop_btn.setEnabled(False)
         self._processing_active = False
+        self._retry_btn_enabled()
         self.add_log("INFO", "control", "Остановлено пользователем")
         self.status_label.setText("Остановлен")
 
@@ -2090,7 +2241,9 @@ class MainWindow(QMainWindow):
         brand_mismatch = result.get("brand_mismatch", False)
 
         items = [
-            str(idx + 1), spec, pt, price_text, conf_text, elapsed_text,
+            str(idx + 1), spec, pt,
+            self._invalid_price_text(result, price_text),
+            conf_text, elapsed_text,
             site if site else "", url if url else ""
         ]
         t = TOKENS.get(self._current_theme, TOKENS[Theme.DARK])
@@ -2104,15 +2257,11 @@ class MainWindow(QMainWindow):
                 item.setData(Qt.UserRole, url)
             if c == 1 and spec:
                 item.setToolTip(spec)
-            if error:
-                item.setForeground(QColor(t["danger"]))
-            elif brand_mismatch:
-                item.setForeground(QColor(t["warning"]))
-            elif price is not None:
-                item.setForeground(QColor(t["success"]))
-            else:
-                item.setForeground(QColor(t["warning"]))
+            item.setForeground(self._result_color(result, t, price, error, brand_mismatch))
+            if result.get("invalid"):
+                item.setToolTip("Помечена невалидной — будет переискана при «Перезапустить отмеченные»")
             self.results_table.setItem(row, c, item)
+        self._retry_btn_enabled()
 
         # Действия над строкой — в контекстном меню (ПКМ по строке):
         # повторный поиск, удаление результата, обучение, переклассификация.
@@ -2302,6 +2451,39 @@ class MainWindow(QMainWindow):
     def _norm(text: str) -> str:
         """Нормализация для сравнения: lowercase + схлопывание пробелов."""
         return " ".join((text or "").lower().split())
+
+    def _result_color(self, result: dict, t: dict, price, error: str = "",
+                      brand_mismatch: bool = False):
+        """Цвет строки результата. Пометка invalid («невалидна») перекрывает
+        обычную зелёную цену — строка подсвечивается как требующая внимания."""
+        if result.get("invalid"):
+            return QColor(t["danger"])
+        if error:
+            return QColor(t["danger"])
+        if brand_mismatch:
+            return QColor(t["warning"])
+        if price is not None:
+            return QColor(t["success"])
+        return QColor(t["warning"])
+
+    def _invalid_price_text(self, result: dict, price_text: str) -> str:
+        """Текст цены для строки с пометкой invalid: «⚠ …» чтобы пометка была
+        видна без чтения тултипа."""
+        if result.get("invalid"):
+            return "⚠ " + price_text
+        return price_text
+
+    def _invalid_count(self) -> int:
+        """Число позиций, помеченных пользователем как невалидные."""
+        return sum(1 for r in self._restored_results if r.get("invalid"))
+
+    def _retry_btn_enabled(self):
+        """Обновляет состояние кнопки «Перезапустить отмеченные»."""
+        btn = getattr(self, "retry_marked_btn", None)
+        if btn is not None:
+            n = self._invalid_count()
+            btn.setText(f"⟳ Перезапустить отмеченные ({n})" if n else "⟳ Перезапустить отмеченные")
+            btn.setEnabled(n > 0 and not self._processing_active)
 
     @staticmethod
     def _sort_by_excel(results: list) -> list:

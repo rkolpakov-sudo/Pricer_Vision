@@ -294,3 +294,90 @@ def test_on_row_done_upsert_replaces_in_place(qapp, monkeypatch, tmp_path):
         assert win._restored_results[1]["price"] == 300.0
     finally:
         win.close()
+
+
+def _seed_restored_table(win, specs):
+    """Заполняет _restored_results и перестраивает таблицу (1:1)."""
+    win._restored_results = specs
+    win._repopulate_table()
+    return win
+
+
+def test_toggle_invalid_sets_and_clears_flag(qapp, monkeypatch, tmp_path):
+    win = _monkey_window(monkeypatch, tmp_path, "run: {}\n")
+    try:
+        _seed_restored_table(win, [
+            {"excel_row": 2, "spec_text": "Т2", "price": 100.0},
+            {"excel_row": 3, "spec_text": "Т3", "price": 200.0},
+        ])
+        assert win._invalid_count() == 0
+        win._toggle_invalid_row(0, "Т2")
+        assert win._invalid_count() == 1
+        assert win._restored_results[0]["invalid"] is True
+        assert win.retry_marked_btn.isEnabled() is True
+        # снятие
+        win._toggle_invalid_row(0, "Т2")
+        assert win._invalid_count() == 0
+        assert win.retry_marked_btn.isEnabled() is False
+    finally:
+        win.close()
+
+
+def test_retry_btn_disabled_during_processing(qapp, monkeypatch, tmp_path):
+    win = _monkey_window(monkeypatch, tmp_path, "run: {}\n")
+    try:
+        _seed_restored_table(win, [
+            {"excel_row": 2, "spec_text": "Т2", "price": 100.0, "invalid": True},
+        ])
+        assert win.retry_marked_btn.isEnabled() is True
+        win._processing_active = True
+        win._retry_btn_enabled()
+        assert win.retry_marked_btn.isEnabled() is False
+    finally:
+        win.close()
+
+
+def test_retry_upsert_no_duplicate(qapp, monkeypatch, tmp_path):
+    """Повторный результат (после retry) заменяет существующую запись —
+    не создаёт дубль (регрессия: insert без upsert давал дубль)."""
+    win = _monkey_window(monkeypatch, tmp_path, "run: {}\n")
+    try:
+        win._restored_results = [
+            {"excel_row": 2, "spec_text": "Т2", "price": 100.0},
+            {"excel_row": 3, "spec_text": "Т3", "price": 200.0},
+        ]
+        win._on_retry_row_done(1, {"excel_row": 3, "spec_text": "Т3", "price": 999.0})
+        rows = [r.get("excel_row") for r in win._restored_results]
+        assert rows == [2, 3]
+        assert len(win._restored_results) == 2
+        assert win._restored_results[1]["price"] == 999.0
+    finally:
+        win.close()
+
+
+def test_retry_found_price_clears_invalid(qapp, monkeypatch, tmp_path):
+    """Найденная при перепоиске цена снимает пометку invalid."""
+    win = _monkey_window(monkeypatch, tmp_path, "run: {}\n")
+    try:
+        win._restored_results = [
+            {"excel_row": 2, "spec_text": "Т2", "price": 40.16, "invalid": True},
+        ]
+        win._on_retry_row_done(0, {"excel_row": 2, "spec_text": "Т2", "price": 300.0})
+        assert win._restored_results[0]["invalid"] is False
+        assert win._restored_results[0]["price"] == 300.0
+    finally:
+        win.close()
+
+
+def test_retry_not_found_keeps_invalid(qapp, monkeypatch, tmp_path):
+    """«Не найдено» при перепоиске сохраняет пометку invalid (позиция не решена)."""
+    win = _monkey_window(monkeypatch, tmp_path, "run: {}\n")
+    try:
+        win._restored_results = [
+            {"excel_row": 2, "spec_text": "Т2", "price": 40.16, "invalid": True},
+        ]
+        win._on_retry_row_done(0, {"excel_row": 2, "spec_text": "Т2", "price": None})
+        assert win._restored_results[0]["invalid"] is True
+        assert win._restored_results[0]["price"] is None
+    finally:
+        win.close()
