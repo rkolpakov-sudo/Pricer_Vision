@@ -40,7 +40,7 @@
   - `site_analyzer.py` — SiteAnalyzer: детекция SPA/SSR/антибота (Фаза 3).
   - `captcha_detector.py` — CaptchaDetector: типы captcha + рекомендации, без авторешения (Фаза 3).
   - `mcp_bridge.py` — мультибэкенд-клиент браузерной автоматизации: выбор бэкенда из `config/settings.yaml → browser.backend/backends` (`camoufox` по умолчанию, `playwright`, `nodriver`), автофейловер по цепочке, `mcp_circuit`. Python-бэкенды (`camoufox`/`nodriver`) запускаются через свой venv проекта (`mcp_servers/browser_server.py`), `playwright` — через `npx @playwright/mcp` (пин версии из `deps.playwright_mcp.version`). `_enhance_error` — информативные ошибки Playwright (strict-mode/role-локаторы/ref/fill-таймаут).
-  - `graph_engine.py` + `memory_manager.py` — граф знаний (SQLite `data/pricer.db`, seed из `config/categories_and_sites.yaml`).
+  - `graph_engine.py` + `memory_manager.py` — граф знаний (SQLite `data/pricer.db`, seed из `config/categories_and_sites.yaml`). `load_yaml_seed()` создаёт product_type с проверкой существования ID в БД (без удвоения префикса).
   - `llm_client.py` — HTTP-клиент к LLM (LM Studio/Ollama/llama.cpp/opencode/routerai), retry с backoff из `llm.retry`, per-call `temperature`/`max_tokens`.
   - `llm_providers.py` — реестр провайдеров (opencode/routerai/локальные); креденшиалы парсятся из системы при каждом запуске (env → opencode auth.json → hermes .env, без хранения секретов в проекте); `create_llm_client()` — фабрика клиента из конфига; списки моделей через `/models` + кэш; `model_id_from_combo_text` (id модели из editable-комбобокса).
   - `study_runner.py` — принудительное обучение (StudyRunner QThread).

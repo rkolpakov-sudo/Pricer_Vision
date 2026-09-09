@@ -3,46 +3,77 @@ schema:
   format: categories_and_sites_subcategories
   description: Подкатегории для точного маппинга
   rules:
-  - 'Ищи hard_triggers в подкатегории → определи подкатегорию'
-  - 'Если hard_triggers не сработали → ищи keywords в подкатегории → определи подкатегорию'
+  - Ищи hard_triggers в подкатегории → определи подкатегорию
+  - Если hard_triggers не сработали → ищи keywords в подкатегории → определи подкатегорию
   - 'Внутри подкатегории: primary сайты → secondary → all'
   - 'Priority order: cables(0) > plumbing(1) > electrical(2) > ventilation(3) > instruments(4) > fire(5) > tools(6)'
   size_tokens: TBD
   size_percent: TBD
   optimal_for: Qwen-32b, batch up to 20 positions
-  context_window_recommendation: Keep under 8000 tokens for structured data search
-    tasks
+  context_window_recommendation: Keep under 8000 tokens for structured data search tasks
 excluded_sites:
 - electro-mpo.ru
 hints:
-  - product_type_id: unknown
-    text: "vodokomfort.ru: корпоративный сайт НЕ РАБОТАЕТ через Playwright (JS-оверлей поиска). Используй shop.vodokomfort.ru — там работает стандартный поиск."
-    priority: 0.9
-  - product_type_id: unknown
-    text: "satro-paladin.com: поиск — скрытый оверлей (Digi). Сначала кликни на иконку поиска, чтобы открыть форму, потом вводи запрос и нажимай «Найти»."
-    priority: 0.85
-  - product_type_id: unknown
-    text: "Если get_confirmed_prices вернул цену с confidence >= 0.9 — используй её как финальную, НЕ проверяй в браузере."
-    priority: 0.9
-  - product_type_id: unknown
-    text: "Если 2+ известных сайта не нашли товар по артикулу — используй Яндекс с ПОЛНЫМ названием товара из спецификации. Поиск по полному названию даёт лучшие результаты, чем по артикулу."
-    priority: 0.85
-  - product_type_id: unknown
-    text: "Если сайт использует JS-SPA, поиск через form.submit() может не работать. Если за 5 шагов не нашёл — переключайся на другой сайт."
-    priority: 0.8
-  - product_type_id: unknown
-    text: "Если 2+ известных сайта не дали результата — используй поисковую систему для поиска товара."
-    priority: 0.8
-  - product_type_id: unknown
-    text: "Цены старше 1 месяца помечены ⚠️ и имеют пониженный confidence — такие цены нужно проверять через браузер, они не считаются финальными."
-    priority: 0.7
+- product_type_id: unknown
+  text: 'vodokomfort.ru: корпоративный сайт НЕ РАБОТАЕТ через Playwright (JS-оверлей поиска). Используй shop.vodokomfort.ru
+    — там работает стандартный поиск.'
+  priority: 0.9
+- product_type_id: unknown
+  text: 'satro-paladin.com: поиск — скрытый оверлей (Digi). Сначала кликни на иконку поиска, чтобы открыть форму, потом вводи
+    запрос и нажимай «Найти».'
+  priority: 0.85
+- product_type_id: unknown
+  text: Если get_confirmed_prices вернул цену с confidence >= 0.9 — используй её как финальную, НЕ проверяй в браузере.
+  priority: 0.9
+- product_type_id: unknown
+  text: Если 2+ известных сайта не нашли товар по артикулу — используй Яндекс с ПОЛНЫМ названием товара из спецификации. Поиск
+    по полному названию даёт лучшие результаты, чем по артикулу.
+  priority: 0.85
+- product_type_id: unknown
+  text: Если сайт использует JS-SPA, поиск через form.submit() может не работать. Если за 5 шагов не нашёл — переключайся
+    на другой сайт.
+  priority: 0.8
+- product_type_id: unknown
+  text: Если 2+ известных сайта не дали результата — используй поисковую систему для поиска товара.
+  priority: 0.8
+- product_type_id: unknown
+  text: Цены старше 1 месяца помечены ⚠️ и имеют пониженный confidence — такие цены нужно проверять через браузер, они не
+    считаются финальными.
+  priority: 0.7
 category_map:
   cables:
     priority: 0
     focus: силовые, контрольные, огнестойкие кабели
     subcategories:
-      power_cables:
-        name: Силовые кабели
+      cables_control_signal:
+        name: Контрольные кабели
+        keywords:
+        - RS-232
+        - RS-485
+        - MKЭШ
+        - SHVVP
+        - интерфейсный кабель
+        - кабель сигнализации
+        - сигнальный кабель
+        - контрольный кабель
+        sites:
+        - site: galla-cable.ru
+          priority: all
+        - site: lanmark.ru
+          priority: all
+        - site: tinko.ru
+          priority: all
+        - site: vseinstrumenti.ru
+          priority: all
+        - site: satro-paladin.com
+          priority: all
+        - site: luis.ru
+          priority: all
+        - site: dkc-msk.ru
+          priority: all
+        - site: cabenergy.ru
+          priority: all
+      cables_power_cables:
         name: Силовые кабели
         keywords:
         - АВВГ
@@ -70,6 +101,8 @@ category_map:
         - силовой кабель
         - кабельная линия
         sites:
+        - site: galla-cable.ru
+          priority: primary
         - site: tinko.ru
           priority: secondary
         - site: vseinstrumenti.ru
@@ -78,20 +111,7 @@ category_map:
           priority: all
         - site: luis.ru
           priority: all
-        - site: galla-cable.ru
-          priority: primary
-        hard_triggers:
-        - ВВГ
-        - КВВГ
-        - ПВС
-        - ШВВП
-        - NYM
-        - СИП
-        - АПВ
-        - ВВГнг
-        - АВВГ
-      telecom_cables:
-        name: Кабели связи
+      cables_telecom_cables:
         name: Кабели связи
         keywords:
         - Cat5e
@@ -131,103 +151,16 @@ category_map:
           priority: all
         - site: cabenergy.ru
           priority: all
-        hard_triggers:
-        - Cat5e
-        - Cat6
-        - UTP
-        - FTP
-        - витая пара
-        - оптический кабель
-      control_signal:
-        name: Контрольные кабели
-        name: Контрольные кабели
-        keywords:
-        - RS-232
-        - RS-485
-        - MKЭШ
-        - SHVVP
-        - интерфейсный кабель
-        - кабель сигнализации
-        - сигнальный кабель
-        - контрольный кабель
-        sites:
-        - site: galla-cable.ru
-          priority: all
-        - site: lanmark.ru
-          priority: all
-        - site: tinko.ru
-          priority: all
-        - site: vseinstrumenti.ru
-          priority: all
-        - site: satro-paladin.com
-          priority: all
-        - site: luis.ru
-          priority: all
-        - site: dkc-msk.ru
-          priority: all
-        - site: cabenergy.ru
-          priority: all
-        hard_triggers:
-        - RS-232
-        - RS-485
-        - MKЭШ
-        - SHVVP
-        - интерфейсный кабель
   plumbing_heating:
     priority: 1
-    focus: трубы, арматура, радиаторы, сантехника, насосы
+    focus: трубы, фитинги, краны, насосы, радиаторы, отопление
     subcategories:
-      pipes:
-        name: Трубы
+      pipe_water_gas_galvanized:
+        name: pipe_water_gas_galvanized
         keywords:
-        - PEX
-        - PP-R
-        - PPR
-        - ПНД
-        - полипропилен
-        - полипропиленовая труба
-        - труба
-        - труба для теплого пола
-        - труба сшитый полиэтилен
-        - металлопластик
-        - металлополимерная труба
-        - медная труба
-        - стальная труба
-        - чугунная труба
-        - отвод
-        - переход
-        - муфта
-        - тройник
-        - колено
-        - компенсатор
-        - патрубок
-        - ревизия
-        sites:
-        - site: santech.ru
-          priority: primary
-        - site: lunda.ru
-          priority: primary
-        - site: valtec.ru
-          priority: primary
-        - site: sanext.ru
-          priority: primary
-        - site: dn.ru
-          priority: secondary
-        - site: vseinstrumenti.ru
-          priority: secondary
-        - site: gremir.ru
-          priority: secondary
-        - site: vodokomfort.ru
-          priority: all
-        - site: teremonline.ru
-          priority: all
-        - site: ctpl.ru
-          priority: all
-        - site: reterma.ru
-          priority: all
-        hard_triggers:
-        - труба
-      fittings:
+        - pipe_water_gas_galvanized
+        sites: []
+      plumbing_heating_fittings:
         name: Фитинги
         keywords:
         - фитинг
@@ -237,6 +170,8 @@ category_map:
         - фитинг обжимной
         - фитинг полипропиленовый
         sites:
+        - site: proconsim.ru
+          priority: primary
         - site: santech.ru
           priority: primary
         - site: lunda.ru
@@ -253,85 +188,7 @@ category_map:
           priority: all
         - site: teremonline.ru
           priority: all
-        hard_triggers: []
-      valves_armature:
-        name: Краны и арматура
-        keywords:
-        - кран
-        - кран шаровой
-        - шаровой кран
-        - вентиль
-        - задвижка
-        - затвор
-        - запорный клапан
-        - клапан
-        - балансировочный
-        - балансировочный клапан
-        - регулирующий клапан
-        - термостатический клапан
-        - воздухоотводчик
-        - фильтр
-        - водорозетка
-        - сифон
-        sites:
-        - site: santech.ru
-          priority: primary
-        - site: lunda.ru
-          priority: primary
-        - site: valtec.ru
-          priority: primary
-        - site: ridan.ru
-          priority: primary
-        - site: dn.ru
-          priority: secondary
-        - site: vseinstrumenti.ru
-          priority: secondary
-        - site: gremir.ru
-          priority: secondary
-        - site: vodokomfort.ru
-          priority: all
-        - site: teremonline.ru
-          priority: all
-        hard_triggers:
-        - кран шаровой
-        - вентиль
-        - задвижка
-      radiators:
-        name: Радиаторы
-        keywords:
-        - радиатор
-        - батарея
-        - алюминиевый радиатор
-        - биметаллический радиатор
-        - стальной радиатор
-        - чугунный радиатор
-        - панельный радиатор
-        - дизайн-радиатор
-        - полотенцесушитель
-        sites:
-        - site: santech.ru
-          priority: primary
-        - site: lunda.ru
-          priority: primary
-        - site: vseinstrumenti.ru
-          priority: secondary
-        - site: ridan.ru
-          priority: secondary
-        - site: royal-thermo.ru
-          priority: all
-        - site: prado-ru.ru
-          priority: all
-        - site: rusklimat.ru
-          priority: all
-        - site: ctpl.ru
-          priority: all
-        - site: reterma.ru
-          priority: all
-        - site: magazin01.ru
-          priority: all
-        hard_triggers:
-        - радиатор
-      heating_equipment:
+      plumbing_heating_heating_equipment:
         name: Отопительное оборудование
         keywords:
         - конвектор
@@ -375,45 +232,61 @@ category_map:
           priority: all
         - site: magazin01.ru
           priority: all
-        hard_triggers:
-        - котёл
-        - ИТП
-      sanitary_ware:
-        name: Сантехника
+        - site: hidrocontrol.ru
+          priority: all
+      plumbing_heating_pipes:
+        name: Трубы
         keywords:
-        - ванна
-        - раковина
-        - умывальник
-        - унитаз
-        - биде
-        - душ
-        - душевой поддон
-        - душевой уголок
-        - смеситель
-        - инсталляция
-        - мойка кухонная
-        - сифон
-        - воронка
-        - канализац
+        - PEX
+        - PP-R
+        - PPR
+        - ПНД
+        - полипропилен
+        - полипропиленовая труба
+        - труба
+        - труба для теплого пола
+        - труба сшитый полиэтилен
+        - металлопластик
+        - металлополимерная труба
+        - медная труба
+        - стальная труба
+        - чугунная труба
+        - отвод
+        - переход
+        - муфта
+        - тройник
+        - колено
+        - компенсатор
+        - патрубок
+        - ревизия
         sites:
+        - site: proconsim.ru
+          priority: primary
         - site: santech.ru
           priority: primary
         - site: lunda.ru
           priority: primary
-        - site: vseinstrumenti.ru
-          priority: secondary
+        - site: valtec.ru
+          priority: primary
+        - site: sanext.ru
+          priority: primary
         - site: dn.ru
           priority: secondary
-        - site: gremir.ru
+        - site: vseinstrumenti.ru
           priority: secondary
-        - site: sanext.ru
+        - site: gremir.ru
           priority: secondary
         - site: vodokomfort.ru
           priority: all
         - site: teremonline.ru
           priority: all
-        hard_triggers: []
-      pumps_water:
+        - site: ctpl.ru
+          priority: all
+        - site: reterma.ru
+          priority: all
+        - site: as-tim.ru
+          priority: all
+      plumbing_heating_pumps_water:
         name: Насосы
         keywords:
         - насос
@@ -453,36 +326,133 @@ category_map:
           priority: all
         - site: teremonline.ru
           priority: all
-        hard_triggers:
-        - насос
-  electrical:
-    priority: 2
-    focus: модульное оборудование, щиты, электроустановочные изделия
-    subcategories:
-      ups:
-        name: ИБП
+      plumbing_heating_radiators:
+        name: Радиаторы
         keywords:
-        - ИБП
-        - UPS
-        - бесперебойник
-        - источник бесперебойного питания
-        - стабилизатор
-        - стабилизатор напряжения
+        - радиатор
+        - батарея
+        - алюминиевый радиатор
+        - биметаллический радиатор
+        - стальной радиатор
+        - чугунный радиатор
+        - панельный радиатор
+        - дизайн-радиатор
+        - полотенцесушитель
         sites:
         - site: satro-paladin.com
           priority: primary
-        - site: tinko.ru
+        - site: mircli.ru
+          priority: primary
+        - site: santech.ru
+          priority: primary
+        - site: lunda.ru
+          priority: primary
+        - site: vseinstrumenti.ru
+          priority: secondary
+        - site: ridan.ru
+          priority: secondary
+        - site: royal-thermo.ru
+          priority: all
+        - site: prado-ru.ru
+          priority: all
+        - site: rusklimat.ru
+          priority: all
+        - site: ctpl.ru
+          priority: all
+        - site: reterma.ru
+          priority: all
+        - site: magazin01.ru
+          priority: all
+        - site: prado-moscow.ru
+          priority: all
+      plumbing_heating_sanitary_ware:
+        name: Сантехника
+        keywords:
+        - ванна
+        - раковина
+        - умывальник
+        - унитаз
+        - биде
+        - душ
+        - душевой поддон
+        - душевой уголок
+        - смеситель
+        - инсталляция
+        - мойка кухонная
+        - сифон
+        - воронка
+        - канализац
+        sites:
+        - site: santech.ru
+          priority: primary
+        - site: lunda.ru
+          priority: primary
+        - site: vseinstrumenti.ru
+          priority: secondary
+        - site: dn.ru
+          priority: secondary
+        - site: gremir.ru
+          priority: secondary
+        - site: sanext.ru
+          priority: secondary
+        - site: vodokomfort.ru
+          priority: all
+        - site: teremonline.ru
+          priority: all
+        - site: online.el-com.ru
+          priority: all
+      plumbing_heating_valves_armature:
+        name: Краны и арматура
+        keywords:
+        - кран
+        - кран шаровой
+        - шаровой кран
+        - вентиль
+        - задвижка
+        - затвор
+        - запорный клапан
+        - клапан
+        - балансировочный
+        - балансировочный клапан
+        - регулирующий клапан
+        - термостатический клапан
+        - воздухоотводчик
+        - фильтр
+        - водорозетка
+        - сифон
+        sites:
+        - site: teploshop.ru
+          priority: primary
+        - site: santech.ru
+          priority: primary
+        - site: lunda.ru
+          priority: primary
+        - site: valtec.ru
+          priority: primary
+        - site: ridan.ru
+          priority: primary
+        - site: dn.ru
           priority: secondary
         - site: vseinstrumenti.ru
           priority: secondary
-        - site: keaz.ru
+        - site: gremir.ru
+          priority: secondary
+        - site: vodokomfort.ru
           priority: all
-        hard_triggers:
-        - ИБП
-        - UPS
-        - бесперебойник
-        - стабилизатор
-      batteries:
+        - site: teremonline.ru
+          priority: all
+        - site: g-kabel.ru
+          priority: all
+      plumbing_heating_гибкая_подводка:
+        name: гибкая_подводка
+        keywords:
+        - гибкая_подводка
+        sites: []
+  electrical:
+    priority: 2
+    focus: аккумуляторы, ИБП, коммутация, освещение
+    subcategories:
+      electrical_batteries:
         name: Аккумуляторы
         keywords:
         - АКБ
@@ -496,10 +466,21 @@ category_map:
           priority: secondary
         - site: vseinstrumenti.ru
           priority: secondary
-        hard_triggers:
-        - АКБ
-        - аккумулятор
-      switchgear:
+      electrical_lighting:
+        name: Освещение
+        keywords:
+        - светильник
+        - лампа
+        - прожектор
+        - светодиодный светильник
+        sites:
+        - site: vseinstrumenti.ru
+          priority: primary
+        - site: satro-paladin.com
+          priority: secondary
+        - site: tinko.ru
+          priority: secondary
+      electrical_switchgear:
         name: Коммутация
         keywords:
         - автомат
@@ -519,32 +500,110 @@ category_map:
           priority: secondary
         - site: vseinstrumenti.ru
           priority: all
-        hard_triggers:
-        - АВР
-        - автомат
-        - выключатель
-      lighting:
-        name: Освещение
+        - site: termokit.ru
+          priority: all
+        - site: ventkomfort.ru
+          priority: all
+      electrical_ups:
+        name: ИБП
         keywords:
-        - светильник
-        - лампа
-        - прожектор
-        - светодиодный светильник
+        - ИБП
+        - UPS
+        - бесперебойник
+        - источник бесперебойного питания
+        - стабилизатор
+        - стабилизатор напряжения
         sites:
-        - site: vseinstrumenti.ru
-          priority: primary
         - site: satro-paladin.com
-          priority: secondary
+          priority: primary
         - site: tinko.ru
           priority: secondary
-        hard_triggers:
-        - светильник
-        - прожектор
+        - site: vseinstrumenti.ru
+          priority: secondary
+        - site: keaz.ru
+          priority: all
+      terminal_block_dkc:
+        name: terminal_block_dkc
+        keywords:
+        - terminal_block_dkc
+        sites:
+        - site: dkc-msk.ru
+          priority: primary
   ventilation_climate:
     priority: 3
-    focus: вентиляторы, кондиционеры, тепловые завесы, приточные установки
+    focus: вентиляция, кондиционирование, климат-обогрев
     subcategories:
-      ventilation:
+      ventilation_climate_climate_heating:
+        name: Климат-обогрев
+        keywords:
+        - тепловая завеса
+        - тепловая завеса водяная
+        - тепловая завеса промышленная
+        - тепловая завеса электрическая
+        - воздушно-тепловая завеса
+        - тепловентилятор
+        - тепловая пушка
+        - инфракрасный обогреватель
+        - электрокалорифер
+        - калорифер
+        - водяной калорифер
+        - обогрев кровли
+        - обогрев трубопровода
+        - система снеготаяния
+        - греющий кабель
+        - кабель обогрева
+        - электрообогрев
+        - теплый пол кабельный
+        - прошивной мат
+        - моноблочная установка
+        sites:
+        - site: b2b.rusklimat.com
+          priority: primary
+        - site: rusklimat.ru
+          priority: secondary
+        - site: kvent.ru
+          priority: secondary
+        - site: vseinstrumenti.ru
+          priority: secondary
+        - site: satro-paladin.com
+          priority: all
+      ventilation_climate_conditioning:
+        name: Кондиционирование
+        keywords:
+        - кондиционер
+        - кондиционер мобильный
+        - кондиционер оконный
+        - сплит
+        - сплит-система
+        - канальный кондиционер
+        - кассетный кондиционер
+        - колонный кондиционер
+        - мульти-сплит
+        - VRF-система
+        - чиллер
+        - фанкойл
+        - хладагент
+        - фреон
+        - тепловой насос
+        - тепловой насос воздух-вода
+        - тепловой насос воздух-воздух
+        - тепловой насос грунт-вода
+        - осушитель
+        - осушитель воздуха
+        - дренажный насос
+        - кронштейн кондиционера
+        - медная труба
+        - трубка медная
+        sites:
+        - site: b2b.rusklimat.com
+          priority: primary
+        - site: rusklimat.ru
+          priority: secondary
+        - site: vseinstrumenti.ru
+          priority: secondary
+        - site: satro-paladin.com
+          priority: all
+      ventilation_climate_ventilation:
         name: Вентиляция
         keywords:
         - вентилятор
@@ -610,136 +669,27 @@ category_map:
         - звукоизоляция
         - шумоизоляция
         sites:
+        - site: rusklimat.ru
+          priority: primary
+        - site: shuft.com.ru
+          priority: primary
+        - site: vent-style.ru
+          priority: primary
+        - site: венторус.рф
+          priority: primary
         - site: kvent.ru
           priority: primary
         - site: vseinstrumenti.ru
           priority: secondary
         - site: satro-paladin.com
           priority: all
-        hard_triggers:
-        - вентилятор
-        - воздуховод
-      conditioning:
-        name: Кондиционирование
-        keywords:
-        - кондиционер
-        - кондиционер мобильный
-        - кондиционер оконный
-        - сплит
-        - сплит-система
-        - канальный кондиционер
-        - кассетный кондиционер
-        - колонный кондиционер
-        - мульти-сплит
-        - VRF-система
-        - чиллер
-        - фанкойл
-        - хладагент
-        - фреон
-        - тепловой насос
-        - тепловой насос воздух-вода
-        - тепловой насос воздух-воздух
-        - тепловой насос грунт-вода
-        - осушитель
-        - осушитель воздуха
-        - дренажный насос
-        - кронштейн кондиционера
-        - медная труба
-        - трубка медная
-        sites:
-        - site: b2b.rusklimat.com
-          priority: primary
-        - site: rusklimat.ru
-          priority: secondary
-        - site: vseinstrumenti.ru
-          priority: secondary
-        - site: satro-paladin.com
+        - site: арктос.рус
           priority: all
-        hard_triggers:
-        - кондиционер
-        - сплит-система
-        - чиллер
-      climate_heating:
-        name: Климат-обогрев
-        keywords:
-        - тепловая завеса
-        - тепловая завеса водяная
-        - тепловая завеса промышленная
-        - тепловая завеса электрическая
-        - воздушно-тепловая завеса
-        - тепловентилятор
-        - тепловая пушка
-        - инфракрасный обогреватель
-        - электрокалорифер
-        - калорифер
-        - водяной калорифер
-        - обогрев кровли
-        - обогрев трубопровода
-        - система снеготаяния
-        - греющий кабель
-        - кабель обогрева
-        - электрообогрев
-        - теплый пол кабельный
-        - прошивной мат
-        - моноблочная установка
-        sites:
-        - site: b2b.rusklimat.com
-          priority: primary
-        - site: rusklimat.ru
-          priority: secondary
-        - site: kvent.ru
-          priority: secondary
-        - site: vseinstrumenti.ru
-          priority: secondary
-        - site: satro-paladin.com
-          priority: all
-        hard_triggers:
-        - тепловая завеса
-        - тепловентилятор
   instruments_automation:
     priority: 4
-    focus: КИПиА, датчики, ПЛК, приборы учёта
+    focus: автоматизация, КИПиА, датчики, СКУД
     subcategories:
-      kipia_sensors:
-        name: КИПиА и датчики
-        keywords:
-        - датчик
-        - датчик давления
-        - датчик движения
-        - датчик температуры
-        - манометр
-        - термоманометр
-        - термометр
-        - расходомер
-        - преобразователь
-        - измерение
-        - модуль измерен
-        - прибор приемно-контрольный
-        - Fluke
-        - Testo
-        - Flir
-        - Condtrol
-        - ADA
-        - Optris
-        - КИП
-        sites:
-        - site: propribory.ru
-          priority: primary
-        - site: tinko.ru
-          priority: secondary
-        - site: electro-mpo.ru
-          priority: all
-        - site: vseinstrumenti.ru
-          priority: all
-        - site: dn.ru
-          priority: all
-        - site: satro-paladin.com
-          priority: all
-        hard_triggers:
-        - датчик
-        - манометр
-        - расходомер
-      automation_plc:
+      instruments_automation_automation_plc:
         name: Автоматизация и ПЛК
         keywords:
         - ПЛК
@@ -767,22 +717,56 @@ category_map:
         - система диспетчеризации
         - диспетчеризация
         sites:
+        - site: vent-element.ru
+          priority: primary
         - site: pulsar-msk.ru
           priority: primary
         - site: tinko.ru
           priority: secondary
-        - site: electro-mpo.ru
-          priority: all
         - site: vseinstrumenti.ru
           priority: all
         - site: dn.ru
           priority: all
         - site: satro-paladin.com
           priority: all
-        hard_triggers:
-        - контроллер
-        - ПЛК
-      metering:
+        - site: vent.center
+          priority: all
+        - site: все-вентиляторы.рф
+          priority: all
+      instruments_automation_kipia_sensors:
+        name: КИПиА и датчики
+        keywords:
+        - датчик
+        - датчик давления
+        - датчик движения
+        - датчик температуры
+        - манометр
+        - термоманометр
+        - термометр
+        - расходомер
+        - преобразователь
+        - измерение
+        - модуль измерен
+        - прибор приемно-контрольный
+        - Fluke
+        - Testo
+        - Flir
+        - Condtrol
+        - ADA
+        - Optris
+        - КИП
+        sites:
+        - site: propribory.ru
+          priority: primary
+        - site: tinko.ru
+          priority: secondary
+        - site: vseinstrumenti.ru
+          priority: all
+        - site: dn.ru
+          priority: all
+        - site: satro-paladin.com
+          priority: all
+      instruments_automation_metering:
         name: Приборы учёта
         keywords:
         - теплосчётчик
@@ -814,8 +798,6 @@ category_map:
           priority: secondary
         - site: valtec.ru
           priority: secondary
-        - site: electro-mpo.ru
-          priority: all
         - site: vseinstrumenti.ru
           priority: all
         - site: dn.ru
@@ -828,11 +810,9 @@ category_map:
           priority: all
         - site: magazin01.ru
           priority: all
-        hard_triggers:
-        - теплосчётчик
-        - счётчик воды
-        - счётчик электроэнергии
-      security_access:
+        - site: teplopribor.рф
+          priority: all
+      instruments_automation_security_access:
         name: Безопасность и СКУД
         keywords:
         - IP-камера
@@ -858,182 +838,263 @@ category_map:
           priority: secondary
         - site: satro-paladin.com
           priority: secondary
-        - site: electro-mpo.ru
-          priority: all
         - site: vseinstrumenti.ru
           priority: all
         - site: magazin01.ru
           priority: all
-        hard_triggers:
-        - IP-камера
-        - СКУД
-        - домофон
   fire_safety:
     priority: 5
     focus: АПС, СОУЭ, пожаротушение, огнетушители
-    keywords:
-    - АПС
-    - МПП
-    - СОУЭ
-    - багор пожарный
-    - ведро пожарное
-    - гидрант
-    - гидрант пожарный
-    - головка пожар
-    - головка пожарная
-    - дренчер
-    - знак пожарной безопасности
-    - извещатель
-    - клапан дымоудаления
-    - клапан пожар
-    - клапан пожарный
-    - лом пожарный
-    - огнетушит
-    - огнетушитель
-    - оповещатель
-    - пожар
-    - пожарная сигнализация
-    - пожарный инвентарь
-    - пожарный кран
-    - предупреждающий знак
-    - рукав пожар
-    - рукав пожарный
-    - система оповещения
-    - система пожаротушения
-    - спринклер
-    - ствол пожар
-    - ствол пожарный
-    - табло выход
-    - шкаф для огнетушителя
-    - шкаф пожар
-    - шкаф пожарный
-    - шлейф сигнализации
-    - эвакуационный знак
-    sites:
-    - site: magazin01.ru
-      priority: primary
-    - site: luis.ru
-      priority: primary
-    - site: tinko.ru
-      priority: primary
-    - site: vseinstrumenti.ru
-      priority: secondary
-    - site: santech.ru
-      priority: secondary
-    hard_triggers:
-    - пожар
-    - извещатель
-    - АПС
-    - СОУЭ
-    - огнетушитель
+    subcategories:
+      fire_safety:
+        name: АПС, СОУЭ, пожаротушение, огнетушители
+        keywords:
+        - АПС
+        - МПП
+        - СОУЭ
+        - багор пожарный
+        - ведро пожарное
+        - гидрант
+        - гидрант пожарный
+        - головка пожар
+        - головка пожарная
+        - дренчер
+        - знак пожарной безопасности
+        - извещатель
+        - клапан дымоудаления
+        - клапан пожар
+        - клапан пожарный
+        - лом пожарный
+        - огнетушит
+        - огнетушитель
+        - оповещатель
+        - пожар
+        - пожарная сигнализация
+        - пожарный инвентарь
+        - пожарный кран
+        - предупреждающий знак
+        - рукав пожар
+        - рукав пожарный
+        - система оповещения
+        - система пожаротушения
+        - спринклер
+        - ствол пожар
+        - ствол пожарный
+        - табло выход
+        - шкаф для огнетушителя
+        - шкаф пожар
+        - шкаф пожарный
+        - шлейф сигнализации
+        - эвакуационный знак
+        sites:
+        - site: magazin01.ru
+          priority: primary
+        - site: luis.ru
+          priority: primary
+        - site: tinko.ru
+          priority: primary
+        - site: vseinstrumenti.ru
+          priority: secondary
+        - site: santech.ru
+          priority: secondary
   tools_general:
     priority: 6
     focus: инструменты, крепёж, изоляция, защитные покрытия
-    keywords:
-    - Energoflex
-    - K-Flex
-    - XOTPIPE
-    - МБОР
-    - анкер
-    - арматура
-    - болт
-    - гаечный
-    - гайка
-    - герметик
-    - грунтовка
-    - дюбель
-    - заглушка стальная
-    - изоляц
-    - инструмент
-    - инструмент для вентиляции
-    - инструмент для монтажа
-    - кабелерез
-    - клей
-    - краск
-    - краска
-    - крепеж
-    - кронштейн
-    - лак
-    - лен сантехнический
-    - лента
-    - лист стальной
-    - металл для крепления
-    - металлический кожух
-    - метиз
-    - мультиметр
-    - огнезащита
-    - огнезащита воздуховода
-    - огнезащитная краска
-    - окожушка
-    - опора
-    - отвод оцинкованный
-    - отвод стальной
-    - отвёртка
-    - пассатижи
-    - переход стальной
-    - подвес
-    - полоса
-    - прошивной мат
-    - рулон теплоизоляции
-    - сальниковая набивка
-    - саморез
-    - скотч
-    - стремянка
-    - теплоизоляц
-    - теплоизоляция
-    - тройник стальной
-    - уголок
-    - уплотнительная лента
-    - фланец стальной
-    - хомут
-    - цилиндр
-    - цилиндр оцинкованный
-    - цилиндр теплоизоляционный
-    - швеллер
-    - шпилька
-    - эмаль
-    - уплотнитель
-    sites:
-    - site: vseinstrumenti.ru
-      priority: primary
-    - site: satro-paladin.com
-      priority: primary
-    - site: electro-mpo.ru
-      priority: secondary
-    - site: keaz.ru
-      priority: secondary
-    - site: tinko.ru
-      priority: secondary
-    - site: luis.ru
-      priority: all
-    - site: dn.ru
-      priority: all
-    - site: vodokomfort.ru
-      priority: all
-    - site: santech.ru
-      priority: all
-    - site: valtec.ru
-      priority: all
-    - site: lunda.ru
-      priority: all
-    - site: sanext.ru
-      priority: all
-    - site: teremonline.ru
-      priority: all
-    - site: gremir.ru
-      priority: all
-    - site: ctpl.ru
-      priority: all
-    - site: dkc-msk.ru
-      priority: all
-    - site: reterma.ru
-      priority: all
-    hard_triggers: []
-priority_order:
-- cables
-- plumbing_heating
-- electrical
-- ventilation_climate
-- instruments_automation
-- fire_safety
-- tools_general
+    subcategories:
+      button_starter:
+        name: button_starter
+        keywords:
+        - button_starter
+        sites: []
+      tools_general:
+        name: инструменты, крепёж, изоляция, защитные покрытия
+        keywords:
+        - рулетка
+        - мбор
+        - анкер
+        - арматура
+        - болт
+        - гаечный
+        - гайка
+        - герметик
+        - грунтовка
+        - дюбель
+        - заглушка стальная
+        - изоляц
+        - инструмент
+        - инструмент для вентиляции
+        - инструмент для монтажа
+        - кабелерез
+        - клей
+        - краск
+        - краска
+        - крепеж
+        - кронштейн
+        - лак
+        - лен сантехнический
+        - лента
+        - лист стальной
+        - металл для крепления
+        - металлический кожух
+        - метиз
+        - мультиметр
+        - огнезащита
+        - огнезащита воздуховода
+        - огнезащитная краска
+        - окожушка
+        - опора
+        - отвод оцинкованный
+        - отвод стальной
+        - отвёртка
+        - пассатижи
+        - переход стальной
+        - подвес
+        - полоса
+        - прошивной мат
+        - рулон теплоизоляции
+        - сальниковая набивка
+        - саморез
+        - скотч
+        - стремянка
+        - теплоизоляц
+        - тройник стальной
+        - уголок
+        - уплотнительная лента
+        - фланец стальной
+        - хомут
+        - цилиндр оцинкованный
+        - цилиндр теплоизоляционный
+        - швеллер
+        - шпилька
+        - эмаль
+        - уплотнитель
+        sites:
+        - site: vseinstrumenti.ru
+          priority: primary
+        - site: satro-paladin.com
+          priority: primary
+        - site: keaz.ru
+          priority: secondary
+        - site: tinko.ru
+          priority: secondary
+        - site: luis.ru
+          priority: all
+        - site: dn.ru
+          priority: all
+        - site: vodokomfort.ru
+          priority: all
+        - site: santech.ru
+          priority: all
+        - site: valtec.ru
+          priority: all
+        - site: lunda.ru
+          priority: all
+        - site: sanext.ru
+          priority: all
+        - site: teremonline.ru
+          priority: all
+        - site: gremir.ru
+          priority: all
+        - site: ctpl.ru
+          priority: all
+        - site: dkc-msk.ru
+          priority: all
+        - site: reterma.ru
+          priority: all
+        - site: moscow.petrovich.ru
+          priority: all
+        - site: oporytrub.ru
+          priority: all
+        - site: russcvet.ru
+          priority: all
+        - site: abbro.ru
+          priority: all
+        - site: elektrickmarket.ru
+          priority: all
+        - site: obrabotkatrub.ru
+          priority: all
+  other:
+    priority: 7
+    focus: other
+    subcategories:
+      furringka:
+        name: furringka
+        keywords:
+        - furringka
+        sites: []
+      pipe_wgp_galvanized_40x2:
+        name: pipe_wgp_galvanized_40x2
+        keywords:
+        - pipe_wgp_galvanized_40x2
+        sites: []
+      shkaf_upravleniya:
+        name: shkaf_upravleniya
+        keywords:
+        - shkaf_upravleniya
+        sites: []
+      ups:
+        name: ups
+        keywords:
+        - ups
+        sites:
+        - site: satro-paladin.com
+          priority: primary
+        - site: tinko.ru
+          priority: secondary
+        - site: vseinstrumenti.ru
+          priority: secondary
+        - site: keaz.ru
+          priority: all
+        - site: chipdip.ru
+          priority: all
+      vrf_indoor_unit:
+        name: vrf_indoor_unit
+        keywords:
+        - vrf_indoor_unit
+        sites: []
+  insulation:
+    priority: 8
+    focus: изоляция для труб
+    subcategories:
+      insulation:
+        name: Изоляция для труб
+        keywords:
+        - изоляция
+        - теплоизоляция
+        - energoflex
+        - k-flex
+        - xotpipe
+        - thermaflex
+        - energomax
+        - цилиндр
+        sites:
+        - site: vseinstrumenti.ru
+          priority: primary
+        - site: stroy-mart.ru
+          priority: primary
+        - site: ctpl.ru
+          priority: all
+        - site: dkc-msk.ru
+          priority: all
+        - site: dn.ru
+          priority: all
+        - site: gremir.ru
+          priority: all
+        - site: luis.ru
+          priority: all
+        - site: lunda.ru
+          priority: all
+        - site: reterma.ru
+          priority: all
+        - site: sanext.ru
+          priority: all
+        - site: santech.ru
+          priority: all
+        - site: teremonline.ru
+          priority: all
+        - site: valtec.ru
+          priority: all
+        - site: vodokomfort.ru
+          priority: all
+        - site: kvent.ru
+          priority: all

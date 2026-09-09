@@ -72,7 +72,7 @@
 - `src/graph_engine.py` — SQLite + in-memory dicts
 - `src/memory_manager.py` — CRUD прослойка с дедупликацией и intent-классификацией
 - Таблицы: product_types, sites, product_sites, approaches, confirmed_prices, hints, concepts, concept_edges
-- YAML загружается как seed через `engine.load_yaml_seed()` (INSERT OR REPLACE, обновляет имена)
+- YAML загружается как seed через `engine.load_yaml_seed()` (INSERT OR REPLACE, обновляет имена; product_type_id проверяется в БД перед удвоением префикса `category_subcategory`)
 - Тип `unknown` исключён из `_load_indexes` — не показывается в UI
 - `classify_product_type()` возвращает "unknown" как fallback (существует только как значение, не как запись в БД)
 
@@ -124,7 +124,7 @@ C:\Projects\Pricer_Vision\
 │   ├── PLAN_AGENT_DEGRADATION.md      # План: деградация агента 26.08, фазы 1–5 (память, MCP, контекст)
 │   └── PLAN_AGENT_DEGRADATION_FIX2.md # План: реюз цен, деградация запроса, защита моделей C10/C20
 ├── config/
-│   ├── categories_and_sites.yaml # Seed данные + hints + русские имена
+│   ├── categories_and_sites.yaml # Seed данные: category_map → subcategories → sites (33 типа, 206 привязок)
 │   ├── settings.yaml             # Все runtime-константы
 │   ├── matching_rules.yaml       # Правила сопоставления наименований (Фаза 8)
 │   ├── stealth.js                # Антидетект (12 патчей)

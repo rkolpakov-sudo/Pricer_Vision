@@ -1120,7 +1120,16 @@ class GraphEngine:
                     self._register_sites(product_id, cat_data.get("sites", []), excluded)
                     continue
                 for subcat_key, subcat_data in subs.items():
-                    product_id = f"{cat_name}_{subcat_key}"
+                    # Use subcat_key as product_id if it already starts with category
+                    # prefix OR already exists as a product_type in the database
+                    if subcat_key.startswith(f"{cat_name}_"):
+                        product_id = subcat_key
+                    elif self._conn.execute(
+                        "SELECT 1 FROM product_types WHERE id = ?", (subcat_key,)
+                    ).fetchone():
+                        product_id = subcat_key
+                    else:
+                        product_id = f"{cat_name}_{subcat_key}"
                     product_name = subcat_data.get("name") or subcat_data.get("focus", subcat_key)
                     keywords_list = subcat_data.get("keywords", [])
                     keywords_str = ", ".join(keywords_list) if keywords_list else product_name

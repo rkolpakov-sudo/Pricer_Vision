@@ -1,5 +1,42 @@
 # State Log
 
+## 2026-09-09 — FIX: исправление БД (proconsim/ventilyacia-top) + синхронизация YAML из БД
+
+### Проблема
+1. Битая запись `https://proconsim.ru/` (name=`https://proconsim.ru/`, base_url=`https://https://proconsim.ru/`)
+   привязана к plumbing_heating_fittings и plumbing_heating_pipes. Корректная `proconsim.ru` — без ссылок.
+2. `ventilyacia-top.ru` (вентиляция) ошибочно привязан к electrical_switchgear (Коммутация).
+3. YAML (31 сайт) сильно устарел относительно БД (90 сайтов, 51 сирота).
+
+### Фикс
+
+**БД:**
+- `product_sites`: перенесены ссылки с `https://proconsim.ru/` → `proconsim.ru` (2 строки).
+- `sites`: удалена битая запись `https://proconsim.ru/`.
+- `product_sites`: удалена связь `electrical_switchgear` → `ventilyacia-top.ru`.
+- `sites`: имя `ventilyacia-top.ru` очищено от ведущего пробела.
+
+**YAML:**
+- Полная пересборка `config/categories_and_sites.yaml` из текущего состояния БД.
+- 33 product_type, 206 привязок site→type (9 категорий, подкатегории).
+- Сиротские сайты распределены по confirmed_prices, ventilyacia-top.ru исключён из orphan-распределения.
+
+**load_yaml_seed (graph_engine.py):**
+- Исправлен баг: `product_id` теперь проверяется в БД перед удвоением префикса.
+- `_upsert_seeded_type` не перезаписывает `source='user'` типы (защита от YAML).
+
+**Очистка:**
+- Удалены 24 дублированных product_type (удвоенные префиксы типа `plumbing_heating_plumbing_heating_fittings`).
+- Удалены `electrical_terminal_block_dkc`, `tools_general_button_starter`, `plumbing_heating_pipe_water_gas_galvanized`.
+
+### Результат
+- proconsim.ru: привязан к Фитингам и Трубам (primary).
+- ventilyacia-top.ru: нет привязок к product_types.
+- 33 product_type, 206 product_site связей, 89 сайтов.
+- 58 + 191 = 249 тестов пройдены.
+
+---
+
 ## 2026-09-08 — FIX: пакетный перезапуск отмеченных зависал после первой строки
 
 ### Симптом (лог 17:16-17:26)
