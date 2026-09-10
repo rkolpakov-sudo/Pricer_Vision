@@ -569,3 +569,55 @@ class TestPhase0ModelProtection:
         assert mismatch_kind(spec, h1, {'article': '013G7027'}) == 'descriptive_only'
         # без артикула — key (как было раньше)
         assert mismatch_kind(spec, h1) == 'key'
+
+
+class TestExpandSearchQuery:
+    """Tests for expand_search_query (synonym expansion)."""
+
+    def test_no_synonyms(self):
+        from src.approach_relevance import expand_search_query
+        result = expand_search_query("Воздушный клапан Ф160", "vent_clap", [])
+        assert result == "Воздушный клапан Ф160"
+
+    def test_none_synonyms(self):
+        from src.approach_relevance import expand_search_query
+        result = expand_search_query("Воздушный клапан Ф160", "vent_clap", None)
+        assert result == "Воздушный клапан Ф160"
+
+    def test_single_synonym(self):
+        from src.approach_relevance import expand_search_query
+        result = expand_search_query("Воздушный клапан Ф160", "vent_clap",
+                                     ["Дроссель-клапан Ф160"])
+        assert "Воздушный клапан Ф160" in result
+        assert "Дроссель-клапан Ф160" in result
+        assert "OR" in result
+
+    def test_multiple_synonyms(self):
+        from src.approach_relevance import expand_search_query
+        result = expand_search_query("Клапан ВК-1", "vent_clap",
+                                     ["Клапан воздушный ВК-1", "ВК-1"])
+        assert "OR" in result
+        assert "Клапан воздушный ВК-1" in result
+        assert "ВК-1" in result
+
+    def test_deduplicates_original(self):
+        from src.approach_relevance import expand_search_query
+        # Синоним, совпадающий с оригиналом — не должен дублироваться
+        result = expand_search_query("Воздушный клапан", "vent_clap",
+                                     ["Воздушный клапан"])
+        assert "OR" not in result
+        assert result == "Воздушный клапан"
+
+    def test_size_added_to_synonym(self):
+        from src.approach_relevance import expand_search_query
+        result = expand_search_query("Клапан Ду15", "vent_clap",
+                                     ["Дроссель-клапан"])
+        assert "Ду15" in result
+
+    def test_max_three_synonyms(self):
+        from src.approach_relevance import expand_search_query
+        result = expand_search_query("Клапан", "vent_clap",
+                                     ["Син1", "Син2", "Син3", "Син4"])
+        # Оригинал + 3 синонима = 3 OR
+        assert result.count("OR") == 3
+        assert "Син4" not in result

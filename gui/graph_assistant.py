@@ -2359,6 +2359,159 @@ class HelpPage(QWidget):
         layout.addWidget(self.browser, 1)
 
 
+class SynonymPage(QWidget):
+    """Управление синонимами: одинаковые названия для одного типа товара."""
+
+    def __init__(self, panel):
+        super().__init__()
+        self._panel = panel
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(16, 12, 16, 12)
+        layout.setSpacing(12)
+
+        title = QLabel("Синонимы товаров")
+        title.setObjectName("section")
+        layout.addWidget(title)
+
+        desc = QLabel(
+            "Синонимы позволяют агенту находить одинаковые товары с разными "
+            "названиями (например: «Воздушный клапан» = «Дроссель-клапан»)."
+        )
+        desc.setWordWrap(True)
+        layout.addWidget(desc)
+
+        # Form: product type + spec_text + synonym
+        gb = QFrame()
+        gf = QFormLayout(gb)
+        self.product_combo = QComboBox()
+        self.product_combo.setEditable(True)
+        self.product_combo.setMinimumWidth(200)
+        gf.addRow("Тип товара:", self.product_combo)
+
+        self.spec_text_input = QLineEdit()
+        self.spec_text_input.setPlaceholderText("Оригинальное название (напр. Воздушный клапан Ф160)")
+        gf.addRow("Оригинал:", self.spec_text_input)
+
+        self.synonym_input = QLineEdit()
+        self.synonym_input.setPlaceholderText("Синоним (напр. Дроссель-клапан Ф160)")
+        gf.addRow("Синоним:", self.synonym_input)
+
+        btn_row = QHBoxLayout()
+        add_btn = QPushButton("Добавить синоним")
+        add_btn.setObjectName("primary")
+        add_btn.clicked.connect(self._add)
+        btn_row.addWidget(add_btn)
+        show_all_btn = QPushButton("Показать все")
+        show_all_btn.clicked.connect(self._show_all)
+        btn_row.addWidget(show_all_btn)
+        gf.addRow(btn_row)
+        layout.addWidget(gb)
+
+        # Table
+        self.table = QTableWidget()
+        self.table.setColumnCount(5)
+        self.table.setHorizontalHeaderLabels(["ID", "Тип", "Оригинал", "Синоним", "Источник"])
+        self.table.horizontalHeader().setStretchLastSection(True)
+        self.table.setSelectionBehavior(QTableWidget.SelectRows)
+        self.table.setEditTriggers(QTableWidget.NoEditTriggers)
+        self.table.doubleClicked.connect(self._on_row_selected)
+        layout.addWidget(self.table, 1)
+
+        # Delete button
+        btn_row2 = QHBoxLayout()
+        self.delete_btn = QPushButton("Удалить выбранный синоним")
+        self.delete_btn.setObjectName("danger")
+        self.delete_btn.setEnabled(False)
+        self.delete_btn.clicked.connect(self._delete)
+        btn_row2.addWidget(self.delete_btn)
+        btn_row2.addStretch()
+        layout.addLayout(btn_row2)
+
+        self.table.selectionModel().selectionChanged.connect(
+            lambda sel: self.delete_btn.setEnabled(len(sel.indexes()) > 0)
+        )
+
+        self._all_synonyms: list[dict] = []
+
+    def refresh_combo(self, products: dict):
+        current = self.product_combo.currentData()
+        self.product_combo.blockSignals(True)
+        self.product_combo.clear()
+        for pid, pdata in sorted(products.items()):
+            name = pdata.get("name", pid)
+            self.product_combo.addItem(name, pid)
+        if current:
+            idx = self.product_combo.findData(current)
+            if idx >= 0:
+                self.product_combo.setCurrentIndex(idx)
+        self.product_combo.blockSignals(False)
+
+    def sync_combo(self, pid: str):
+        if pid:
+            idx = self.product_combo.findData(pid)
+            if idx >= 0:
+                self.product_combo.setCurrentIndex(idx)
+
+    def _add(self):
+        mm = self._panel.mm
+        pt = self._panel.resolve_pt(self.product_combo)
+        if not pt:
+            QMessageBox.warning(self, "Ошибка", "Выберите тип товара")
+            return
+        spec = self.spec_text_input.text().strip()
+        syn = self.synonym_input.text().strip()
+        if not spec or not syn:
+            QMessageBox.warning(self, "Ошибка", "Заполните оба поля: «Оригинал» и «Синоним»")
+            return
+        mm.add_synonym(pt, spec, syn, source="user")
+        self.spec_text_input.clear()
+        self.synonym_input.clear()
+        self._show_all()
+
+    def _show_all(self):
+        mm = self._panel.mm
+        pt = self._panel.resolve_pt(self.product_combo)
+        if not pt:
+            # Показать все синонимы
+            from src.graph_engine import GraphEngine
+            engine = mm._engine
+            self._all_synonyms = []
+            for row in engine._conn.execute(
+                "SELECT * FROM product_synonyms ORDER BY product_type_id, spec_text"
+            ).fetchall():
+                self._all_synonyms.append(dict(row))
+        else:
+            self._all_synonyms = mm.get_all_synonyms(pt)
+        self._populate_table()
+
+    def _populate_table(self):
+        self.table.setRowCount(len(self._all_synonyms))
+        for i, syn in enumerate(self._all_synonyms):
+            self.table.setItem(i, 0, QTableWidgetItem(str(syn.get("id", ""))))
+            self.table.setItem(i, 1, QTableWidgetItem(syn.get("product_type_id", "")))
+            self.table.setItem(i, 2, QTableWidgetItem(syn.get("spec_text", "")))
+            self.table.setItem(i, 3, QTableWidgetItem(syn.get("synonym", "")))
+            self.table.setItem(i, 4, QTableWidgetItem(syn.get("source", "")))
+        self.table.resizeColumnsToContents()
+
+    def _on_row_selected(self):
+        self.delete_btn.setEnabled(True)
+
+    def _delete(self):
+        rows = self.table.selectionModel().selectedRows()
+        if not rows:
+            return
+        idx = rows[0].row()
+        syn = self._all_synonyms[idx]
+        if not _confirm(self, "Удаление синоним",
+                        f"Удалить синоним «{syn.get('synonym', '')}» для «{syn.get('spec_text', '')}»?"):
+            return
+        mm = self._panel.mm
+        mm.delete_synonym(syn["id"])
+        self._all_synonyms.pop(idx)
+        self._populate_table()
+
+
 class AssistantToolPanel(QWidget):
     TOOLS = [
         ("Справка", HelpPage),
@@ -2369,6 +2522,7 @@ class AssistantToolPanel(QWidget):
         ("Цены", PricePage),
         ("Типы товаров", ProductTypePage),
         ("Категории", CategoriesPage),
+        ("Синонимы", SynonymPage),
         ("Подсказки", HintPage),
         ("Коррекция цен", CorrectionPage),
         ("Обучение", StudyPage),

@@ -26,6 +26,7 @@ from src.approach_relevance import (
     approach_relevant, product_name_matches, product_name_matches_ignore_brand,
     missing_required_tokens, normalize_search_text, is_standard_reference,
     search_key_tokens, mismatch_kind, model_designators, _size_key,
+    expand_search_query,
 )
 from src.session_facts import RowFacts, SessionFacts
 
@@ -596,6 +597,19 @@ async def process_row(
     if search_text != spec_text:
         logger.info("Search text normalized: '%s' -> '%s' (незначимые фразы убраны из поиска)",
                     spec_text[:60], search_text[:60])
+
+    # Синонимы: расширяем поисковый запрос для лучшего покрытия
+    synonyms_for_search: list[str] = []
+    if product_type and product_type != UNKNOWN_PT:
+        try:
+            synonyms_for_search = memory_manager.get_synonyms_for_search(product_type, search_text)
+        except Exception:
+            pass
+    search_text_expanded = expand_search_query(search_text, product_type, synonyms_for_search)
+    if search_text_expanded != search_text:
+        logger.info("Search text expanded with synonyms: '%s' -> '%s'",
+                    search_text[:60], search_text_expanded[:80])
+
     approaches = [] if not use_approaches else (
         memory_manager.get_all_approaches(product_type) if product_type != UNKNOWN_PT else memory_manager.get_all_approaches_flat()
     )
@@ -741,7 +755,7 @@ async def process_row(
         except Exception:
             pass
 
-    context = _build_context(search_text, product_type, approaches, guide_prices, sites, hints, product_data, site_guides, concepts, spec_meta,
+    context = _build_context(search_text_expanded, product_type, approaches, guide_prices, sites, hints, product_data, site_guides, concepts, spec_meta,
                              use_site_ranking=use_site_ranking, site_ranking=site_ranking,
                              use_approaches=use_approaches, session_facts=session_facts)
 

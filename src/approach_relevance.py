@@ -709,3 +709,49 @@ def _product_matches_core(spec_text: str, found_name: str, check_brand: bool = T
             return False
 
     return True
+
+
+def expand_search_query(spec_text: str, product_type_id: str,
+                        synonyms: list[str] | None = None) -> str:
+    """Расширить поисковый запрос синонимами.
+
+    Если для данного product_type_id есть синонимы — формирует расширенный
+    запрос с OR-вариантами для поисковой строки.
+
+    Пример:
+        spec_text = "Воздушный клапан общего назначения Ф160"
+        synonyms = ["Дроссель-клапан"]
+        → "Воздушный клапан общего назначения Ф160 OR Дроссель-клапан Ф160"
+
+    Если синонимов нет — возвращает исходный spec_text без изменений.
+    """
+    if not synonyms:
+        return spec_text
+
+    # Извлекаем размер/параметр из spec_text для добавления к синонимам
+    size_match = re.search(
+        r"(?:Ф|Ø|ду|Ду|DN|d)\s*\d+|"
+        r"\d+\s*[хx×]\s*\d+|"
+        r"\d+\s*мм",
+        spec_text, re.IGNORECASE
+    )
+    size_tail = f" {size_match.group()}" if size_match else ""
+
+    # Убираем дубли и исходный текст из синонимов
+    spec_lower = spec_text.lower().strip()
+    unique_synonyms = []
+    for s in synonyms:
+        s_clean = s.strip()
+        if s_clean and s_clean.lower() != spec_lower:
+            unique_synonyms.append(s_clean)
+
+    if not unique_synonyms:
+        return spec_text
+
+    # Формируем запрос: исходный + OR-синонимы (с размером, если есть)
+    parts = [spec_text]
+    for syn in unique_synonyms[:3]:  # максимум 3 синонима
+        syn_with_size = syn + size_tail if size_tail and size_tail not in syn else syn
+        parts.append(syn_with_size)
+
+    return " OR ".join(parts)

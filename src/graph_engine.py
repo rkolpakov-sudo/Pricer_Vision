@@ -175,6 +175,16 @@ CREATE TABLE IF NOT EXISTS concept_edges (
     created_at TEXT DEFAULT (datetime('now')),
     PRIMARY KEY (child_name, parent_name, relation)
 );
+
+CREATE TABLE IF NOT EXISTS product_synonyms (
+    id INTEGER PRIMARY KEY,
+    product_type_id TEXT NOT NULL,
+    spec_text TEXT NOT NULL,
+    synonym TEXT NOT NULL,
+    source TEXT DEFAULT 'user',
+    created_at TEXT DEFAULT (datetime('now')),
+    UNIQUE(product_type_id, spec_text, synonym)
+);
 """
 
 
@@ -1489,4 +1499,79 @@ class GraphEngine:
             self._conn.commit()
         self._built = False
         return removed
+
+    # ── Synonyms ──
+
+    def save_synonym(self, product_type_id: str, spec_text: str, synonym: str,
+                     source: str = "user") -> int:
+        """Сохранить синоним. Возвращает id записи."""
+        self.build()
+        with self._lock:
+            cur = self._conn.execute(
+                """INSERT OR REPLACE INTO product_synonyms
+                   (product_type_id, spec_text, synonym, source)
+                   VALUES (?, ?, ?, ?)""",
+                (product_type_id, spec_text, synonym, source)
+            )
+            self._conn.commit()
+            return cur.lastrowid
+
+    def get_synonyms(self, product_type_id: str, spec_text: str) -> list[dict]:
+        """Возвращает синонимы для конкретного spec_text внутри типа."""
+        self.build()
+        rows = self._conn.execute(
+            "SELECT * FROM product_synonyms WHERE product_type_id = ? AND spec_text = ?",
+            (product_type_id, spec_text)
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+    def get_all_synonyms(self, product_type_id: str) -> list[dict]:
+        """Возвращает все синонимы для типа товара."""
+        self.build()
+        rows = self._conn.execute(
+            "SELECT * FROM product_synonyms WHERE product_type_id = ? ORDER BY spec_text, synonym",
+            (product_type_id,)
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+    def get_synonyms_for_search(self, product_type_id: str, spec_text: str) -> list[str]:
+        """Возвращает список синонимов для подстановки в поисковый запрос.
+
+        Ищет точные совпадения spec_text И частичные (spec_text является
+        подстрокой сохранённого или наоборот).
+        """
+        self.build()
+        rows = self._conn.execute(
+            "SELECT synonym FROM product_synonyms WHERE product_type_id = ?",
+            (product_type_id,)
+        ).fetchall()
+        spec_low = spec_text.lower().strip()
+        result = []
+        for r in rows:
+            syn = r["synonym"]
+            if syn:
+                result.append(syn)
+        return result
+
+    def delete_synonym(self, synonym_id: int) -> bool:
+        """Удалить синоним по id."""
+        self.build()
+        with self._lock:
+            cur = self._conn.execute(
+                "DELETE FROM product_synonyms WHERE id = ?", (synonym_id,)
+            )
+            self._conn.commit()
+            return cur.rowcount > 0
+
+    def find_matching_synonym(self, product_type_id: str, text: str) -> str | None:
+        """Проверяет, есть ли text среди синонимов данного типа.
+
+        Возвращает оригинальный spec_text, если text найден как синоним.
+        """
+        self.build()
+        row = self._conn.execute(
+            "SELECT spec_text FROM product_synonyms WHERE product_type_id = ? AND synonym = ?",
+            (product_type_id, text)
+        ).fetchone()
+        return row["spec_text"] if row else None
 

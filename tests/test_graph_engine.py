@@ -604,3 +604,79 @@ class TestRowPurge:
         assert n >= 1
 
 
+class TestSynonyms:
+    """Tests for the product_synonyms table and synonym CRUD."""
+
+    def _seed(self, engine):
+        engine.save_product_type("vent_clap", "Воздушные клапаны", source="test")
+        engine.save_product_type("drossel", "Дроссель-клапаны", source="test")
+
+    def test_table_exists(self, graph_engine):
+        row = graph_engine._conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='product_synonyms'"
+        ).fetchone()
+        assert row is not None
+
+    def test_save_and_get_synonyms(self, graph_engine):
+        self._seed(graph_engine)
+        sid = graph_engine.save_synonym("vent_clap", "Воздушный клапан Ф160", "Дроссель-клапан Ф160", "user")
+        assert sid > 0
+
+        syns = graph_engine.get_synonyms("vent_clap", "Воздушный клапан Ф160")
+        assert len(syns) == 1
+        assert syns[0]["synonym"] == "Дроссель-клапан Ф160"
+        assert syns[0]["source"] == "user"
+
+    def test_get_all_synonyms(self, graph_engine):
+        self._seed(graph_engine)
+        graph_engine.save_synonym("vent_clap", "Клапан ВК-1", "Клапан воздушный ВК-1", "user")
+        graph_engine.save_synonym("vent_clap", "Клапан ВК-1", "ВК-1", "study")
+        graph_engine.save_synonym("vent_clap", "Клапан ВК-2", "ВК-2", "user")
+
+        all_syns = graph_engine.get_all_synonyms("vent_clap")
+        assert len(all_syns) == 3
+
+    def test_get_synonyms_for_search(self, graph_engine):
+        self._seed(graph_engine)
+        graph_engine.save_synonym("vent_clap", "Клапан ВК-1", "Клапан воздушный ВК-1", "user")
+        graph_engine.save_synonym("vent_clap", "Клапан ВК-1", "ВК-1", "user")
+
+        result = graph_engine.get_synonyms_for_search("vent_clap", "Клапан ВК-1")
+        assert "Клапан воздушный ВК-1" in result
+        assert "ВК-1" in result
+
+    def test_delete_synonym(self, graph_engine):
+        self._seed(graph_engine)
+        sid = graph_engine.save_synonym("vent_clap", "Клапан", "Дроссель", "user")
+        assert graph_engine.delete_synonym(sid) is True
+        assert graph_engine.get_synonyms("vent_clap", "Клапан") == []
+
+    def test_delete_nonexistent_synonym(self, graph_engine):
+        assert graph_engine.delete_synonym(99999) is False
+
+    def test_find_matching_synonym(self, graph_engine):
+        self._seed(graph_engine)
+        graph_engine.save_synonym("vent_clap", "Воздушный клапан", "Дроссель-клапан", "user")
+
+        match = graph_engine.find_matching_synonym("vent_clap", "Дроссель-клапан")
+        assert match == "Воздушный клапан"
+
+        assert graph_engine.find_matching_synonym("vent_clap", "Несуществующий") is None
+
+    def test_unique_constraint(self, graph_engine):
+        self._seed(graph_engine)
+        graph_engine.save_synonym("vent_clap", "Клапан", "Дроссель", "user")
+        # Повторный insert не падает (INSERT OR IGNORE)
+        graph_engine.save_synonym("vent_clap", "Клапан", "Дроссель", "user")
+        syns = graph_engine.get_synonyms("vent_clap", "Клапан")
+        assert len(syns) == 1
+
+    def test_multiple_types(self, graph_engine):
+        self._seed(graph_engine)
+        graph_engine.save_synonym("vent_clap", "Клапан", "Дроссель", "user")
+        graph_engine.save_synonym("drossel", "Регулятор", "Дроссель", "user")
+
+        assert len(graph_engine.get_all_synonyms("vent_clap")) == 1
+        assert len(graph_engine.get_all_synonyms("drossel")) == 1
+
+

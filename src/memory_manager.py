@@ -317,6 +317,27 @@ class MemoryManager:
     def deprecate_approach(self, approach_id: int) -> bool:
         return self._engine.deprecate_approach(approach_id)
 
+    # ── Synonyms ──
+
+    def add_synonym(self, product_type_id: str, spec_text: str, synonym: str,
+                    source: str = "user") -> int:
+        return self._engine.save_synonym(product_type_id, spec_text, synonym, source)
+
+    def get_synonyms(self, product_type_id: str, spec_text: str) -> list[dict]:
+        return self._engine.get_synonyms(product_type_id, spec_text)
+
+    def get_all_synonyms(self, product_type_id: str) -> list[dict]:
+        return self._engine.get_all_synonyms(product_type_id)
+
+    def get_synonyms_for_search(self, product_type_id: str, spec_text: str) -> list[str]:
+        return self._engine.get_synonyms_for_search(product_type_id, spec_text)
+
+    def delete_synonym(self, synonym_id: int) -> bool:
+        return self._engine.delete_synonym(synonym_id)
+
+    def find_matching_synonym(self, product_type_id: str, text: str) -> str | None:
+        return self._engine.find_matching_synonym(product_type_id, text)
+
     def delete_product_type(self, product_id: str) -> bool:
         return self._engine.delete_product_type(product_id)
 
